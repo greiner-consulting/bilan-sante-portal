@@ -4,6 +4,7 @@ import type {
   CoverageState,
   DiagnosticFact,
   FactBackedQuestion,
+  FactDimension,
   InstructionGoal,
   QuestionCandidate,
   SignalAngle,
@@ -1024,7 +1025,7 @@ ${extractedText.slice(0, 15000)}
 
         const fact: DiagnosticFact = {
           id: `seed-d${d}-${idx + 1}`,
-          dimension_primary: d,
+          dimension_primary: d as FactDimension,
           dimension_secondary: [],
           fact_type:
             d === 1
