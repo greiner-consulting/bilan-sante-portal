@@ -1,5 +1,4 @@
-import ChatPanel from "./ChatPanel";
-import TrameUploadForm from "./TrameUploadForm";
+import SessionWorkspace from "./SessionWorkspace";
 
 type Props = {
   params: Promise<{
@@ -10,16 +9,5 @@ type Props = {
 export default async function DiagnosticSessionPage({ params }: Props) {
   const { id: sessionId } = await params;
 
-  return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold">Diagnostic d’entreprise</h1>
-        <p className="text-sm text-gray-600 mt-1">Session : {sessionId}</p>
-      </div>
-
-      <TrameUploadForm sessionId={sessionId} />
-
-      <ChatPanel sessionId={sessionId} />
-    </div>
-  );
+  return <SessionWorkspace sessionId={sessionId} />;
 }

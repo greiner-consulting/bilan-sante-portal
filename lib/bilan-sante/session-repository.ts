@@ -45,7 +45,7 @@ type SessionPatch = Partial<{
   iteration: number | null;
   question_index: number;
   question_batch_json: LegacyQuestionMirror[];
-  final_objectives_json: FinalObjectiveSet | null;
+  final_objectives_json: FinalObjectiveSet;
   consolidation_json: FrozenDimensionDiagnosis[];
   diagnostic_result_json: Record<string, unknown>;
   bilan_state_json: DiagnosticSessionAggregate | null;
@@ -75,6 +75,7 @@ function mapStatus(aggregate: DiagnosticSessionAggregate): string {
     case "awaiting_trame":
       return "collected";
     case "report_ready":
+    case "completed":
       return "report_ready";
     case "dimension_iteration":
     case "iteration_validation":
@@ -95,13 +96,20 @@ function mapLegacyQuestions(questions: StructuredQuestion[]): LegacyQuestionMirr
   }));
 }
 
+function emptyFinalObjectives(): FinalObjectiveSet {
+  return {
+    header: "",
+    objectives: [],
+  };
+}
+
 function buildMirrorPatch(aggregate: DiagnosticSessionAggregate): SessionPatch {
   const questionCount = aggregate.currentWorkset?.questions.length ?? 0;
   const answeredCount = aggregate.currentWorkset?.answers.length ?? 0;
-  const safeIndex = Math.max(
-    0,
-    Math.min(answeredCount, Math.max(questionCount - 1, 0))
-  );
+  const safeIndex =
+    questionCount <= 0
+      ? 0
+      : Math.max(0, Math.min(answeredCount, questionCount - 1));
 
   return {
     status: mapStatus(aggregate),
@@ -110,7 +118,7 @@ function buildMirrorPatch(aggregate: DiagnosticSessionAggregate): SessionPatch {
     iteration: aggregate.currentIteration,
     question_index: safeIndex,
     question_batch_json: mapLegacyQuestions(aggregate.currentWorkset?.questions ?? []),
-    final_objectives_json: aggregate.finalObjectives ?? null,
+    final_objectives_json: aggregate.finalObjectives ?? emptyFinalObjectives(),
     consolidation_json: aggregate.frozenDimensions,
     bilan_state_json: deepClone(aggregate),
     updated_at: new Date().toISOString(),
@@ -221,7 +229,7 @@ export async function markSessionFailed(
       status: "failed",
       phase: "completed",
       question_batch_json: [],
-      final_objectives_json: [],
+      final_objectives_json: emptyFinalObjectives(),
       consolidation_json: [],
       diagnostic_result_json: failurePayload,
       updated_at: new Date().toISOString(),

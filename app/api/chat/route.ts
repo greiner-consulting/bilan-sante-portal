@@ -1,6 +1,7 @@
 // app/api/chat/route.ts
 
 import { NextResponse } from "next/server";
+import type { ObjectiveDecisionInput } from "@/lib/bilan-sante/objectives-builder";
 import {
   adminSupabase,
   createSupabaseServerClient,
@@ -12,6 +13,12 @@ import {
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+type JsonRecord = Record<string, unknown>;
+
+function isRecord(value: unknown): value is JsonRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 function isBypass() {
   return (
@@ -41,18 +48,101 @@ async function getUserId(): Promise<string> {
   return user.id;
 }
 
-function normalizeIncomingMessage(raw: unknown) {
+function normalizeIncomingMessage(raw: unknown): string {
   return String(raw ?? "").trim();
+}
+
+function isObjectiveDecisionStatus(
+  value: unknown
+): value is ObjectiveDecisionInput["status"] {
+  return value === "validated" || value === "adjusted" || value === "refused";
+}
+
+function normalizeOptionalText(value: unknown): string | undefined {
+  const text = String(value ?? "").trim();
+  return text.length > 0 ? text : undefined;
+}
+
+function normalizeObjectiveDecision(
+  value: unknown
+): ObjectiveDecisionInput | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const objectiveId = normalizeOptionalText(value.objectiveId);
+  const status = value.status;
+
+  if (!objectiveId || !isObjectiveDecisionStatus(status)) {
+    return null;
+  }
+
+  return {
+    objectiveId,
+    status,
+    adjustedLabel: normalizeOptionalText(value.adjustedLabel),
+    adjustedIndicator: normalizeOptionalText(value.adjustedIndicator),
+    adjustedDueDate: normalizeOptionalText(value.adjustedDueDate),
+    adjustedPotentialGain: normalizeOptionalText(value.adjustedPotentialGain),
+    adjustedQuickWin: normalizeOptionalText(value.adjustedQuickWin),
+  };
+}
+
+function normalizeObjectiveDecisions(
+  raw: unknown
+): ObjectiveDecisionInput[] | undefined {
+  if (raw == null) {
+    return undefined;
+  }
+
+  if (!Array.isArray(raw)) {
+    throw new Error("INVALID_OBJECTIVE_DECISIONS");
+  }
+
+  const normalized = raw
+    .map((item) => normalizeObjectiveDecision(item))
+    .filter(Boolean) as ObjectiveDecisionInput[];
+
+  if (normalized.length !== raw.length) {
+    throw new Error("INVALID_OBJECTIVE_DECISIONS");
+  }
+
+  return normalized;
+}
+
+async function readJsonBody(req: Request): Promise<JsonRecord> {
+  try {
+    const body = (await req.json()) as unknown;
+    if (!isRecord(body)) {
+      throw new Error("INVALID_JSON_BODY");
+    }
+    return body;
+  } catch {
+    throw new Error("INVALID_JSON_BODY");
+  }
+}
+
+function errorStatusFor(message: string): number {
+  switch (message) {
+    case "UNAUTHENTICATED":
+      return 401;
+    case "TRAME_NOT_INGESTED":
+    case "INVALID_JSON_BODY":
+    case "INVALID_OBJECTIVE_DECISIONS":
+      return 400;
+    default:
+      return 500;
+  }
 }
 
 export async function POST(req: Request) {
   try {
-    const body = await req.json();
-    const sessionId = String(body?.sessionId ?? "").trim();
-    const rawMessage = normalizeIncomingMessage(body?.message);
-    const objectiveDecisions = Array.isArray(body?.objectiveDecisions)
-      ? body.objectiveDecisions
-      : undefined;
+    const body = await readJsonBody(req);
+    const sessionId = String(body.sessionId ?? "").trim();
+    const rawMessage = normalizeIncomingMessage(body.message);
+    const objectiveDecisions = normalizeObjectiveDecisions(
+      body.objectiveDecisions
+    );
 
     if (!sessionId) {
       return NextResponse.json(
@@ -120,16 +210,14 @@ export async function POST(req: Request) {
       // format direct nouveau noyau
       ...payload,
     });
-  } catch (e: any) {
-    const msg = e?.message ?? "Unknown error";
-    const code =
-      msg === "UNAUTHENTICATED"
-        ? 401
-        : msg === "TRAME_NOT_INGESTED"
-        ? 400
-        : 500;
+  } catch (e: unknown) {
+    const message =
+      e instanceof Error && e.message ? e.message : "Unknown error";
 
-    return NextResponse.json({ ok: false, error: msg }, { status: code });
+    return NextResponse.json(
+      { ok: false, error: message },
+      { status: errorStatusFor(message) }
+    );
   }
 }
 
