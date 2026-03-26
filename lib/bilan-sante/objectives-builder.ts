@@ -1,16 +1,18 @@
 // lib/bilan-sante/objectives-builder.ts
 
-import { FINAL_OBJECTIVES_HEADER, dimensionTitle, type DimensionId } from "@/lib/bilan-sante/protocol";
 import type {
-  DiagnosticSessionAggregate,
   FinalObjective,
   FinalObjectiveSet,
   FrozenDimensionDiagnosis,
+  ObjectiveSeed,
 } from "@/lib/bilan-sante/session-model";
+import { FINAL_OBJECTIVES_HEADER, dimensionTitle } from "@/lib/bilan-sante/protocol";
+
+export type ObjectiveDecisionStatus = "validated" | "adjusted" | "refused";
 
 export type ObjectiveDecisionInput = {
   objectiveId: string;
-  status: "validated" | "adjusted" | "refused";
+  status: ObjectiveDecisionStatus;
   adjustedLabel?: string;
   adjustedIndicator?: string;
   adjustedDueDate?: string;
@@ -18,136 +20,249 @@ export type ObjectiveDecisionInput = {
   adjustedQuickWin?: string;
 };
 
-function strongestZone(frozen: FrozenDimensionDiagnosis) {
-  return frozen.unmanagedZones[0] ?? {
-    constat: frozen.consolidatedFindings[0],
-    risqueManagerial:
-      "Risque managérial à préciser à partir du diagnostic gelé de la dimension.",
-    consequence:
-      "Conséquence économique ou opérationnelle à expliciter prudemment avec les données disponibles.",
-  };
+const DEFAULT_OBJECTIVE_OWNER = "Dirigeant / responsable de dimension";
+const DEFAULT_DUE_DATE = "À définir avec le dirigeant";
+const DEFAULT_POTENTIAL_GAIN =
+  "Fourchette prudente à estimer lors de l’itération finale selon données disponibles";
+
+function normalizeText(value: unknown): string {
+  return String(value ?? "").replace(/\s+/g, " ").trim();
 }
 
-function defaultOwner(dimensionId: DimensionId): string {
-  if (dimensionId === 1) return "Dirigeant / Responsable RH / Encadrement";
-  if (dimensionId === 2) return "Dirigeant / Responsable commercial";
-  if (dimensionId === 3) return "Dirigeant / Responsable offres / commerce";
-  return "Dirigeant / Responsable opérationnel";
-}
-
-function resultObjectiveLabel(frozen: FrozenDimensionDiagnosis): string {
-  const zone = strongestZone(frozen);
-
-  switch (frozen.dimensionId) {
-    case 1:
-      return `Réduire la dépendance de l’organisation à des arbitrages non sécurisés en élevant le niveau réel de maîtrise des rôles, relais et capacités critiques exposés par : ${zone.constat}`;
-    case 2:
-      return `Accroître la part de croissance réellement rentable en sécurisant le ciblage, le déploiement commercial et la visibilité pipeline dégradés par : ${zone.constat}`;
-    case 3:
-      return `Élever la part d’affaires vendues avec une marge réellement maîtrisée en réduisant les écarts issus de : ${zone.constat}`;
-    case 4:
-      return `Réduire les dérives d’exécution qui dégradent qualité, marge, cash ou productivité à partir de la fragilité révélée par : ${zone.constat}`;
-    default:
-      return `Réduire l’exposition de la dimension à la zone non pilotée dominante : ${zone.constat}`;
+function normalizeEvidenceSummary(value: unknown): string {
+  if (Array.isArray(value)) {
+    return normalizeText(value.join(" "));
   }
+
+  return normalizeText(value);
 }
 
-function keyIndicator(frozen: FrozenDimensionDiagnosis): string {
-  switch (frozen.dimensionId) {
-    case 1:
-      return "Taux de couverture des rôles critiques / stabilité des relais / incidents liés au flou de responsabilités";
-    case 2:
-      return "Taux de transformation rentable / visibilité pipeline / concentration du portefeuille";
-    case 3:
-      return "Part des affaires vendues avec marge conforme à la cible / écart prix vendu vs coût réel";
-    case 4:
-      return "Taux de dérive opérationnelle / tenue de marge / incidents qualité ou productivité";
-    default:
-      return "Indicateur clé de maîtrise de la zone non pilotée dominante";
-  }
+function truncate(value: string, max = 180): string {
+  const text = normalizeText(value);
+  if (text.length <= max) return text;
+  return `${text.slice(0, max - 1).trim()}…`;
 }
 
-function defaultDueDate(frozen: FrozenDimensionDiagnosis): string {
-  if (frozen.score <= 2) return "90 jours";
-  if (frozen.score === 3) return "120 jours";
-  return "180 jours";
-}
+function uniqueById<T extends { id: string }>(items: T[]): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
 
-function potentialGain(frozen: FrozenDimensionDiagnosis): string {
-  switch (frozen.dimensionId) {
-    case 1:
-      return "Fourchette prudente : gain potentiel surtout indirect, de niveau modéré à significatif sur continuité d’exécution, qualité de décision et tenue des engagements, sous hypothèses explicites.";
-    case 2:
-      return "Fourchette prudente : gain potentiel modéré à significatif sur croissance rentable et sélectivité commerciale, à préciser avec données disponibles.";
-    case 3:
-      return "Fourchette prudente : gain potentiel significatif sur marge d’affaires, sélectivité et protection du résultat, sans chiffrage inventé.";
-    case 4:
-      return "Fourchette prudente : gain potentiel modéré à significatif sur marge, cash, qualité et productivité, à objectiver par ordres de grandeur.";
-    default:
-      return "Fourchette prudente : gain potentiel à préciser avec hypothèses explicites et données disponibles.";
-  }
-}
-
-function gainHypotheses(frozen: FrozenDimensionDiagnosis): string[] {
-  const zone = strongestZone(frozen);
-
-  return [
-    "Aucun chiffre précis n’est inventé.",
-    "La quantification doit être exprimée en fourchette prudente / ordre de grandeur.",
-    `La fourchette s’appuie d’abord sur la conséquence probable suivante : ${zone.consequence}`,
-    `La cause racine dominante retenue pour cette dimension est : ${frozen.dominantRootCause}`,
-  ];
-}
-
-function quickWin(frozen: FrozenDimensionDiagnosis): string {
-  const zone = strongestZone(frozen);
-
-  switch (frozen.dimensionId) {
-    case 1:
-      return `Sécuriser immédiatement le point d’exposition suivant : ${zone.constat}`;
-    case 2:
-      return `Rendre visible en comité de pilotage le point suivant : ${zone.constat}`;
-    case 3:
-      return `Bloquer rapidement la dérive la plus exposante : ${zone.constat}`;
-    case 4:
-      return `Mettre sous revue rapprochée le point suivant : ${zone.constat}`;
-    default:
-      return `Traiter prioritairement : ${zone.constat}`;
-  }
-}
-
-function buildObjective(frozen: FrozenDimensionDiagnosis, index: number): FinalObjective {
-  return {
-    id: `obj-d${frozen.dimensionId}-${index}`,
-    dimensionId: frozen.dimensionId,
-    objectiveLabel: resultObjectiveLabel(frozen),
-    owner: defaultOwner(frozen.dimensionId),
-    keyIndicator: keyIndicator(frozen),
-    dueDate: defaultDueDate(frozen),
-    potentialGain: potentialGain(frozen),
-    gainHypotheses: gainHypotheses(frozen),
-    validationStatus: "proposed",
-    quickWin: quickWin(frozen),
-  };
-}
-
-function dedupeByDimension(frozenDimensions: FrozenDimensionDiagnosis[]): FrozenDimensionDiagnosis[] {
-  const seen = new Set<number>();
-  const out: FrozenDimensionDiagnosis[] = [];
-
-  for (const frozen of [...frozenDimensions].sort((a, b) => a.dimensionId - b.dimensionId)) {
-    if (seen.has(frozen.dimensionId)) continue;
-    seen.add(frozen.dimensionId);
-    out.push(frozen);
+  for (const item of items) {
+    if (seen.has(item.id)) continue;
+    seen.add(item.id);
+    out.push(item);
   }
 
   return out;
 }
 
-export function buildFinalObjectiveSet(session: DiagnosticSessionAggregate): FinalObjectiveSet {
-  const frozenDimensions = dedupeByDimension(session.frozenDimensions);
+function uniqueStrings(items: string[]): string[] {
+  return [...new Set(items.map((item) => normalizeText(item)).filter(Boolean))];
+}
 
-  const objectives = frozenDimensions.map((frozen, index) => buildObjective(frozen, index + 1));
+function buildFallbackIndicator(frozen: FrozenDimensionDiagnosis): string {
+  const text = normalizeText(
+    [
+      frozen.dominantRootCause,
+      ...(frozen.unmanagedZones ?? []).map((zone) => zone.constat),
+      ...(frozen.consolidatedFindings ?? []),
+    ].join(" ")
+  ).toLowerCase();
+
+  if (
+    text.includes("commercial") ||
+    text.includes("marché") ||
+    text.includes("marche") ||
+    text.includes("pipeline") ||
+    text.includes("opportunité") ||
+    text.includes("opportunite")
+  ) {
+    return "Taux de transformation, volume d’opportunités actives, marge des affaires signées";
+  }
+
+  if (
+    text.includes("prix") ||
+    text.includes("marge") ||
+    text.includes("devis") ||
+    text.includes("rentabilité") ||
+    text.includes("rentabilite")
+  ) {
+    return "Écart prix vendu / coût réel, marge à affaire, taux de dérive devis";
+  }
+
+  if (
+    text.includes("cash") ||
+    text.includes("trésorerie") ||
+    text.includes("tresorerie") ||
+    text.includes("facturation") ||
+    text.includes("recouvrement")
+  ) {
+    return "Prévision de cash, encours, délai de facturation et de recouvrement";
+  }
+
+  if (
+    text.includes("rh") ||
+    text.includes("organisation") ||
+    text.includes("équipe") ||
+    text.includes("equipe") ||
+    text.includes("responsabilité") ||
+    text.includes("responsabilite")
+  ) {
+    return "Couverture des rôles clés, stabilité des équipes, niveau de dépendance sur personnes clés";
+  }
+
+  return "Indicateur de maîtrise du thème, fréquence de revue, taux de traitement des écarts";
+}
+
+function buildFallbackQuickWin(frozen: FrozenDimensionDiagnosis): string {
+  const mainZone = frozen.unmanagedZones?.[0]?.constat;
+  const mainFinding = frozen.consolidatedFindings?.[0];
+
+  if (mainZone && normalizeText(mainZone)) {
+    return `Sécuriser en premier le point : ${truncate(mainZone, 150)}`;
+  }
+
+  if (mainFinding && normalizeText(mainFinding)) {
+    return `Sécuriser en premier le point : ${truncate(mainFinding, 150)}`;
+  }
+
+  return "Clarifier un premier point de pilotage concret et visible dans le mois.";
+}
+
+function buildFallbackPotentialGain(frozen: FrozenDimensionDiagnosis): string {
+  const mainConsequence = frozen.unmanagedZones?.[0]?.consequence;
+
+  if (mainConsequence && normalizeText(mainConsequence)) {
+    return `Gain à préciser en validation finale, en lien avec la conséquence prioritaire identifiée : ${truncate(
+      mainConsequence,
+      150
+    )}`;
+  }
+
+  return DEFAULT_POTENTIAL_GAIN;
+}
+
+function selectPrimarySeed(frozen: FrozenDimensionDiagnosis): ObjectiveSeed | null {
+  const seeds = frozen.objectiveSeeds ?? [];
+  if (seeds.length === 0) return null;
+
+  const sorted = [...seeds].sort(
+    (a, b) => (b.priorityScore ?? 0) - (a.priorityScore ?? 0)
+  );
+
+  return sorted[0] ?? null;
+}
+
+function buildObjectiveLabel(frozen: FrozenDimensionDiagnosis): string {
+  const seed = selectPrimarySeed(frozen);
+  const label = seed?.label ?? "";
+
+  if (normalizeText(label)) {
+    return truncate(label, 180);
+  }
+
+  return `Réduire sous 6 mois l’exposition de la dimension "${dimensionTitle(
+    frozen.dimensionId
+  )}" à la zone non pilotée dominante`;
+}
+
+function buildObjectiveIndicator(frozen: FrozenDimensionDiagnosis): string {
+  const seed = selectPrimarySeed(frozen);
+  const indicator = seed?.indicator ?? "";
+
+  if (normalizeText(indicator)) {
+    return truncate(indicator, 180);
+  }
+
+  return buildFallbackIndicator(frozen);
+}
+
+function buildObjectiveDueDate(frozen: FrozenDimensionDiagnosis): string {
+  const seed = selectPrimarySeed(frozen);
+  const suggestedDueDate = seed?.suggestedDueDate ?? "";
+
+  if (normalizeText(suggestedDueDate)) {
+    return suggestedDueDate;
+  }
+
+  return DEFAULT_DUE_DATE;
+}
+
+function buildObjectivePotentialGain(frozen: FrozenDimensionDiagnosis): string {
+  const seed = selectPrimarySeed(frozen);
+  const potentialGain = seed?.potentialGain ?? "";
+
+  if (normalizeText(potentialGain)) {
+    return truncate(potentialGain, 180);
+  }
+
+  return buildFallbackPotentialGain(frozen);
+}
+
+function buildObjectiveQuickWin(frozen: FrozenDimensionDiagnosis): string {
+  const seed = selectPrimarySeed(frozen);
+  const quickWin = seed?.quickWin ?? "";
+
+  if (normalizeText(quickWin)) {
+    return truncate(quickWin, 180);
+  }
+
+  return buildFallbackQuickWin(frozen);
+}
+
+function buildGainHypotheses(frozen: FrozenDimensionDiagnosis): string[] {
+  const rootCause = normalizeText(frozen.dominantRootCause);
+  const consequence = normalizeText(frozen.unmanagedZones?.[0]?.consequence ?? "");
+  const evidence = normalizeEvidenceSummary(frozen.evidenceSummary);
+
+  const hypotheses = uniqueStrings([
+    "Aucun chiffre précis n’est inventé.",
+    consequence
+      ? `La fourchette devra être reliée à la conséquence économique probable identifiée : ${truncate(
+          consequence,
+          160
+        )}`
+      : "La fourchette devra être reliée à la conséquence économique probable identifiée.",
+    rootCause
+      ? `Le gain dépendra de la réduction de la cause dominante : ${truncate(rootCause, 160)}`
+      : "",
+    evidence
+      ? `Le gain devra être estimé en cohérence avec la synthèse de dimension : ${truncate(
+          evidence,
+          160
+        )}`
+      : "",
+  ]);
+
+  return hypotheses.length > 0 ? hypotheses : ["Aucun chiffre précis n’est inventé."];
+}
+
+export function buildObjectiveFromFrozenDimension(
+  frozen: FrozenDimensionDiagnosis,
+  index: number
+): FinalObjective {
+  return {
+    id: `obj-d${frozen.dimensionId}-${index}`,
+    dimensionId: frozen.dimensionId,
+    objectiveLabel: buildObjectiveLabel(frozen),
+    owner: DEFAULT_OBJECTIVE_OWNER,
+    keyIndicator: buildObjectiveIndicator(frozen),
+    dueDate: buildObjectiveDueDate(frozen),
+    potentialGain: buildObjectivePotentialGain(frozen),
+    gainHypotheses: buildGainHypotheses(frozen),
+    validationStatus: "proposed",
+    quickWin: buildObjectiveQuickWin(frozen),
+  };
+}
+
+export function buildFinalObjectiveSetFromFrozenDimensions(
+  frozenDimensions: FrozenDimensionDiagnosis[]
+): FinalObjectiveSet {
+  const objectives = uniqueById(
+    [...frozenDimensions]
+      .sort((a, b) => a.dimensionId - b.dimensionId)
+      .map((frozen, index) => buildObjectiveFromFrozenDimension(frozen, index + 1))
+  );
 
   return {
     header: FINAL_OBJECTIVES_HEADER,
@@ -155,45 +270,51 @@ export function buildFinalObjectiveSet(session: DiagnosticSessionAggregate): Fin
   };
 }
 
-export function applyObjectiveDecisionsToSet(
-  objectiveSet: FinalObjectiveSet,
-  decisions: ObjectiveDecisionInput[]
-): FinalObjectiveSet {
-  const decisionsById = new Map(decisions.map((d) => [d.objectiveId, d]));
+export function applyObjectiveDecisions(params: {
+  objectives: FinalObjective[];
+  decisions: ObjectiveDecisionInput[];
+}): FinalObjective[] {
+  const decisionsById = new Map(
+    params.decisions.map((decision) => [decision.objectiveId, decision])
+  );
 
-  const objectives = objectiveSet.objectives.map((objective) => {
+  return params.objectives.map((objective) => {
     const decision = decisionsById.get(objective.id);
     if (!decision) return objective;
 
+    const nextLabel =
+      decision.status === "adjusted" && normalizeText(decision.adjustedLabel)
+        ? normalizeText(decision.adjustedLabel)
+        : objective.objectiveLabel;
+
+    const nextIndicator =
+      decision.status === "adjusted" && normalizeText(decision.adjustedIndicator)
+        ? normalizeText(decision.adjustedIndicator)
+        : objective.keyIndicator;
+
+    const nextDueDate =
+      decision.status === "adjusted" && normalizeText(decision.adjustedDueDate)
+        ? normalizeText(decision.adjustedDueDate)
+        : objective.dueDate;
+
+    const nextPotentialGain =
+      decision.status === "adjusted" && normalizeText(decision.adjustedPotentialGain)
+        ? normalizeText(decision.adjustedPotentialGain)
+        : objective.potentialGain;
+
+    const nextQuickWin =
+      decision.status === "adjusted" && normalizeText(decision.adjustedQuickWin)
+        ? normalizeText(decision.adjustedQuickWin)
+        : objective.quickWin;
+
     return {
       ...objective,
-      objectiveLabel:
-        decision.status === "adjusted" && decision.adjustedLabel
-          ? decision.adjustedLabel
-          : objective.objectiveLabel,
-      keyIndicator:
-        decision.status === "adjusted" && decision.adjustedIndicator
-          ? decision.adjustedIndicator
-          : objective.keyIndicator,
-      dueDate:
-        decision.status === "adjusted" && decision.adjustedDueDate
-          ? decision.adjustedDueDate
-          : objective.dueDate,
-      potentialGain:
-        decision.status === "adjusted" && decision.adjustedPotentialGain
-          ? decision.adjustedPotentialGain
-          : objective.potentialGain,
-      quickWin:
-        decision.status === "adjusted" && decision.adjustedQuickWin
-          ? decision.adjustedQuickWin
-          : objective.quickWin,
+      objectiveLabel: nextLabel,
+      keyIndicator: nextIndicator,
+      dueDate: nextDueDate,
+      potentialGain: nextPotentialGain,
+      quickWin: nextQuickWin,
       validationStatus: decision.status,
     };
   });
-
-  return {
-    ...objectiveSet,
-    objectives,
-    decisionsCapturedAt: new Date().toISOString(),
-  };
 }

@@ -2,14 +2,18 @@
 
 import {
   answeredCount,
-  bootstrapSessionFromTrame,
+  bootstrapSessionFromTrameWithLlm,
   captureObjectivesValidation,
+  challengeCurrentQuestion,
   getEngineView,
   registerAnswer,
   submitIterationClosure,
 } from "@/lib/bilan-sante/protocol-engine";
+import { analyzeUserAnswer } from "@/lib/bilan-sante/answer-analyzer";
 import type {
   DiagnosticSessionAggregate,
+  DiagnosticSignal,
+  EntryAngle,
   StructuredQuestion,
 } from "@/lib/bilan-sante/session-model";
 import type { ObjectiveDecisionInput } from "@/lib/bilan-sante/objectives-builder";
@@ -42,14 +46,18 @@ export type SessionViewPayload = {
   };
 };
 
+function normalizeText(value: string | null | undefined): string {
+  return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
 function isYes(value: string): boolean {
   return ["oui", "ok", "valide", "validé", "yes"].includes(
-    String(value || "").trim().toLowerCase()
+    normalizeText(value).toLowerCase()
   );
 }
 
 function isNo(value: string): boolean {
-  return ["non", "no"].includes(String(value || "").trim().toLowerCase());
+  return ["non", "no"].includes(normalizeText(value).toLowerCase());
 }
 
 function mapSessionStatus(session: DiagnosticSessionAggregate): string {
@@ -108,6 +116,50 @@ function firstUnansweredQuestionId(
   return next?.id ?? null;
 }
 
+function getCurrentUnansweredQuestion(
+  session: DiagnosticSessionAggregate
+): StructuredQuestion | null {
+  const workset = session.currentWorkset;
+  if (!workset) return null;
+
+  const answered = new Set(workset.answers.map((a) => a.questionId));
+  return workset.questions.find((q) => !answered.has(q.id)) ?? null;
+}
+
+function getAllSignals(session: DiagnosticSessionAggregate): DiagnosticSignal[] {
+  const registry = session.signalRegistry;
+  if (!registry) return [];
+
+  if ("all" in registry && Array.isArray(registry.all)) {
+    return registry.all;
+  }
+
+  if ("allSignals" in registry && Array.isArray(registry.allSignals)) {
+    return registry.allSignals;
+  }
+
+  return [
+    ...registry.byDimension.d1,
+    ...registry.byDimension.d2,
+    ...registry.byDimension.d3,
+    ...registry.byDimension.d4,
+  ];
+}
+
+function findSignalById(
+  session: DiagnosticSessionAggregate,
+  signalId: string
+): DiagnosticSignal | undefined {
+  return getAllSignals(session).find((signal) => signal.id === signalId);
+}
+
+function getQuestionEntryAngle(
+  session: DiagnosticSessionAggregate,
+  question: StructuredQuestion
+): EntryAngle | null {
+  return findSignalById(session, question.signalId)?.entryAngle ?? null;
+}
+
 function buildObjectivesHelpMessage(
   session: DiagnosticSessionAggregate
 ): SessionViewPayload {
@@ -130,7 +182,7 @@ function parseObjectiveDecisionLine(
   line: string,
   objectives: Array<{ id: string }>
 ): ObjectiveDecisionInput | null {
-  const trimmed = String(line || "").trim();
+  const trimmed = normalizeText(line);
   if (!trimmed) return null;
 
   const match = trimmed.match(
@@ -183,7 +235,7 @@ function parseObjectiveDecisions(
   rawMessage: string,
   session: DiagnosticSessionAggregate
 ): ObjectiveDecisionInput[] {
-  const message = String(rawMessage || "").trim();
+  const message = normalizeText(rawMessage);
   const objectives = session.finalObjectives?.objectives ?? [];
 
   if (objectives.length === 0) return [];
@@ -216,6 +268,46 @@ function parseObjectiveDecisions(
   return unique;
 }
 
+function shouldRewriteCurrentQuestion(params: {
+  intent: ReturnType<typeof analyzeUserAnswer>["intent"];
+  shouldRephraseQuestion: boolean;
+  shouldPivotAngle: boolean;
+}): boolean {
+  const { intent, shouldRephraseQuestion, shouldPivotAngle } = params;
+
+  if (intent === "clarification_request") return true;
+  if (intent === "challenge") return true;
+  if (intent === "reframing") return true;
+  if (intent === "noise") return true;
+
+  if (intent === "mixed") {
+    return false;
+  }
+
+  if (intent === "business_answer") {
+    return false;
+  }
+
+  return shouldRephraseQuestion || shouldPivotAngle;
+}
+
+function buildRewriteAssistantMessage(
+  intent: ReturnType<typeof analyzeUserAnswer>["intent"]
+): string {
+  switch (intent) {
+    case "clarification_request":
+      return "Je reformule la question plus simplement pour repartir sur le bon sujet.";
+    case "challenge":
+      return "Je reformule la question pour repartir du bon angle métier.";
+    case "reframing":
+      return "Je reprends la question selon l’angle que vous venez de recadrer.";
+    case "noise":
+      return "Je recentre la question pour poursuivre le diagnostic.";
+    default:
+      return "Je reformule la question pour poursuivre le diagnostic.";
+  }
+}
+
 async function ensureAggregate(sessionId: string): Promise<{
   row: Awaited<ReturnType<typeof loadAggregate>>["row"];
   aggregate: DiagnosticSessionAggregate;
@@ -233,7 +325,7 @@ async function ensureAggregate(sessionId: string): Promise<{
     throw new Error("TRAME_NOT_INGESTED");
   }
 
-  const aggregate = bootstrapSessionFromTrame({
+  const aggregate = await bootstrapSessionFromTrameWithLlm({
     sessionId,
     rawTrameText: String(loaded.row.extracted_text),
   });
@@ -272,7 +364,7 @@ export async function processSessionInput(params: {
   message: string;
   objectiveDecisions?: ObjectiveDecisionInput[];
 }): Promise<SessionViewPayload> {
-  const rawMessage = String(params.message ?? "").trim();
+  const rawMessage = normalizeText(params.message);
   const { aggregate: initialAggregate } = await ensureAggregate(params.sessionId);
 
   let aggregate = initialAggregate;
@@ -414,9 +506,10 @@ export async function processSessionInput(params: {
     throw new Error(`UNSUPPORTED_SESSION_PHASE: ${aggregate.phase}`);
   }
 
-  const questionId = firstUnansweredQuestionId(aggregate);
+  const currentQuestion = getCurrentUnansweredQuestion(aggregate);
+  const questionId = currentQuestion?.id ?? firstUnansweredQuestionId(aggregate);
 
-  if (!questionId) {
+  if (!questionId || !currentQuestion) {
     const payload = toSessionView(aggregate);
 
     await appendDiagnosticEvent({
@@ -426,6 +519,51 @@ export async function processSessionInput(params: {
       payload: {
         ...payload,
         kind: "no_unanswered_question",
+      },
+    });
+
+    return payload;
+  }
+
+  const analysis = analyzeUserAnswer({
+    rawMessage,
+    currentQuestion: {
+      theme: currentQuestion.theme,
+      constat: currentQuestion.constat,
+      questionOuverte: currentQuestion.questionOuverte,
+      entryAngle: getQuestionEntryAngle(aggregate, currentQuestion),
+    },
+  });
+
+  if (
+    shouldRewriteCurrentQuestion({
+      intent: analysis.intent,
+      shouldRephraseQuestion: analysis.shouldRephraseQuestion,
+      shouldPivotAngle: analysis.shouldPivotAngle,
+    })
+  ) {
+    aggregate = challengeCurrentQuestion({
+      session: aggregate,
+      rawMessage,
+      reason: analysis.intent,
+    });
+
+    await saveAggregate(params.sessionId, aggregate);
+
+    const payload: SessionViewPayload = {
+      ...toSessionView(aggregate),
+      assistant_message: buildRewriteAssistantMessage(analysis.intent),
+      needs_validation: false,
+    };
+
+    await appendDiagnosticEvent({
+      sessionId: params.sessionId,
+      userId: params.userId,
+      kind: "CHAT_ASSISTANT",
+      payload: {
+        ...payload,
+        kind: "question_rephrased",
+        analysis_intent: analysis.intent,
       },
     });
 
@@ -449,6 +587,7 @@ export async function processSessionInput(params: {
     payload: {
       ...payload,
       kind: "dimension_reply",
+      analysis_intent: analysis.intent,
     },
   });
 

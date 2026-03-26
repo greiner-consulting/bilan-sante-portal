@@ -129,11 +129,48 @@ function cleanPrefixedLabel(value: string, label: string) {
   return text;
 }
 
+function normalizeQuestions(value: unknown): StructuredQuestion[] {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .filter((item) => item && typeof item === "object")
+    .map((item) => {
+      const row = item as Partial<StructuredQuestion>;
+      return {
+        fact_id: typeof row.fact_id === "string" ? row.fact_id : undefined,
+        theme: typeof row.theme === "string" ? row.theme : undefined,
+        constat: String(row.constat ?? "").trim(),
+        risque_managerial: String(row.risque_managerial ?? "").trim(),
+        question: String(row.question ?? "").trim(),
+      };
+    })
+    .filter(
+      (item) =>
+        Boolean(item.constat) &&
+        Boolean(item.risque_managerial) &&
+        Boolean(item.question)
+    );
+}
+
+function mergeSessionState(
+  current: SessionState | null,
+  next?: SessionState | null,
+  fallbackId?: string
+): SessionState | null {
+  if (!current && !next && !fallbackId) return null;
+
+  return {
+    ...(current ?? { id: fallbackId ?? "" }),
+    ...(next ?? {}),
+    id: String(next?.id ?? current?.id ?? fallbackId ?? "").trim(),
+  };
+}
+
 function normalizeAssistantResponse(data: AnswerApiResponse): AssistantResponse | null {
   if (data.assistant) {
     return {
       assistant_message: String(data.assistant.assistant_message ?? "").trim(),
-      questions: Array.isArray(data.assistant.questions) ? data.assistant.questions : [],
+      questions: normalizeQuestions(data.assistant.questions),
       needs_validation: Boolean(data.assistant.needs_validation),
       session: data.assistant.session,
     };
@@ -146,7 +183,7 @@ function normalizeAssistantResponse(data: AnswerApiResponse): AssistantResponse 
   ) {
     return {
       assistant_message: String(data.assistant_message ?? "").trim(),
-      questions: Array.isArray(data.questions) ? data.questions : [],
+      questions: normalizeQuestions(data.questions),
       needs_validation: Boolean(data.needs_validation),
       session: data.session,
     };
@@ -272,8 +309,9 @@ export default function ChatPanel({ sessionId }: Props) {
     if (!assistant) return;
 
     const assistantMessage = String(assistant.assistant_message ?? "").trim();
-    const nextQuestions = Array.isArray(assistant.questions) ? assistant.questions : [];
+    const nextQuestions = normalizeQuestions(assistant.questions);
     const needsValidation = Boolean(assistant.needs_validation);
+    const nextPhase = String(nextSession?.phase ?? "");
 
     if (assistantMessage) {
       pushMessage("assistant", assistantMessage);
@@ -287,6 +325,11 @@ export default function ChatPanel({ sessionId }: Props) {
 
       setQuestions([...nextQuestions]);
       setCurrentIndex(nextIndex);
+      setAwaitingValidation(false);
+      return;
+    }
+
+    if (nextPhase === "dimension_iteration" && questions.length > 0) {
       setAwaitingValidation(false);
       return;
     }
@@ -312,12 +355,10 @@ export default function ChatPanel({ sessionId }: Props) {
       }
 
       if (data.session) {
-        setSessionState(data.session);
+        setSessionState(mergeSessionState(null, data.session, sessionId));
       }
 
-      const nextQuestions = Array.isArray(data.engine_state?.question_batch_json)
-        ? data.engine_state?.question_batch_json ?? []
-        : [];
+      const nextQuestions = normalizeQuestions(data.engine_state?.question_batch_json);
 
       if (nextQuestions.length > 0) {
         const nextIndex = clampIndex(
@@ -371,7 +412,7 @@ export default function ChatPanel({ sessionId }: Props) {
       if (!data.ok) return;
 
       if (data.session) {
-        setSessionState(data.session);
+        setSessionState((current) => mergeSessionState(current, data.session, sessionId));
       }
 
       setFinalObjectives(
@@ -415,12 +456,7 @@ export default function ChatPanel({ sessionId }: Props) {
         throw new Error(data.error || "Erreur moteur diagnostic");
       }
 
-      const mergedSession = data.session
-        ? {
-            ...(sessionState ?? { id: sessionId }),
-            ...data.session,
-          }
-        : sessionState ?? null;
+      const mergedSession = mergeSessionState(sessionState, data.session, sessionId);
 
       if (mergedSession) {
         setSessionState(mergedSession);
@@ -432,8 +468,6 @@ export default function ChatPanel({ sessionId }: Props) {
       await loadSideStateSilently();
     } catch (e: any) {
       pushMessage("system", "Erreur : " + (e?.message || "Erreur inconnue"));
-      resetQuestionState();
-      setAwaitingValidation(false);
     } finally {
       setLoading(false);
     }
