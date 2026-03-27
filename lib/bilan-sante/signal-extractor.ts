@@ -75,11 +75,48 @@ type LlmAcceptedCandidate = {
   whyRelevant: string;
 };
 
+type LlmFilterDecision =
+  | "accepted"
+  | "rejected_no_section"
+  | "rejected_anecdotal"
+  | "rejected_structural_too_weak"
+  | "rejected_illustrative_too_weak"
+  | "rejected_unclear_too_weak"
+  | "rejected_default_too_weak";
+
+type LlmFilterStats = {
+  total: number;
+  accepted: number;
+  rejectedNoSection: number;
+  rejectedAnecdotal: number;
+  rejectedStructuralTooWeak: number;
+  rejectedIllustrativeTooWeak: number;
+  rejectedUnclearTooWeak: number;
+  rejectedDefaultTooWeak: number;
+};
+
 const MAX_EXCERPT_LENGTH = 280;
 const MIN_EXPLICIT_SCORE = 32;
 const STRONG_EXPLICIT_SCORE = 42;
 const SECTION_REUSE_PENALTY = 18;
 const GENERIC_REUSE_EXTRA_PENALTY = 10;
+
+const LOG_PREFIX = "[BilanSante][SignalExtraction]";
+
+function logInfo(event: string, payload?: Record<string, unknown>) {
+  console.info(`${LOG_PREFIX} ${event}`, payload ?? {});
+}
+
+function logWarn(event: string, payload?: Record<string, unknown>) {
+  console.warn(`${LOG_PREFIX} ${event}`, payload ?? {});
+}
+
+function summarizeError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error ?? "unknown_error");
+}
 
 const GENERIC_HEADING_HINTS = [
   "commentaire",
@@ -1064,8 +1101,7 @@ function buildAbsenceSignals(
         probableConsequence: buildProbableConsequence(theme),
         entryAngle: "formalization",
         confidenceScore: clamp(
-          llmMissing?.confidenceScore ??
-            (missingFieldHit ? 82 : 78),
+          llmMissing?.confidenceScore ?? (missingFieldHit ? 82 : 78),
           55,
           92
         ),
@@ -1098,19 +1134,6 @@ function dedupeSignals(signals: DiagnosticSignal[]): DiagnosticSignal[] {
   return out;
 }
 
-function buildEmptyRegistry(allSignals: DiagnosticSignal[]): SignalRegistry {
-  return {
-    all: allSignals,
-    allSignals,
-    byDimension: {
-      d1: allSignals.filter((signal) => signal.dimensionId === 1),
-      d2: allSignals.filter((signal) => signal.dimensionId === 2),
-      d3: allSignals.filter((signal) => signal.dimensionId === 3),
-      d4: allSignals.filter((signal) => signal.dimensionId === 4),
-    },
-  };
-}
-
 function findSectionById(
   snapshot: BaseTrameSnapshot,
   sectionId: string
@@ -1118,29 +1141,114 @@ function findSectionById(
   return snapshot.sections.find((section) => String(section.id ?? "").trim() === sectionId);
 }
 
-function isAcceptableLlmSignal(item: LlmExtractedExplicitSignal): boolean {
-  if (item.evidenceNature === "anecdotal") return false;
-  if (item.relevanceScore < MIN_RELEVANCE_SCORE) return false;
-  if (item.confidenceScore < MIN_CONFIDENCE_SCORE) return false;
+function initLlmFilterStats(): LlmFilterStats {
+  return {
+    total: 0,
+    accepted: 0,
+    rejectedNoSection: 0,
+    rejectedAnecdotal: 0,
+    rejectedStructuralTooWeak: 0,
+    rejectedIllustrativeTooWeak: 0,
+    rejectedUnclearTooWeak: 0,
+    rejectedDefaultTooWeak: 0,
+  };
+}
 
-  if (
-    item.evidenceNature === "illustrative" &&
-    item.relevanceScore < MIN_ILLUSTRATIVE_RELEVANCE_SCORE
-  ) {
-    return false;
+function registerLlmDecision(
+  stats: LlmFilterStats,
+  decision: LlmFilterDecision
+): void {
+  stats.total += 1;
+
+  switch (decision) {
+    case "accepted":
+      stats.accepted += 1;
+      break;
+    case "rejected_no_section":
+      stats.rejectedNoSection += 1;
+      break;
+    case "rejected_anecdotal":
+      stats.rejectedAnecdotal += 1;
+      break;
+    case "rejected_structural_too_weak":
+      stats.rejectedStructuralTooWeak += 1;
+      break;
+    case "rejected_illustrative_too_weak":
+      stats.rejectedIllustrativeTooWeak += 1;
+      break;
+    case "rejected_unclear_too_weak":
+      stats.rejectedUnclearTooWeak += 1;
+      break;
+    case "rejected_default_too_weak":
+      stats.rejectedDefaultTooWeak += 1;
+      break;
+  }
+}
+
+function evaluateLlmSignalAcceptance(
+  item: LlmExtractedExplicitSignal
+): LlmFilterDecision {
+  if (item.evidenceNature === "anecdotal") {
+    return "rejected_anecdotal";
   }
 
-  return true;
+  const relevance = clamp(item.relevanceScore, 0, 100);
+  const confidence = clamp(item.confidenceScore, 0, 100);
+  const criticality = clamp(item.criticalityScore, 0, 100);
+
+  if (item.evidenceNature === "structural") {
+    if (relevance >= 40 && confidence >= 40) {
+      return "accepted";
+    }
+    return "rejected_structural_too_weak";
+  }
+
+  if (item.evidenceNature === "illustrative") {
+    const illustrativeThreshold = Math.max(
+      MIN_ILLUSTRATIVE_RELEVANCE_SCORE - 8,
+      50
+    );
+
+    if (relevance >= illustrativeThreshold && confidence >= 38) {
+      return "accepted";
+    }
+    return "rejected_illustrative_too_weak";
+  }
+
+  if (item.evidenceNature === "unclear") {
+    if (relevance >= 60 && (confidence >= 35 || criticality >= 70)) {
+      return "accepted";
+    }
+    return "rejected_unclear_too_weak";
+  }
+
+  if (
+    relevance >= Math.max(MIN_RELEVANCE_SCORE - 10, 45) &&
+    confidence >= Math.max(MIN_CONFIDENCE_SCORE - 10, 35)
+  ) {
+    return "accepted";
+  }
+
+  return "rejected_default_too_weak";
 }
 
 function toAcceptedLlmCandidate(
   snapshot: BaseTrameSnapshot,
   dimensionId: DimensionId,
-  item: LlmExtractedExplicitSignal
+  item: LlmExtractedExplicitSignal,
+  stats?: LlmFilterStats
 ): LlmAcceptedCandidate | null {
   const section = findSectionById(snapshot, item.sourceSectionId);
-  if (!section) return null;
-  if (!isAcceptableLlmSignal(item)) return null;
+  if (!section) {
+    if (stats) registerLlmDecision(stats, "rejected_no_section");
+    return null;
+  }
+
+  const decision = evaluateLlmSignalAcceptance(item);
+  if (stats) registerLlmDecision(stats, decision);
+  if (decision !== "accepted") {
+    return null;
+  }
 
   return {
     dimensionId,
@@ -1215,21 +1323,36 @@ function selectLlmCandidateForTheme(
 function buildExplicitSignalsFromLlm(params: {
   snapshot: BaseTrameSnapshot;
   responses: LlmSignalExtractionResponse[];
+  logContext?: string;
 }): DiagnosticSignal[] {
   const allCandidates: LlmAcceptedCandidate[] = [];
+  const filterStats = initLlmFilterStats();
 
   for (const response of params.responses) {
     for (const item of response.explicitSignals) {
       const candidate = toAcceptedLlmCandidate(
         params.snapshot,
         response.dimensionId,
-        item
+        item,
+        filterStats
       );
       if (candidate) {
         allCandidates.push(candidate);
       }
     }
   }
+
+  logInfo("llm_candidate_filter_summary", {
+    context: params.logContext ?? "default",
+    totalCandidates: filterStats.total,
+    acceptedCandidates: filterStats.accepted,
+    rejectedNoSection: filterStats.rejectedNoSection,
+    rejectedAnecdotal: filterStats.rejectedAnecdotal,
+    rejectedStructuralTooWeak: filterStats.rejectedStructuralTooWeak,
+    rejectedIllustrativeTooWeak: filterStats.rejectedIllustrativeTooWeak,
+    rejectedUnclearTooWeak: filterStats.rejectedUnclearTooWeak,
+    rejectedDefaultTooWeak: filterStats.rejectedDefaultTooWeak,
+  });
 
   const buckets = new Map<string, LlmAcceptedCandidate[]>();
 
@@ -1296,6 +1419,108 @@ function buildExplicitSignalsFromLlm(params: {
   return dedupeSignals(explicitSignals);
 }
 
+function buildExplicitSignalsFromLlmSalvage(params: {
+  snapshot: BaseTrameSnapshot;
+  responses: LlmSignalExtractionResponse[];
+}): DiagnosticSignal[] {
+  const allCandidates: LlmAcceptedCandidate[] = [];
+
+  for (const response of params.responses) {
+    for (const item of response.explicitSignals) {
+      const section = findSectionById(params.snapshot, item.sourceSectionId);
+      if (!section) continue;
+      if (item.evidenceNature === "anecdotal") continue;
+
+      const relevance = clamp(item.relevanceScore, 0, 100);
+      const confidence = clamp(item.confidenceScore, 0, 100);
+      const criticality = clamp(item.criticalityScore, 0, 100);
+
+      if (relevance < 45) continue;
+      if (confidence < 30 && criticality < 72) continue;
+
+      allCandidates.push({
+        dimensionId: response.dimensionId,
+        theme: item.theme,
+        section,
+        sourceExcerpt: item.sourceExcerpt,
+        evidenceNature: item.evidenceNature,
+        entryAngle: item.entryAngle,
+        relevanceScore: relevance,
+        confidenceScore: Math.max(confidence, 40),
+        criticalityScore: criticality,
+        constat: item.constat,
+        managerialRisk: item.managerialRisk,
+        probableConsequence: item.probableConsequence,
+        whyRelevant: item.whyRelevant,
+      });
+    }
+  }
+
+  const buckets = new Map<string, LlmAcceptedCandidate[]>();
+
+  for (const candidate of allCandidates) {
+    const key = `${candidate.dimensionId}|${normalizeText(candidate.theme)}`;
+    const current = buckets.get(key) ?? [];
+    current.push(candidate);
+    buckets.set(key, current);
+  }
+
+  const orderedBuckets = [...buckets.entries()]
+    .map(([key, candidates]) => ({
+      key,
+      candidates: [...candidates].sort(
+        (a, b) => llmCandidateBaseScore(b) - llmCandidateBaseScore(a)
+      ),
+    }))
+    .sort(
+      (a, b) =>
+        llmCandidateBaseScore(b.candidates[0]) - llmCandidateBaseScore(a.candidates[0])
+    );
+
+  const usageBySection = new Map<string, number>();
+  const explicitSignals: DiagnosticSignal[] = [];
+  let runningIndex = 1;
+
+  for (const bucket of orderedBuckets) {
+    const selected = selectLlmCandidateForTheme(bucket.candidates, usageBySection);
+    if (!selected) continue;
+
+    usageBySection.set(
+      selected.section.id,
+      (usageBySection.get(selected.section.id) ?? 0) + 1
+    );
+
+    explicitSignals.push({
+      id: makeSignalId(
+        selected.dimensionId,
+        selected.theme,
+        selected.section.id,
+        runningIndex++
+      ),
+      dimensionId: selected.dimensionId,
+      theme: selected.theme,
+      signalKind: "explicit",
+      sourceType: "trame",
+      sourceSection: selected.section.id,
+      sourceExcerpt: normalizeExtractionText(selected.sourceExcerpt),
+      constat:
+        normalizeExtractionText(selected.constat) ||
+        `La trame fournit un appui exploitable sur le thème "${selected.theme}".`,
+      managerialRisk:
+        normalizeExtractionText(selected.managerialRisk) ||
+        buildManagerialRisk(selected.theme, false, selected.entryAngle),
+      probableConsequence:
+        normalizeExtractionText(selected.probableConsequence) ||
+        buildProbableConsequence(selected.theme),
+      entryAngle: selected.entryAngle,
+      confidenceScore: clamp(Math.max(selected.confidenceScore, 58), 55, 95),
+      criticalityScore: clamp(selected.criticalityScore, 60, 95),
+    });
+  }
+
+  return dedupeSignals(explicitSignals);
+}
+
 function buildLlmUncoveredMap(
   responses: LlmSignalExtractionResponse[]
 ): Map<
@@ -1334,21 +1559,70 @@ function buildRegistryFromSignals(signals: DiagnosticSignal[]): SignalRegistry {
     return b.criticalityScore - a.criticalityScore;
   });
 
-  return buildEmptyRegistry(allSignals);
+  return {
+    all: allSignals,
+    allSignals,
+    byDimension: {
+      d1: allSignals.filter((signal) => signal.dimensionId === 1),
+      d2: allSignals.filter((signal) => signal.dimensionId === 2),
+      d3: allSignals.filter((signal) => signal.dimensionId === 3),
+      d4: allSignals.filter((signal) => signal.dimensionId === 4),
+    },
+  };
 }
 
-export function buildSignalRegistry(snapshot: BaseTrameSnapshot): SignalRegistry {
+function summarizeRegistry(registry: SignalRegistry) {
+  const allSignals: DiagnosticSignal[] = registry.allSignals;
+  const explicitSignals = allSignals.filter(
+    (signal: DiagnosticSignal) => signal.signalKind === "explicit"
+  );
+  const absenceSignals = allSignals.filter(
+    (signal: DiagnosticSignal) => signal.signalKind === "absence"
+  );
+
+  return {
+    totalSignals: allSignals.length,
+    explicitSignals: explicitSignals.length,
+    absenceSignals: absenceSignals.length,
+    d1: registry.byDimension.d1.length,
+    d2: registry.byDimension.d2.length,
+    d3: registry.byDimension.d3.length,
+    d4: registry.byDimension.d4.length,
+  };
+}
+
+function buildDeterministicRegistry(snapshot: BaseTrameSnapshot): SignalRegistry {
   const explicitSignals = buildExplicitSignalsDeterministic(snapshot);
   const absenceSignals = buildAbsenceSignals(snapshot, explicitSignals);
 
   return buildRegistryFromSignals([...explicitSignals, ...absenceSignals]);
 }
 
+export function buildSignalRegistry(snapshot: BaseTrameSnapshot): SignalRegistry {
+  return buildDeterministicRegistry(snapshot);
+}
+
 export async function buildSignalRegistryWithLlm(
   snapshot: BaseTrameSnapshot
 ): Promise<SignalRegistry> {
-  if (!llmSignalExtractionEnabled()) {
-    return buildSignalRegistry(snapshot);
+  const hasOpenAiKey = llmSignalExtractionEnabled();
+
+  logInfo("bootstrap_start", {
+    hasOpenAiKey,
+    sections: snapshot.sections.length,
+    missingFields: snapshot.missingFields.length,
+  });
+
+  if (!hasOpenAiKey) {
+    const deterministicRegistry = buildDeterministicRegistry(snapshot);
+
+    logWarn("fallback_no_api_key", {
+      hasOpenAiKey: false,
+      fallbackUsed: true,
+      ...summarizeRegistry(deterministicRegistry),
+    });
+
+    return deterministicRegistry;
   }
 
   try {
@@ -1365,20 +1639,94 @@ export async function buildSignalRegistryWithLlm(
       (item): item is LlmSignalExtractionResponse => item !== null
     );
 
+    const rawExplicitSignals = responses.reduce(
+      (sum, response) => sum + response.explicitSignals.length,
+      0
+    );
+    const rawUncoveredThemes = responses.reduce(
+      (sum, response) => sum + response.uncoveredThemes.length,
+      0
+    );
+
     if (responses.length === 0) {
-      return buildSignalRegistry(snapshot);
+      const deterministicRegistry = buildDeterministicRegistry(snapshot);
+
+      logWarn("fallback_no_llm_response", {
+        hasOpenAiKey: true,
+        responsesReceived: 0,
+        rawExplicitSignals,
+        rawUncoveredThemes,
+        fallbackUsed: true,
+        ...summarizeRegistry(deterministicRegistry),
+      });
+
+      return deterministicRegistry;
     }
 
-    const explicitSignals = buildExplicitSignalsFromLlm({
+    let explicitSignals = buildExplicitSignalsFromLlm({
       snapshot,
       responses,
+      logContext: "primary",
     });
+
+    if (rawExplicitSignals > 0 && explicitSignals.length === 0) {
+      const salvagedSignals = buildExplicitSignalsFromLlmSalvage({
+        snapshot,
+        responses,
+      });
+
+      logWarn("llm_explicit_salvage_attempt", {
+        rawExplicitSignals,
+        salvagedSignals: salvagedSignals.length,
+      });
+
+      if (salvagedSignals.length > 0) {
+        explicitSignals = salvagedSignals;
+      }
+    }
 
     const uncoveredMap = buildLlmUncoveredMap(responses);
     const absenceSignals = buildAbsenceSignals(snapshot, explicitSignals, uncoveredMap);
+    const llmRegistry = buildRegistryFromSignals([...explicitSignals, ...absenceSignals]);
 
-    return buildRegistryFromSignals([...explicitSignals, ...absenceSignals]);
-  } catch {
-    return buildSignalRegistry(snapshot);
+    if (explicitSignals.length === 0 && uncoveredMap.size === 0) {
+      const deterministicRegistry = buildDeterministicRegistry(snapshot);
+
+      logWarn("fallback_empty_sanitized_llm_output", {
+        hasOpenAiKey: true,
+        responsesReceived: responses.length,
+        rawExplicitSignals,
+        rawUncoveredThemes,
+        explicitSignalsFromLlm: 0,
+        uncoveredThemes: 0,
+        fallbackUsed: true,
+        ...summarizeRegistry(deterministicRegistry),
+      });
+
+      return deterministicRegistry;
+    }
+
+    logInfo("llm_registry_ready", {
+      hasOpenAiKey: true,
+      responsesReceived: responses.length,
+      rawExplicitSignals,
+      explicitSignalsFromLlm: explicitSignals.length,
+      uncoveredThemes: uncoveredMap.size,
+      fallbackUsed: false,
+      ...summarizeRegistry(llmRegistry),
+    });
+
+    return llmRegistry;
+  } catch (error) {
+    const deterministicRegistry = buildDeterministicRegistry(snapshot);
+
+    logWarn("fallback_exception", {
+      hasOpenAiKey: true,
+      error: summarizeError(error),
+      fallbackUsed: true,
+      ...summarizeRegistry(deterministicRegistry),
+    });
+
+    return deterministicRegistry;
   }
 }
