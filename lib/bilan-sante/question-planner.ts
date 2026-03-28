@@ -37,11 +37,31 @@ type ThemeMemorySummary = {
   usableFactCount: number;
 };
 
+type ScoredSignal = {
+  signal: DiagnosticSignal;
+  themeMemory: ThemeMemorySummary;
+  score: number;
+};
+
 const CANDIDATE_POOL_SIZE: Record<IterationNumber, number> = {
   1: 12,
   2: 12,
   3: 12,
 };
+
+const ABSOLUTE_MIN_SCORE: Record<IterationNumber, number> = {
+  1: 42,
+  2: 38,
+  3: 36,
+};
+
+const MARGINAL_SCORE_GAP_LIMIT: Record<IterationNumber, number> = {
+  1: 18,
+  2: 22,
+  3: 22,
+};
+
+const MIN_QUESTIONS_FLOOR = 3;
 
 function normalizeText(value: string | null | undefined): string {
   return String(value ?? "").replace(/\s+/g, " ").trim();
@@ -414,7 +434,7 @@ function scoreIterationIntentFit(
     if (signal.signalKind === "explicit") score += 12;
     if (signal.entryAngle === "mechanism") score += 8;
     if (signal.entryAngle === "formalization") score += 6;
-    if (signal.signalKind === "absence") score -= 4;
+    if (signal.signalKind === "absence") score -= 10;
   }
 
   if (iteration === 2) {
@@ -428,7 +448,42 @@ function scoreIterationIntentFit(
     if (signal.entryAngle === "economics") score += 15;
     if (signal.entryAngle === "formalization") score += 10;
     if (signal.entryAngle === "dependency") score += 6;
-    if (signal.signalKind === "absence") score += 10;
+    if (signal.signalKind === "absence") score += 8;
+  }
+
+  return score;
+}
+
+function scoreLowEvidencePenalty(
+  signal: DiagnosticSignal,
+  themeMemory: ThemeMemorySummary,
+  iteration: IterationNumber
+): number {
+  let score = 0;
+
+  const noEvidenceLike =
+    normalizeForMatch(signal.sourceExcerpt).includes("no_evidence") ||
+    normalizeForMatch(signal.constat).includes("insuffisamment etaye") ||
+    normalizeForMatch(signal.constat).includes("insuffisamment étayé") ||
+    normalizeForMatch(signal.constat).includes("non documente") ||
+    normalizeForMatch(signal.constat).includes("non documenté");
+
+  if (!noEvidenceLike) {
+    return score;
+  }
+
+  if (iteration === 1) {
+    score -= 18;
+  } else {
+    score -= 6;
+  }
+
+  if (themeMemory.usable.length > 0) {
+    score -= 10;
+  }
+
+  if (signal.signalKind === "absence") {
+    score -= 8;
   }
 
   return score;
@@ -455,6 +510,7 @@ function scoreSignalForIteration(
   score += scoreAngleNovelty(signal, themeMemory, iteration);
   score += scoreReframingRecovery(signal, themeMemory, iteration);
   score += scoreRootCauseAlignment(signal, themeMemory);
+  score += scoreLowEvidencePenalty(signal, themeMemory, iteration);
 
   if (themeMemory.latestUsable && themeMemory.usableFactCount > 0) {
     score += 4;
@@ -464,15 +520,18 @@ function scoreSignalForIteration(
 }
 
 function selectDiverseSignals(
-  signals: DiagnosticSignal[],
-  maxCount: number
-): DiagnosticSignal[] {
-  const selected: DiagnosticSignal[] = [];
+  scoredSignals: ScoredSignal[],
+  iteration: IterationNumber
+): ScoredSignal[] {
+  const selected: ScoredSignal[] = [];
   const usedThemes = new Set<string>();
   const usedSections = new Set<string>();
 
-  for (const signal of signals) {
-    if (selected.length >= maxCount) break;
+  const absoluteMinScore = ABSOLUTE_MIN_SCORE[iteration];
+  const gapLimit = MARGINAL_SCORE_GAP_LIMIT[iteration];
+
+  for (const item of scoredSignals) {
+    const { signal, score } = item;
 
     const normalizedTheme = normalizeText(signal.theme).toLowerCase();
     const sourceSection = normalizeText(signal.sourceSection);
@@ -489,7 +548,18 @@ function selectDiverseSignals(
       continue;
     }
 
-    selected.push(signal);
+    if (selected.length >= MIN_QUESTIONS_FLOOR && score < absoluteMinScore) {
+      break;
+    }
+
+    if (selected.length >= MIN_QUESTIONS_FLOOR) {
+      const previousScore = selected[selected.length - 1]?.score ?? score;
+      if (previousScore - score > gapLimit) {
+        break;
+      }
+    }
+
+    selected.push(item);
     usedThemes.add(normalizedTheme);
 
     if (sourceSection) {
@@ -497,7 +567,11 @@ function selectDiverseSignals(
     }
   }
 
-  return selected;
+  if (selected.length >= MIN_QUESTIONS_FLOOR) {
+    return selected;
+  }
+
+  return scoredSignals.slice(0, Math.min(MIN_QUESTIONS_FLOOR, scoredSignals.length));
 }
 
 function buildRootCausePromptPart(
@@ -730,7 +804,7 @@ export function planIterationQuestions(params: PlanParams): StructuredQuestion[]
 
   const alreadyUsedSignalIds = getAlreadyUsedSignalIds(session);
 
-  const candidates = getAllSignals(registry)
+  const candidates: ScoredSignal[] = getAllSignals(registry)
     .filter((signal) => signal.dimensionId === dimensionId)
     .map((signal) => {
       const themeMemory = getThemeMemorySummary(session, dimensionId, signal.theme);
@@ -746,21 +820,17 @@ export function planIterationQuestions(params: PlanParams): StructuredQuestion[]
         ),
       };
     })
-    .sort((a, b) => b.score - a.score);
+    .sort((a, b) => b.score - a.score)
+    .slice(0, CANDIDATE_POOL_SIZE[iteration]);
 
-  const selectedSignals = selectDiverseSignals(
-    candidates.map((item) => item.signal),
-    CANDIDATE_POOL_SIZE[iteration]
-  );
+  const selected = selectDiverseSignals(candidates, iteration);
 
-  return selectedSignals.map((signal, index) => {
-    const themeMemory = getThemeMemorySummary(session, dimensionId, signal.theme);
-
-    return buildStructuredQuestion(
-      signal,
+  return selected.map((item, index) =>
+    buildStructuredQuestion(
+      item.signal,
       iteration,
       index + 1,
-      themeMemory
-    );
-  });
+      item.themeMemory
+    )
+  );
 }
