@@ -271,6 +271,21 @@ function countCoveredAngle(
   return count;
 }
 
+function wasAngleCoveredInPriorIterations(
+  themeMemory: ThemeMemorySummary,
+  angle: EntryAngle,
+  currentIteration: IterationNumber
+): boolean {
+  if (currentIteration === 1) return false;
+
+  return themeMemory.usable.some(
+    (item) =>
+      item.suggestedAngle === angle &&
+      item.iteration != null &&
+      item.iteration < currentIteration
+  );
+}
+
 function scoreAngleNovelty(
   signal: DiagnosticSignal,
   themeMemory: ThemeMemorySummary,
@@ -431,6 +446,24 @@ function scoreRootCauseAlignment(
   return score;
 }
 
+function scoreRepeatedAnglePenalty(
+  signal: DiagnosticSignal,
+  themeMemory: ThemeMemorySummary,
+  iteration: IterationNumber
+): number {
+  if (iteration <= 1) return 0;
+
+  if (!wasAngleCoveredInPriorIterations(themeMemory, signal.entryAngle, iteration)) {
+    return 0;
+  }
+
+  if (iteration === 2) {
+    return -24;
+  }
+
+  return -60;
+}
+
 function scoreIterationIntentFit(
   signal: DiagnosticSignal,
   iteration: IterationNumber
@@ -452,9 +485,10 @@ function scoreIterationIntentFit(
   }
 
   if (iteration === 3) {
-    if (signal.entryAngle === "economics") score += 15;
-    if (signal.entryAngle === "formalization") score += 10;
-    if (signal.entryAngle === "dependency") score += 6;
+    if (signal.entryAngle === "formalization") score += 16;
+    if (signal.entryAngle === "dependency") score += 12;
+    if (signal.entryAngle === "arbitration") score += 10;
+    if (signal.entryAngle === "economics") score -= 12;
     if (signal.signalKind === "absence") score += 8;
   }
 
@@ -468,7 +502,6 @@ function isLowEvidenceSignal(signal: DiagnosticSignal): boolean {
   return (
     excerpt.includes("no_evidence") ||
     excerpt.includes("no evidence") ||
-    constat.includes("insuffisamment etaye") ||
     constat.includes("insuffisamment etaye") ||
     constat.includes("insuffisamment étayé") ||
     constat.includes("non documente") ||
@@ -526,6 +559,7 @@ function scoreSignalForIteration(
   score += scoreReframingRecovery(signal, themeMemory, iteration);
   score += scoreRootCauseAlignment(signal, themeMemory);
   score += scoreLowEvidencePenalty(signal, themeMemory, iteration);
+  score += scoreRepeatedAnglePenalty(signal, themeMemory, iteration);
 
   if (themeMemory.latestUsable && themeMemory.usableFactCount > 0) {
     score += 4;
@@ -666,7 +700,7 @@ function buildQuestionPrompt(
     return buildCausalityQuestion(signal, themeMemory);
   }
 
-  return buildImpactQuestion(signal, themeMemory);
+  return buildConsolidationQuestion(signal, themeMemory);
 }
 
 function buildExplorationQuestion(
@@ -711,52 +745,81 @@ function buildCausalityQuestion(
   const rootCausePart = buildRootCausePromptPart(themeMemory.dominantRootCauses);
   const rootCauseChoice = buildRootCauseChoiceHint(themeMemory.dominantRootCauses);
 
-  if (themeMemory.dominantSuggestedAngle === "arbitration") {
+  if (
+    themeMemory.dominantSuggestedAngle === "arbitration" &&
+    !wasAngleCoveredInPriorIterations(themeMemory, "arbitration", 2)
+  ) {
     return `Sur "${signal.theme}", creusons la chaîne de décision : qui arbitre réellement, qui valide, où se situent les blocages, et en quoi cela explique la situation actuelle ?${factAnchor}`;
   }
 
-  if (themeMemory.dominantSuggestedAngle === "economics") {
+  if (
+    themeMemory.dominantSuggestedAngle === "economics" &&
+    !wasAngleCoveredInPriorIterations(themeMemory, "economics", 2)
+  ) {
     return `Sur "${signal.theme}", creusons le fond économique : en quoi la situation actuelle vient-elle du prix, du chiffrage, de la marge, du coût réel ou du niveau de rentabilité attendu ?${factAnchor}`;
   }
 
-  if (themeMemory.dominantSuggestedAngle === "formalization") {
+  if (
+    themeMemory.dominantSuggestedAngle === "formalization" &&
+    !wasAngleCoveredInPriorIterations(themeMemory, "formalization", 2)
+  ) {
     return `Sur "${signal.theme}", qu’est-ce qui relève d’un défaut de cadre, de rôles, de méthode ou de pilotage formalisé ? Comment cela produit-il la situation observée ?${factAnchor}`;
   }
 
-  if (themeMemory.dominantSuggestedAngle === "dependency") {
+  if (
+    themeMemory.dominantSuggestedAngle === "dependency" &&
+    !wasAngleCoveredInPriorIterations(themeMemory, "dependency", 2)
+  ) {
     return `Sur "${signal.theme}", où se situe la dépendance la plus critique aujourd’hui : une personne clé, un validateur, une ressource rare ou un point de blocage structurel ? Comment cela entretient-il la situation actuelle ?${factAnchor}`;
   }
 
   return `Si l’on creuse ce point sur "${signal.theme}" : ${signal.constat} Quelles sont, selon vous, les causes principales de cette situation ?${rootCausePart}${factAnchor}${rootCauseChoice}`;
 }
 
-function buildImpactQuestion(
+function buildConsolidationQuestion(
   signal: DiagnosticSignal,
   themeMemory: ThemeMemorySummary
 ): string {
   const factAnchor = buildFactAnchor(themeMemory.extractedFacts);
 
-  if (
-    themeMemory.dominantSuggestedAngle === "economics" ||
-    themeMemory.dominantRootCauses.includes("pricing") ||
-    themeMemory.dominantRootCauses.includes("cash")
-  ) {
-    return `Sur le sujet "${signal.theme}", quel est aujourd’hui l’impact économique concret du problème : marge, coût réel, rentabilité, cash ou résultat ? Et où la dérive est-elle la plus sensible ?${factAnchor}`;
+  const economicsAlreadyCovered = wasAngleCoveredInPriorIterations(
+    themeMemory,
+    "economics",
+    3
+  );
+  const formalizationAlreadyCovered = wasAngleCoveredInPriorIterations(
+    themeMemory,
+    "formalization",
+    3
+  );
+  const arbitrationAlreadyCovered = wasAngleCoveredInPriorIterations(
+    themeMemory,
+    "arbitration",
+    3
+  );
+  const dependencyAlreadyCovered = wasAngleCoveredInPriorIterations(
+    themeMemory,
+    "dependency",
+    3
+  );
+
+  if (!formalizationAlreadyCovered) {
+    return `Sur le sujet "${signal.theme}", qu’est-ce qui reste aujourd’hui insuffisamment clarifié, formalisé ou sécurisé dans les rôles, règles de fonctionnement ou responsabilités ? Et quel indicateur simple permettrait de suivre ce point ?${factAnchor}`;
   }
 
-  if (
-    themeMemory.dominantSuggestedAngle === "arbitration" ||
-    themeMemory.dominantRootCauses.includes("arbitration") ||
-    themeMemory.dominantRootCauses.includes("organization")
-  ) {
-    return `Sur le sujet "${signal.theme}", quelles conséquences concrètes les arbitrages actuels produisent-ils sur les délais, la qualité, la charge ou la performance ? Et quel impact est aujourd’hui le plus critique ?${factAnchor}`;
+  if (!dependencyAlreadyCovered) {
+    return `Sur le sujet "${signal.theme}", quelle dépendance reste aujourd’hui la plus pénalisante : une personne clé, un validateur, une ressource rare ou une zone sans pilotage clair ? Et comment pouvez-vous la repérer concrètement ?${factAnchor}`;
   }
 
-  if (themeMemory.dominantRootCauses.includes("resources")) {
-    return `Sur le sujet "${signal.theme}", quelles conséquences concrètes observez-vous aujourd’hui sur la capacité disponible, la charge, les délais ou la fiabilité d’exécution ? Et quel impact vous pénalise le plus ?${factAnchor}`;
+  if (!arbitrationAlreadyCovered) {
+    return `Sur le sujet "${signal.theme}", où la chaîne d’arbitrage reste-t-elle encore insuffisamment claire ou insuffisamment pilotée ? Et quel signal faible vous permettrait de voir la dérive plus tôt ?${factAnchor}`;
   }
 
-  return `Sur le sujet "${signal.theme}", quels impacts concrets observez-vous aujourd’hui sur la marge, les délais, la charge, la qualité ou la fiabilité d’exécution ? Et lequel vous paraît le plus critique ?${factAnchor}`;
+  if (!economicsAlreadyCovered) {
+    return `Sur le sujet "${signal.theme}", quel impact économique concret reste aujourd’hui insuffisamment suivi : marge, coût réel, rentabilité, cash ou résultat ? Et quel indicateur vous manque encore pour le piloter ?${factAnchor}`;
+  }
+
+  return `Sur le sujet "${signal.theme}", quelle zone reste aujourd’hui non pilotée ou insuffisamment objectivée ? Et quel indicateur simple permettrait de la rendre visible plus tôt ?${factAnchor}`;
 }
 
 function hasStrongReasonToKeep(
