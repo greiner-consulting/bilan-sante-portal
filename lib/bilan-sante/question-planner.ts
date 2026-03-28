@@ -44,24 +44,31 @@ type ScoredSignal = {
 };
 
 const CANDIDATE_POOL_SIZE: Record<IterationNumber, number> = {
-  1: 12,
-  2: 12,
-  3: 12,
+  1: 14,
+  2: 14,
+  3: 14,
 };
+
+const MIN_CORE_QUESTIONS = 3;
+const MAX_ITERATION_QUESTIONS = 6;
 
 const ABSOLUTE_MIN_SCORE: Record<IterationNumber, number> = {
-  1: 42,
-  2: 38,
-  3: 36,
+  1: 40,
+  2: 36,
+  3: 34,
 };
 
-const MARGINAL_SCORE_GAP_LIMIT: Record<IterationNumber, number> = {
-  1: 18,
-  2: 22,
-  3: 22,
+const EXTENSION_MIN_SCORE: Record<IterationNumber, number> = {
+  1: 48,
+  2: 42,
+  3: 40,
 };
 
-const MIN_QUESTIONS_FLOOR = 3;
+const EXTENSION_MAX_GAP_FROM_PREVIOUS: Record<IterationNumber, number> = {
+  1: 14,
+  2: 18,
+  3: 18,
+};
 
 function normalizeText(value: string | null | undefined): string {
   return String(value ?? "").replace(/\s+/g, " ").trim();
@@ -454,6 +461,21 @@ function scoreIterationIntentFit(
   return score;
 }
 
+function isLowEvidenceSignal(signal: DiagnosticSignal): boolean {
+  const excerpt = normalizeForMatch(signal.sourceExcerpt);
+  const constat = normalizeForMatch(signal.constat);
+
+  return (
+    excerpt.includes("no_evidence") ||
+    excerpt.includes("no evidence") ||
+    constat.includes("insuffisamment etaye") ||
+    constat.includes("insuffisamment etaye") ||
+    constat.includes("insuffisamment étayé") ||
+    constat.includes("non documente") ||
+    constat.includes("non documenté")
+  );
+}
+
 function scoreLowEvidencePenalty(
   signal: DiagnosticSignal,
   themeMemory: ThemeMemorySummary,
@@ -461,14 +483,7 @@ function scoreLowEvidencePenalty(
 ): number {
   let score = 0;
 
-  const noEvidenceLike =
-    normalizeForMatch(signal.sourceExcerpt).includes("no_evidence") ||
-    normalizeForMatch(signal.constat).includes("insuffisamment etaye") ||
-    normalizeForMatch(signal.constat).includes("insuffisamment étayé") ||
-    normalizeForMatch(signal.constat).includes("non documente") ||
-    normalizeForMatch(signal.constat).includes("non documenté");
-
-  if (!noEvidenceLike) {
+  if (!isLowEvidenceSignal(signal)) {
     return score;
   }
 
@@ -517,61 +532,6 @@ function scoreSignalForIteration(
   }
 
   return score;
-}
-
-function selectDiverseSignals(
-  scoredSignals: ScoredSignal[],
-  iteration: IterationNumber
-): ScoredSignal[] {
-  const selected: ScoredSignal[] = [];
-  const usedThemes = new Set<string>();
-  const usedSections = new Set<string>();
-
-  const absoluteMinScore = ABSOLUTE_MIN_SCORE[iteration];
-  const gapLimit = MARGINAL_SCORE_GAP_LIMIT[iteration];
-
-  for (const item of scoredSignals) {
-    const { signal, score } = item;
-
-    const normalizedTheme = normalizeText(signal.theme).toLowerCase();
-    const sourceSection = normalizeText(signal.sourceSection);
-
-    if (usedThemes.has(normalizedTheme)) {
-      continue;
-    }
-
-    if (
-      sourceSection &&
-      usedSections.has(sourceSection) &&
-      signal.signalKind === "explicit"
-    ) {
-      continue;
-    }
-
-    if (selected.length >= MIN_QUESTIONS_FLOOR && score < absoluteMinScore) {
-      break;
-    }
-
-    if (selected.length >= MIN_QUESTIONS_FLOOR) {
-      const previousScore = selected[selected.length - 1]?.score ?? score;
-      if (previousScore - score > gapLimit) {
-        break;
-      }
-    }
-
-    selected.push(item);
-    usedThemes.add(normalizedTheme);
-
-    if (sourceSection) {
-      usedSections.add(sourceSection);
-    }
-  }
-
-  if (selected.length >= MIN_QUESTIONS_FLOOR) {
-    return selected;
-  }
-
-  return scoredSignals.slice(0, Math.min(MIN_QUESTIONS_FLOOR, scoredSignals.length));
 }
 
 function buildRootCausePromptPart(
@@ -799,6 +759,143 @@ function buildImpactQuestion(
   return `Sur le sujet "${signal.theme}", quels impacts concrets observez-vous aujourd’hui sur la marge, les délais, la charge, la qualité ou la fiabilité d’exécution ? Et lequel vous paraît le plus critique ?${factAnchor}`;
 }
 
+function hasStrongReasonToKeep(
+  item: ScoredSignal,
+  iteration: IterationNumber
+): boolean {
+  const { signal, themeMemory, score } = item;
+
+  if (signal.criticalityScore >= 85) return true;
+  if (themeMemory.usableFactCount >= 2) return true;
+  if (themeMemory.dominantRootCauses.length >= 2 && iteration >= 2) return true;
+  if (
+    iteration === 1 &&
+    signal.signalKind === "explicit" &&
+    (signal.entryAngle === "mechanism" || signal.entryAngle === "formalization") &&
+    score >= EXTENSION_MIN_SCORE[iteration]
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+function isWeakTailCandidate(
+  item: ScoredSignal,
+  iteration: IterationNumber
+): boolean {
+  const { signal, score } = item;
+
+  if (score < EXTENSION_MIN_SCORE[iteration] && isLowEvidenceSignal(signal)) {
+    return true;
+  }
+
+  if (iteration === 1 && signal.signalKind === "absence" && score < 55) {
+    return true;
+  }
+
+  return false;
+}
+
+function selectHighQualitySignals(
+  scoredSignals: ScoredSignal[],
+  iteration: IterationNumber
+): ScoredSignal[] {
+  if (scoredSignals.length === 0) return [];
+
+  const selected: ScoredSignal[] = [];
+  const usedThemes = new Set<string>();
+  const usedSections = new Set<string>();
+
+  for (const item of scoredSignals) {
+    const { signal, score } = item;
+
+    const normalizedTheme = normalizeText(signal.theme).toLowerCase();
+    const sourceSection = normalizeText(signal.sourceSection);
+
+    if (usedThemes.has(normalizedTheme)) continue;
+
+    if (
+      sourceSection &&
+      usedSections.has(sourceSection) &&
+      signal.signalKind === "explicit"
+    ) {
+      continue;
+    }
+
+    if (selected.length < MIN_CORE_QUESTIONS) {
+      if (score >= ABSOLUTE_MIN_SCORE[iteration]) {
+        selected.push(item);
+        usedThemes.add(normalizedTheme);
+        if (sourceSection) usedSections.add(sourceSection);
+      }
+      continue;
+    }
+
+    const previousScore = selected[selected.length - 1]?.score ?? score;
+    const scoreGap = previousScore - score;
+
+    if (score < EXTENSION_MIN_SCORE[iteration]) {
+      if (!hasStrongReasonToKeep(item, iteration)) {
+        break;
+      }
+    }
+
+    if (scoreGap > EXTENSION_MAX_GAP_FROM_PREVIOUS[iteration]) {
+      if (!hasStrongReasonToKeep(item, iteration)) {
+        break;
+      }
+    }
+
+    if (isWeakTailCandidate(item, iteration)) {
+      if (!hasStrongReasonToKeep(item, iteration)) {
+        break;
+      }
+    }
+
+    selected.push(item);
+    usedThemes.add(normalizedTheme);
+    if (sourceSection) usedSections.add(sourceSection);
+
+    if (selected.length >= MAX_ITERATION_QUESTIONS) {
+      break;
+    }
+  }
+
+  if (selected.length >= MIN_CORE_QUESTIONS) {
+    return selected;
+  }
+
+  const fallback: ScoredSignal[] = [];
+  const fallbackThemes = new Set<string>();
+  const fallbackSections = new Set<string>();
+
+  for (const item of scoredSignals) {
+    const normalizedTheme = normalizeText(item.signal.theme).toLowerCase();
+    const sourceSection = normalizeText(item.signal.sourceSection);
+
+    if (fallbackThemes.has(normalizedTheme)) continue;
+
+    if (
+      sourceSection &&
+      fallbackSections.has(sourceSection) &&
+      item.signal.signalKind === "explicit"
+    ) {
+      continue;
+    }
+
+    fallback.push(item);
+    fallbackThemes.add(normalizedTheme);
+    if (sourceSection) fallbackSections.add(sourceSection);
+
+    if (fallback.length >= Math.min(MIN_CORE_QUESTIONS, scoredSignals.length)) {
+      break;
+    }
+  }
+
+  return fallback;
+}
+
 export function planIterationQuestions(params: PlanParams): StructuredQuestion[] {
   const { registry, dimensionId, iteration, session } = params;
 
@@ -823,7 +920,7 @@ export function planIterationQuestions(params: PlanParams): StructuredQuestion[]
     .sort((a, b) => b.score - a.score)
     .slice(0, CANDIDATE_POOL_SIZE[iteration]);
 
-  const selected = selectDiverseSignals(candidates, iteration);
+  const selected = selectHighQualitySignals(candidates, iteration);
 
   return selected.map((item, index) =>
     buildStructuredQuestion(

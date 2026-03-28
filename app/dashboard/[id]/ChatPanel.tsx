@@ -42,10 +42,24 @@ type FrozenDimension = {
   frozenAt: string;
 };
 
-type DisplayMessage = {
-  role: "assistant" | "user" | "system";
-  text: string;
-};
+type DisplayMessage =
+  | {
+      role: "assistant" | "user" | "system";
+      text: string;
+    }
+  | {
+      role: "question";
+      text: string;
+      theme?: string;
+      constat: string;
+      risque_managerial: string;
+      question: string;
+      dimension?: number | null;
+      iteration?: number | null;
+      ordinal?: number | null;
+      total?: number | null;
+      key: string;
+    };
 
 type SessionState = {
   id: string;
@@ -263,6 +277,25 @@ function stringifyReportPreview(report: unknown): string {
   }
 }
 
+function buildQuestionMessageKey(params: {
+  sessionId: string;
+  dimension?: number | null;
+  iteration?: number | null;
+  ordinal: number;
+  total: number;
+  question: StructuredQuestion;
+}) {
+  return [
+    params.sessionId,
+    params.dimension ?? "na",
+    params.iteration ?? "na",
+    params.ordinal,
+    params.total,
+    params.question.theme ?? "",
+    params.question.question,
+  ].join("|");
+}
+
 export default function ChatPanel({ sessionId }: Props) {
   const [messages, setMessages] = useState<DisplayMessage[]>([
     {
@@ -285,16 +318,54 @@ export default function ChatPanel({ sessionId }: Props) {
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const didBootstrapRef = useRef(false);
+  const displayedQuestionKeysRef = useRef<Set<string>>(new Set());
 
   const currentQuestion = useMemo(() => {
     if (questions.length === 0) return null;
     return questions[clampIndex(currentIndex, questions.length)] ?? null;
   }, [questions, currentIndex]);
 
-  function pushMessage(role: DisplayMessage["role"], text: string) {
+  function pushMessage(role: "assistant" | "user" | "system", text: string) {
     const content = String(text || "").trim();
     if (!content) return;
     setMessages((prev) => [...prev, { role, text: content }]);
+  }
+
+  function pushQuestionMessage(params: {
+    question: StructuredQuestion;
+    dimension?: number | null;
+    iteration?: number | null;
+    ordinal: number;
+    total: number;
+  }) {
+    const key = buildQuestionMessageKey({
+      sessionId,
+      dimension: params.dimension,
+      iteration: params.iteration,
+      ordinal: params.ordinal,
+      total: params.total,
+      question: params.question,
+    });
+
+    if (displayedQuestionKeysRef.current.has(key)) return;
+    displayedQuestionKeysRef.current.add(key);
+
+    setMessages((prev) => [
+      ...prev,
+      {
+        role: "question",
+        key,
+        text: params.question.question,
+        theme: params.question.theme,
+        constat: params.question.constat,
+        risque_managerial: params.question.risque_managerial,
+        question: params.question.question,
+        dimension: params.dimension,
+        iteration: params.iteration,
+        ordinal: params.ordinal,
+        total: params.total,
+      },
+    ]);
   }
 
   function resetQuestionState() {
@@ -536,6 +607,7 @@ export default function ChatPanel({ sessionId }: Props) {
 
   useEffect(() => {
     didBootstrapRef.current = false;
+    displayedQuestionKeysRef.current = new Set();
     setSessionState(null);
     resetQuestionState();
     setAwaitingValidation(false);
@@ -593,6 +665,25 @@ export default function ChatPanel({ sessionId }: Props) {
     if (questions.length === 0) return;
     setCurrentIndex((prev) => clampIndex(prev, questions.length));
   }, [questions]);
+
+  useEffect(() => {
+    if (!currentQuestion) return;
+
+    pushQuestionMessage({
+      question: currentQuestion,
+      dimension: sessionState?.dimension,
+      iteration: sessionState?.iteration,
+      ordinal: Math.min(currentIndex + 1, questions.length),
+      total: questions.length,
+    });
+  }, [
+    currentQuestion,
+    currentIndex,
+    questions.length,
+    sessionState?.dimension,
+    sessionState?.iteration,
+    sessionId,
+  ]);
 
   const placeholder = buildPlaceholder({
     currentQuestion,
@@ -726,6 +817,46 @@ export default function ChatPanel({ sessionId }: Props) {
         className="border rounded p-4 max-h-[380px] overflow-y-auto space-y-3 bg-white"
       >
         {messages.map((m, i) => {
+          if (m.role === "question") {
+            const displayConstat = cleanPrefixedLabel(m.constat, "Constat");
+            const displayRisque = cleanPrefixedLabel(
+              m.risque_managerial,
+              "Risque managérial"
+            );
+            const displayQuestion = cleanPrefixedLabel(m.question, "Question");
+
+            return (
+              <div key={m.key} className="bg-gray-50 mr-8 rounded p-3 border">
+                <div className="text-xs text-gray-500 mb-2">
+                  Dimension {m.dimension ?? "?"} — Itération {m.iteration ?? "?"}/3
+                  {" — "}
+                  Question {m.ordinal ?? "?"} / {m.total ?? "?"}
+                </div>
+
+                {m.theme && (
+                  <div className="text-xs text-gray-500 mb-2">
+                    Thème : {m.theme}
+                  </div>
+                )}
+
+                <div className="space-y-2">
+                  <div>
+                    <span className="font-semibold">Constat : </span>
+                    {displayConstat}
+                  </div>
+                  <div>
+                    <span className="font-semibold">Risque managérial : </span>
+                    {displayRisque}
+                  </div>
+                  <div>
+                    <span className="font-semibold">Question : </span>
+                    {displayQuestion}
+                  </div>
+                </div>
+              </div>
+            );
+          }
+
           const isUser = m.role === "user";
           const isSystem = m.role === "system";
 
