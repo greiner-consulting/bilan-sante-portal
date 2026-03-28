@@ -497,6 +497,9 @@ function selectSignalsForIteration(
       ) {
         score += 20;
       }
+      if (signal.signalKind === "absence") {
+        score -= 30;
+      }
     }
 
     if (iteration === 2) {
@@ -646,6 +649,59 @@ function computeIterationQuestionPolicy(params: {
   };
 }
 
+function isWeakTailQuestion(question: StructuredQuestion): boolean {
+  const constat = normalizeForMatch(question.constat);
+  const questionText = normalizeForMatch(question.questionOuverte);
+  const theme = normalizeForMatch(question.theme);
+
+  const weakConstat =
+    constat.includes("no_evidence") ||
+    constat.includes("no evidence") ||
+    constat.includes("insuffisamment etaye") ||
+    constat.includes("insuffisamment étayé") ||
+    constat.includes("non documente") ||
+    constat.includes("non documenté");
+
+  const weakQuestion =
+    questionText.includes("ne met pas en evidence") ||
+    questionText.includes("ne met pas en évidence") ||
+    questionText.includes("comment ce sujet est il reellement traite") ||
+    questionText.includes("comment ce sujet est-il reellement traite") ||
+    questionText.includes("comment ce sujet est-il réellement traité");
+
+  const weakTheme =
+    theme.includes("recrutement et integration") ||
+    theme.includes("recrutement et intégration");
+
+  return weakConstat || weakQuestion || weakTheme;
+}
+
+function trimWeakTailQuestions(params: {
+  questions: StructuredQuestion[];
+  iteration: IterationNumber;
+}): StructuredQuestion[] {
+  const { iteration } = params;
+  const floor = minimumFloorForIteration(iteration);
+  const trimmed = [...params.questions];
+
+  if (iteration !== 1) {
+    return trimmed;
+  }
+
+  while (trimmed.length > floor) {
+    const tail = trimmed[trimmed.length - 1];
+    if (!tail) break;
+
+    if (!isWeakTailQuestion(tail)) {
+      break;
+    }
+
+    trimmed.pop();
+  }
+
+  return trimmed;
+}
+
 function applyEmptyWorksetAutoValidation(
   session: DiagnosticSessionAggregate
 ): DiagnosticSessionAggregate {
@@ -694,7 +750,17 @@ function buildWorkset(
     previousIterationQuestionCount: previousQuestionCount,
   });
 
-  const questions = candidateQuestions.slice(0, policy.targetQuestionCount);
+  const slicedQuestions = candidateQuestions.slice(0, policy.targetQuestionCount);
+  const questions = trimWeakTailQuestions({
+    questions: slicedQuestions,
+    iteration,
+  });
+
+  const finalPolicy = computeIterationQuestionPolicy({
+    iteration,
+    candidateCount: questions.length,
+    previousIterationQuestionCount: previousQuestionCount,
+  });
 
   return {
     dimensionId,
@@ -703,8 +769,8 @@ function buildWorkset(
     questions,
     answers: [],
     closurePrompt: buildIterationClosurePrompt(dimensionId, iteration),
-    targetQuestionCount: policy.targetQuestionCount,
-    minimumRequiredCount: policy.minimumRequiredCount,
+    targetQuestionCount: finalPolicy.targetQuestionCount,
+    minimumRequiredCount: finalPolicy.minimumRequiredCount,
     sourceIterationQuestionCount: previousQuestionCount,
   };
 }
