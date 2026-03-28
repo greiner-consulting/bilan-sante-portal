@@ -1,5 +1,3 @@
-// lib/bilan-sante/session-service.ts
-
 import {
   answeredCount,
   bootstrapSessionFromTrameWithLlm,
@@ -15,6 +13,7 @@ import type {
   DiagnosticSignal,
   EntryAngle,
   StructuredQuestion,
+  MemoryInsight,
 } from "@/lib/bilan-sante/session-model";
 import type { ObjectiveDecisionInput } from "@/lib/bilan-sante/objectives-builder";
 import {
@@ -308,6 +307,68 @@ function buildRewriteAssistantMessage(
   }
 }
 
+function ensureAnalysisMemory(
+  session: DiagnosticSessionAggregate
+): DiagnosticSessionAggregate {
+  return {
+    ...session,
+    analysisMemory: session.analysisMemory ?? [],
+  };
+}
+
+function appendAnswerAnalysisToMemory(params: {
+  session: DiagnosticSessionAggregate;
+  rawMessage: string;
+  question: StructuredQuestion;
+  analysis: ReturnType<typeof analyzeUserAnswer>;
+}): DiagnosticSessionAggregate {
+  const { session, rawMessage, question, analysis } = params;
+  const nextSession = ensureAnalysisMemory(session);
+
+  const extractedFacts =
+    analysis.extractedFacts.length > 0
+      ? analysis.extractedFacts
+      : analysis.cleanedMessage.length >= 8 &&
+        analysis.intent !== "clarification_request" &&
+        analysis.intent !== "noise"
+      ? [analysis.cleanedMessage]
+      : [];
+
+  const nextMemoryItem: MemoryInsight = {
+    id: `mem-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    createdAt: new Date().toISOString(),
+    dimensionId: nextSession.currentDimensionId,
+    iteration: nextSession.currentIteration,
+    questionId: question.id,
+    signalId: question.signalId,
+    theme: question.theme,
+    intent: analysis.intent,
+    action: analysis.action,
+    confidence: analysis.confidence,
+    summary: analysis.summary,
+    rationale: analysis.rationale,
+    rawMessage,
+    extractedFacts,
+    detectedRootCauses: analysis.detectedRootCauses,
+    reframingSignals: analysis.reframingSignals,
+    contradictionSignals: analysis.contradictionSignals,
+    suggestedAngle: analysis.suggestedAngle,
+    shouldStoreAsAnswer: analysis.shouldStoreAsAnswer,
+    shouldRephraseQuestion: analysis.shouldRephraseQuestion,
+    shouldPivotAngle: analysis.shouldPivotAngle,
+    isUsableBusinessMatter:
+      analysis.isUsableBusinessMatter ||
+      analysis.shouldStoreAsAnswer ||
+      extractedFacts.length > 0 ||
+      analysis.detectedRootCauses.length > 0,
+  };
+
+  return {
+    ...nextSession,
+    analysisMemory: [...(nextSession.analysisMemory ?? []), nextMemoryItem],
+  };
+}
+
 async function ensureAggregate(sessionId: string): Promise<{
   row: Awaited<ReturnType<typeof loadAggregate>>["row"];
   aggregate: DiagnosticSessionAggregate;
@@ -367,7 +428,7 @@ export async function processSessionInput(params: {
   const rawMessage = normalizeText(params.message);
   const { aggregate: initialAggregate } = await ensureAggregate(params.sessionId);
 
-  let aggregate = initialAggregate;
+  let aggregate = ensureAnalysisMemory(initialAggregate);
 
   if (rawMessage) {
     await appendDiagnosticEvent({
@@ -535,6 +596,13 @@ export async function processSessionInput(params: {
     },
   });
 
+  aggregate = appendAnswerAnalysisToMemory({
+    session: aggregate,
+    rawMessage,
+    question: currentQuestion,
+    analysis,
+  });
+
   if (
     shouldRewriteCurrentQuestion({
       intent: analysis.intent,
@@ -564,6 +632,11 @@ export async function processSessionInput(params: {
         ...payload,
         kind: "question_rephrased",
         analysis_intent: analysis.intent,
+        analysis_summary: analysis.summary,
+        analysis_rationale: analysis.rationale,
+        extracted_facts: analysis.extractedFacts,
+        detected_root_causes: analysis.detectedRootCauses,
+        suggested_angle: analysis.suggestedAngle,
       },
     });
 
@@ -588,6 +661,12 @@ export async function processSessionInput(params: {
       ...payload,
       kind: "dimension_reply",
       analysis_intent: analysis.intent,
+      analysis_summary: analysis.summary,
+      analysis_rationale: analysis.rationale,
+      extracted_facts: analysis.extractedFacts,
+      detected_root_causes: analysis.detectedRootCauses,
+      suggested_angle: analysis.suggestedAngle,
+      memory_written: true,
     },
   });
 

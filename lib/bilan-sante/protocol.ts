@@ -1,5 +1,3 @@
-// lib/bilan-sante/protocol.ts
-
 export type DimensionId = 1 | 2 | 3 | 4;
 export type IterationNumber = 1 | 2 | 3;
 export type ValidationDecision = "yes" | "no";
@@ -109,7 +107,12 @@ export function buildIterationClosurePrompt(
   return `${scope} Merci de répondre uniquement par "oui" ou "non".`;
 }
 
-export function minQuestionsForIteration(
+/**
+ * Cadre méthodologique haut niveau.
+ * Le moteur réel de fermeture doit désormais s’appuyer sur le workset
+ * effectivement construit, pas sur cette valeur seule.
+ */
+export function maxQuestionsForIteration(
   iteration: IterationNumber
 ): number {
   switch (iteration) {
@@ -118,10 +121,39 @@ export function minQuestionsForIteration(
     case 2:
       return 6;
     case 3:
-      return 5;
+      return 6;
     default:
       return 6;
   }
+}
+
+/**
+ * Plancher méthodologique : en dessous de 3, on considère que l’itération
+ * manque de matière, sauf cas d’exception explicite géré par le moteur.
+ */
+export function minimumFloorForIteration(
+  iteration: IterationNumber
+): number {
+  switch (iteration) {
+    case 1:
+      return 3;
+    case 2:
+      return 3;
+    case 3:
+      return 3;
+    default:
+      return 3;
+  }
+}
+
+/**
+ * Compat descendante temporaire.
+ * À terme, remplacer tous les usages par minimumFloorForIteration / workset.
+ */
+export function minQuestionsForIteration(
+  iteration: IterationNumber
+): number {
+  return minimumFloorForIteration(iteration);
 }
 
 export function isLastIteration(

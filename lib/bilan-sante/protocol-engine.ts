@@ -1,5 +1,3 @@
-// lib/bilan-sante/protocol-engine.ts
-
 import {
   FINAL_OBJECTIVES_HEADER,
   buildIterationClosurePrompt,
@@ -8,7 +6,8 @@ import {
   dimensionTitle,
   isLastDimension,
   isLastIteration,
-  minQuestionsForIteration,
+  maxQuestionsForIteration,
+  minimumFloorForIteration,
   nextDimensionId,
   nextIterationNumber,
   type DimensionId,
@@ -29,6 +28,7 @@ import {
   type FinalObjective,
   type FinalObjectiveSet,
   type FrozenDimensionDiagnosis,
+  type IterationHistoryRecord,
   type IterationWorkset,
   type MemoryInsight,
   type StructuredQuestion,
@@ -91,6 +91,7 @@ function withSafeMemory(
   return {
     ...session,
     analysisMemory: session.analysisMemory ?? [],
+    iterationHistory: session.iterationHistory ?? [],
   };
 }
 
@@ -179,7 +180,6 @@ function getDominantAngleFromThemeMemory(
   theme: string | null | undefined
 ): EntryAngle | null {
   const memory = getMemoryForTheme(session, dimensionId, theme);
-
   const counts = new Map<EntryAngle, number>();
 
   for (const item of memory) {
@@ -581,22 +581,120 @@ function buildPlannedQuestions(
   }
 }
 
+function getPreviousIterationQuestionCount(
+  session: DiagnosticSessionAggregate,
+  dimensionId: DimensionId,
+  iteration: IterationNumber
+): number | null {
+  if (iteration === 1) return null;
+
+  const previousIteration = (iteration - 1) as IterationNumber;
+  const history = session.iterationHistory ?? [];
+
+  const previous = [...history]
+    .reverse()
+    .find(
+      (item) =>
+        item.dimensionId === dimensionId && item.iteration === previousIteration
+    );
+
+  return previous?.questionCount ?? null;
+}
+
+function computeIterationQuestionPolicy(params: {
+  iteration: IterationNumber;
+  candidateCount: number;
+  previousIterationQuestionCount?: number | null;
+}): {
+  targetQuestionCount: number;
+  minimumRequiredCount: number;
+} {
+  const {
+    iteration,
+    candidateCount,
+    previousIterationQuestionCount = null,
+  } = params;
+
+  const hardMax = maxQuestionsForIteration(iteration);
+  const floor = minimumFloorForIteration(iteration);
+
+  let cap = hardMax;
+
+  if ((iteration === 2 || iteration === 3) && previousIterationQuestionCount != null) {
+    cap = Math.min(cap, previousIterationQuestionCount);
+  }
+
+  const targetQuestionCount = Math.max(0, Math.min(candidateCount, cap));
+
+  if (targetQuestionCount === 0) {
+    return {
+      targetQuestionCount: 0,
+      minimumRequiredCount: 0,
+    };
+  }
+
+  if (targetQuestionCount >= floor) {
+    return {
+      targetQuestionCount,
+      minimumRequiredCount: targetQuestionCount,
+    };
+  }
+
+  return {
+    targetQuestionCount,
+    minimumRequiredCount: targetQuestionCount,
+  };
+}
+
+function applyEmptyWorksetAutoValidation(
+  session: DiagnosticSessionAggregate
+): DiagnosticSessionAggregate {
+  const workset = session.currentWorkset;
+
+  if (!workset) return session;
+  if (workset.questions.length > 0) return session;
+  if (session.phase !== "dimension_iteration") return session;
+
+  return {
+    ...session,
+    phase: "iteration_validation",
+    currentWorkset: {
+      ...workset,
+      closureAskedAt: workset.closureAskedAt ?? new Date().toISOString(),
+    },
+  };
+}
+
 function buildWorkset(
   session: DiagnosticSessionAggregate,
   dimensionId: DimensionId,
   iteration: IterationNumber,
   reopen = false
 ): IterationWorkset {
-  const targetCount = reopen
-    ? Math.max(3, minQuestionsForIteration(iteration))
-    : minQuestionsForIteration(iteration);
+  const previousQuestionCount = getPreviousIterationQuestionCount(
+    session,
+    dimensionId,
+    iteration
+  );
 
-  const questions = buildPlannedQuestions(
+  const candidateTarget = reopen
+    ? Math.max(maxQuestionsForIteration(iteration), 6)
+    : maxQuestionsForIteration(iteration);
+
+  const candidateQuestions = buildPlannedQuestions(
     session,
     dimensionId,
     iteration,
-    targetCount
+    candidateTarget
   );
+
+  const policy = computeIterationQuestionPolicy({
+    iteration,
+    candidateCount: candidateQuestions.length,
+    previousIterationQuestionCount: previousQuestionCount,
+  });
+
+  const questions = candidateQuestions.slice(0, policy.targetQuestionCount);
 
   return {
     dimensionId,
@@ -605,6 +703,9 @@ function buildWorkset(
     questions,
     answers: [],
     closurePrompt: buildIterationClosurePrompt(dimensionId, iteration),
+    targetQuestionCount: policy.targetQuestionCount,
+    minimumRequiredCount: policy.minimumRequiredCount,
+    sourceIterationQuestionCount: previousQuestionCount,
   };
 }
 
@@ -861,6 +962,30 @@ function requireCurrentWorkset(session: DiagnosticSessionAggregate): IterationWo
   return session.currentWorkset;
 }
 
+function appendIterationHistory(
+  session: DiagnosticSessionAggregate,
+  record: IterationHistoryRecord
+): DiagnosticSessionAggregate {
+  const history = session.iterationHistory ?? [];
+  const filtered = history.filter(
+    (item) =>
+      !(
+        item.dimensionId === record.dimensionId &&
+        item.iteration === record.iteration
+      )
+  );
+
+  return {
+    ...session,
+    iterationHistory: [...filtered, record].sort((a, b) => {
+      if (a.dimensionId !== b.dimensionId) {
+        return a.dimensionId - b.dimensionId;
+      }
+      return a.iteration - b.iteration;
+    }),
+  };
+}
+
 function createBootstrappedSessionFromRegistry(params: {
   sessionId: string;
   rawTrameText: string;
@@ -879,6 +1004,7 @@ function createBootstrappedSessionFromRegistry(params: {
   };
 
   session.currentWorkset = buildWorkset(session, 1, 1, false);
+  session = applyEmptyWorksetAutoValidation(session);
 
   return touchSession(withSafeMemory(session));
 }
@@ -1024,14 +1150,15 @@ export function registerAnswer(params: {
   };
 
   const answeredCount = nextWorkset.answers.length;
-  const minimum = minQuestionsForIteration(nextWorkset.iteration);
+  const required =
+    nextWorkset.minimumRequiredCount ?? nextWorkset.questions.length;
 
   let nextSession: DiagnosticSessionAggregate = {
     ...session,
     currentWorkset: nextWorkset,
   };
 
-  if (answeredCount >= minimum && isWorksetFullyAnswered(nextWorkset)) {
+  if (answeredCount >= required && isWorksetFullyAnswered(nextWorkset)) {
     nextWorkset.closureAskedAt = new Date().toISOString();
     nextSession.phase = "iteration_validation";
   }
@@ -1063,8 +1190,17 @@ export function submitIterationClosure(params: {
       ),
     };
 
+    session = applyEmptyWorksetAutoValidation(session);
     return touchSession(withSafeMemory(session));
   }
+
+  session = appendIterationHistory(session, {
+    dimensionId: currentWorkset.dimensionId,
+    iteration: currentWorkset.iteration,
+    questionCount: currentWorkset.questions.length,
+    answeredCount: currentWorkset.answers.length,
+    closedAt: new Date().toISOString(),
+  });
 
   if (!isLastIteration(currentWorkset.iteration)) {
     const nextIteration = nextIterationNumber(currentWorkset.iteration)!;
@@ -1081,6 +1217,7 @@ export function submitIterationClosure(params: {
       ),
     };
 
+    session = applyEmptyWorksetAutoValidation(session);
     return touchSession(withSafeMemory(session));
   }
 
@@ -1107,6 +1244,7 @@ export function submitIterationClosure(params: {
       currentWorkset: buildWorkset(session, nextDimension, 1, false),
     };
 
+    session = applyEmptyWorksetAutoValidation(session);
     return touchSession(withSafeMemory(session));
   }
 
@@ -1197,6 +1335,7 @@ export function cloneSession(
         }
       : null,
     analysisMemory: [...(session.analysisMemory ?? [])],
+    iterationHistory: [...(session.iterationHistory ?? [])],
   };
 }
 

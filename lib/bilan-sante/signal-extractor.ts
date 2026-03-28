@@ -11,9 +11,6 @@ import type {
 } from "@/lib/bilan-sante/session-model";
 import {
   MAX_SECTION_REUSE_BEFORE_HARD_PENALTY,
-  MIN_CONFIDENCE_SCORE,
-  MIN_ILLUSTRATIVE_RELEVANCE_SCORE,
-  MIN_RELEVANCE_SCORE,
   evidenceNatureRank,
   normalizeExtractionText,
   type EvidenceNature,
@@ -76,23 +73,15 @@ type LlmAcceptedCandidate = {
 };
 
 type LlmFilterDecision =
-  | "accepted"
+  | "accepted_non_anecdotal"
   | "rejected_no_section"
-  | "rejected_anecdotal"
-  | "rejected_structural_too_weak"
-  | "rejected_illustrative_too_weak"
-  | "rejected_unclear_too_weak"
-  | "rejected_default_too_weak";
+  | "rejected_anecdotal";
 
 type LlmFilterStats = {
   total: number;
-  accepted: number;
+  acceptedNonAnecdotal: number;
   rejectedNoSection: number;
   rejectedAnecdotal: number;
-  rejectedStructuralTooWeak: number;
-  rejectedIllustrativeTooWeak: number;
-  rejectedUnclearTooWeak: number;
-  rejectedDefaultTooWeak: number;
 };
 
 const MAX_EXCERPT_LENGTH = 280;
@@ -436,6 +425,20 @@ function uniqueStrings(values: string[]): string[] {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
+}
+
+function normalizeLlmScore(value: number): number {
+  const safe = clamp(Number(value ?? 0), 0, 100);
+
+  if (safe <= 5) {
+    return clamp(safe * 20, 0, 100);
+  }
+
+  if (safe <= 10) {
+    return clamp(safe * 10, 0, 100);
+  }
+
+  return safe;
 }
 
 function countOccurrences(haystack: string, needle: string): number {
@@ -1144,13 +1147,9 @@ function findSectionById(
 function initLlmFilterStats(): LlmFilterStats {
   return {
     total: 0,
-    accepted: 0,
+    acceptedNonAnecdotal: 0,
     rejectedNoSection: 0,
     rejectedAnecdotal: 0,
-    rejectedStructuralTooWeak: 0,
-    rejectedIllustrativeTooWeak: 0,
-    rejectedUnclearTooWeak: 0,
-    rejectedDefaultTooWeak: 0,
   };
 }
 
@@ -1161,26 +1160,14 @@ function registerLlmDecision(
   stats.total += 1;
 
   switch (decision) {
-    case "accepted":
-      stats.accepted += 1;
+    case "accepted_non_anecdotal":
+      stats.acceptedNonAnecdotal += 1;
       break;
     case "rejected_no_section":
       stats.rejectedNoSection += 1;
       break;
     case "rejected_anecdotal":
       stats.rejectedAnecdotal += 1;
-      break;
-    case "rejected_structural_too_weak":
-      stats.rejectedStructuralTooWeak += 1;
-      break;
-    case "rejected_illustrative_too_weak":
-      stats.rejectedIllustrativeTooWeak += 1;
-      break;
-    case "rejected_unclear_too_weak":
-      stats.rejectedUnclearTooWeak += 1;
-      break;
-    case "rejected_default_too_weak":
-      stats.rejectedDefaultTooWeak += 1;
       break;
   }
 }
@@ -1192,44 +1179,26 @@ function evaluateLlmSignalAcceptance(
     return "rejected_anecdotal";
   }
 
-  const relevance = clamp(item.relevanceScore, 0, 100);
-  const confidence = clamp(item.confidenceScore, 0, 100);
-  const criticality = clamp(item.criticalityScore, 0, 100);
+  return "accepted_non_anecdotal";
+}
 
-  if (item.evidenceNature === "structural") {
-    if (relevance >= 40 && confidence >= 40) {
-      return "accepted";
-    }
-    return "rejected_structural_too_weak";
-  }
-
-  if (item.evidenceNature === "illustrative") {
-    const illustrativeThreshold = Math.max(
-      MIN_ILLUSTRATIVE_RELEVANCE_SCORE - 8,
-      50
-    );
-
-    if (relevance >= illustrativeThreshold && confidence >= 38) {
-      return "accepted";
-    }
-    return "rejected_illustrative_too_weak";
-  }
-
-  if (item.evidenceNature === "unclear") {
-    if (relevance >= 60 && (confidence >= 35 || criticality >= 70)) {
-      return "accepted";
-    }
-    return "rejected_unclear_too_weak";
-  }
-
-  if (
-    relevance >= Math.max(MIN_RELEVANCE_SCORE - 10, 45) &&
-    confidence >= Math.max(MIN_CONFIDENCE_SCORE - 10, 35)
-  ) {
-    return "accepted";
-  }
-
-  return "rejected_default_too_weak";
+function logLlmCandidateSample(params: {
+  dimensionId: DimensionId;
+  item: LlmExtractedExplicitSignal;
+  decision: LlmFilterDecision;
+}): void {
+  console.info("[BilanSante][SignalExtraction] llm_candidate_sample", {
+    dimensionId: params.dimensionId,
+    theme: params.item.theme,
+    evidenceNature: params.item.evidenceNature,
+    relevanceScoreRaw: params.item.relevanceScore,
+    confidenceScoreRaw: params.item.confidenceScore,
+    criticalityScoreRaw: params.item.criticalityScore,
+    relevanceScoreNormalized: normalizeLlmScore(params.item.relevanceScore),
+    confidenceScoreNormalized: normalizeLlmScore(params.item.confidenceScore),
+    criticalityScoreNormalized: normalizeLlmScore(params.item.criticalityScore),
+    decision: params.decision,
+  });
 }
 
 function toAcceptedLlmCandidate(
@@ -1245,8 +1214,16 @@ function toAcceptedLlmCandidate(
   }
 
   const decision = evaluateLlmSignalAcceptance(item);
+
   if (stats) registerLlmDecision(stats, decision);
-  if (decision !== "accepted") {
+
+  logLlmCandidateSample({
+    dimensionId,
+    item,
+    decision,
+  });
+
+  if (decision !== "accepted_non_anecdotal") {
     return null;
   }
 
@@ -1257,9 +1234,9 @@ function toAcceptedLlmCandidate(
     sourceExcerpt: item.sourceExcerpt,
     evidenceNature: item.evidenceNature,
     entryAngle: item.entryAngle,
-    relevanceScore: item.relevanceScore,
-    confidenceScore: item.confidenceScore,
-    criticalityScore: item.criticalityScore,
+    relevanceScore: normalizeLlmScore(item.relevanceScore),
+    confidenceScore: normalizeLlmScore(item.confidenceScore),
+    criticalityScore: normalizeLlmScore(item.criticalityScore),
     constat: item.constat,
     managerialRisk: item.managerialRisk,
     probableConsequence: item.probableConsequence,
@@ -1345,13 +1322,10 @@ function buildExplicitSignalsFromLlm(params: {
   logInfo("llm_candidate_filter_summary", {
     context: params.logContext ?? "default",
     totalCandidates: filterStats.total,
-    acceptedCandidates: filterStats.accepted,
+    acceptedNonAnecdotal: filterStats.acceptedNonAnecdotal,
     rejectedNoSection: filterStats.rejectedNoSection,
     rejectedAnecdotal: filterStats.rejectedAnecdotal,
-    rejectedStructuralTooWeak: filterStats.rejectedStructuralTooWeak,
-    rejectedIllustrativeTooWeak: filterStats.rejectedIllustrativeTooWeak,
-    rejectedUnclearTooWeak: filterStats.rejectedUnclearTooWeak,
-    rejectedDefaultTooWeak: filterStats.rejectedDefaultTooWeak,
+    acceptedCandidates: filterStats.acceptedNonAnecdotal,
   });
 
   const buckets = new Map<string, LlmAcceptedCandidate[]>();
@@ -1411,110 +1385,8 @@ function buildExplicitSignalsFromLlm(params: {
         normalizeExtractionText(selected.probableConsequence) ||
         buildProbableConsequence(selected.theme),
       entryAngle: selected.entryAngle,
-      confidenceScore: clamp(selected.confidenceScore, 55, 95),
-      criticalityScore: clamp(selected.criticalityScore, 60, 95),
-    });
-  }
-
-  return dedupeSignals(explicitSignals);
-}
-
-function buildExplicitSignalsFromLlmSalvage(params: {
-  snapshot: BaseTrameSnapshot;
-  responses: LlmSignalExtractionResponse[];
-}): DiagnosticSignal[] {
-  const allCandidates: LlmAcceptedCandidate[] = [];
-
-  for (const response of params.responses) {
-    for (const item of response.explicitSignals) {
-      const section = findSectionById(params.snapshot, item.sourceSectionId);
-      if (!section) continue;
-      if (item.evidenceNature === "anecdotal") continue;
-
-      const relevance = clamp(item.relevanceScore, 0, 100);
-      const confidence = clamp(item.confidenceScore, 0, 100);
-      const criticality = clamp(item.criticalityScore, 0, 100);
-
-      if (relevance < 45) continue;
-      if (confidence < 30 && criticality < 72) continue;
-
-      allCandidates.push({
-        dimensionId: response.dimensionId,
-        theme: item.theme,
-        section,
-        sourceExcerpt: item.sourceExcerpt,
-        evidenceNature: item.evidenceNature,
-        entryAngle: item.entryAngle,
-        relevanceScore: relevance,
-        confidenceScore: Math.max(confidence, 40),
-        criticalityScore: criticality,
-        constat: item.constat,
-        managerialRisk: item.managerialRisk,
-        probableConsequence: item.probableConsequence,
-        whyRelevant: item.whyRelevant,
-      });
-    }
-  }
-
-  const buckets = new Map<string, LlmAcceptedCandidate[]>();
-
-  for (const candidate of allCandidates) {
-    const key = `${candidate.dimensionId}|${normalizeText(candidate.theme)}`;
-    const current = buckets.get(key) ?? [];
-    current.push(candidate);
-    buckets.set(key, current);
-  }
-
-  const orderedBuckets = [...buckets.entries()]
-    .map(([key, candidates]) => ({
-      key,
-      candidates: [...candidates].sort(
-        (a, b) => llmCandidateBaseScore(b) - llmCandidateBaseScore(a)
-      ),
-    }))
-    .sort(
-      (a, b) =>
-        llmCandidateBaseScore(b.candidates[0]) - llmCandidateBaseScore(a.candidates[0])
-    );
-
-  const usageBySection = new Map<string, number>();
-  const explicitSignals: DiagnosticSignal[] = [];
-  let runningIndex = 1;
-
-  for (const bucket of orderedBuckets) {
-    const selected = selectLlmCandidateForTheme(bucket.candidates, usageBySection);
-    if (!selected) continue;
-
-    usageBySection.set(
-      selected.section.id,
-      (usageBySection.get(selected.section.id) ?? 0) + 1
-    );
-
-    explicitSignals.push({
-      id: makeSignalId(
-        selected.dimensionId,
-        selected.theme,
-        selected.section.id,
-        runningIndex++
-      ),
-      dimensionId: selected.dimensionId,
-      theme: selected.theme,
-      signalKind: "explicit",
-      sourceType: "trame",
-      sourceSection: selected.section.id,
-      sourceExcerpt: normalizeExtractionText(selected.sourceExcerpt),
-      constat:
-        normalizeExtractionText(selected.constat) ||
-        `La trame fournit un appui exploitable sur le thème "${selected.theme}".`,
-      managerialRisk:
-        normalizeExtractionText(selected.managerialRisk) ||
-        buildManagerialRisk(selected.theme, false, selected.entryAngle),
-      probableConsequence:
-        normalizeExtractionText(selected.probableConsequence) ||
-        buildProbableConsequence(selected.theme),
-      entryAngle: selected.entryAngle,
-      confidenceScore: clamp(Math.max(selected.confidenceScore, 58), 55, 95),
-      criticalityScore: clamp(selected.criticalityScore, 60, 95),
+      confidenceScore: clamp(Math.max(selected.confidenceScore, 50), 50, 95),
+      criticalityScore: clamp(Math.max(selected.criticalityScore, 60), 60, 95),
     });
   }
 
@@ -1556,6 +1428,9 @@ function buildLlmUncoveredMap(
 function buildRegistryFromSignals(signals: DiagnosticSignal[]): SignalRegistry {
   const allSignals = [...signals].sort((a, b) => {
     if (a.dimensionId !== b.dimensionId) return a.dimensionId - b.dimensionId;
+    if (a.signalKind !== b.signalKind) {
+      return a.signalKind === "explicit" ? -1 : 1;
+    }
     return b.criticalityScore - a.criticalityScore;
   });
 
@@ -1663,48 +1538,15 @@ export async function buildSignalRegistryWithLlm(
       return deterministicRegistry;
     }
 
-    let explicitSignals = buildExplicitSignalsFromLlm({
+    const explicitSignals = buildExplicitSignalsFromLlm({
       snapshot,
       responses,
       logContext: "primary",
     });
 
-    if (rawExplicitSignals > 0 && explicitSignals.length === 0) {
-      const salvagedSignals = buildExplicitSignalsFromLlmSalvage({
-        snapshot,
-        responses,
-      });
-
-      logWarn("llm_explicit_salvage_attempt", {
-        rawExplicitSignals,
-        salvagedSignals: salvagedSignals.length,
-      });
-
-      if (salvagedSignals.length > 0) {
-        explicitSignals = salvagedSignals;
-      }
-    }
-
     const uncoveredMap = buildLlmUncoveredMap(responses);
     const absenceSignals = buildAbsenceSignals(snapshot, explicitSignals, uncoveredMap);
     const llmRegistry = buildRegistryFromSignals([...explicitSignals, ...absenceSignals]);
-
-    if (explicitSignals.length === 0 && uncoveredMap.size === 0) {
-      const deterministicRegistry = buildDeterministicRegistry(snapshot);
-
-      logWarn("fallback_empty_sanitized_llm_output", {
-        hasOpenAiKey: true,
-        responsesReceived: responses.length,
-        rawExplicitSignals,
-        rawUncoveredThemes,
-        explicitSignalsFromLlm: 0,
-        uncoveredThemes: 0,
-        fallbackUsed: true,
-        ...summarizeRegistry(deterministicRegistry),
-      });
-
-      return deterministicRegistry;
-    }
 
     logInfo("llm_registry_ready", {
       hasOpenAiKey: true,

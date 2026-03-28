@@ -5,11 +5,13 @@ import {
 } from "@/lib/supabaseServer";
 import { uploadDiagnosticSourceDocx } from "@/lib/diagnostic/storage";
 import { extractTextFromDocx } from "@/lib/diagnostic/docx";
-import { bootstrapSessionFromTrame } from "@/lib/bilan-sante/protocol-engine";
+import { bootstrapSessionFromTrameWithLlm } from "@/lib/bilan-sante/protocol-engine";
 import { saveAggregate } from "@/lib/bilan-sante/session-repository";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+const LOG_PREFIX = "[BilanSante][StartRoute]";
 
 function json(body: unknown, status = 200) {
   return NextResponse.json(body, {
@@ -21,67 +23,49 @@ function json(body: unknown, status = 200) {
   });
 }
 
-function isBypass() {
-  return (
-    process.env.DEV_BYPASS_AUTH === "1" ||
-    process.env.NEXT_PUBLIC_DEV_BYPASS_AUTH === "1"
-  );
+function logInfo(event: string, payload?: Record<string, unknown>) {
+  console.info(`${LOG_PREFIX} ${event}`, payload ?? {});
 }
 
-async function getEffectiveUserId(): Promise<string> {
-  if (isBypass()) {
-    const id = process.env.DEV_BYPASS_USER_ID;
-    if (!id) {
-      throw new Error("Missing DEV_BYPASS_USER_ID");
-    }
-    return id;
-  }
+function logError(event: string, payload?: Record<string, unknown>) {
+  console.error(`${LOG_PREFIX} ${event}`, payload ?? {});
+}
 
+function summarizeError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error ?? "unknown_error");
+}
+
+export async function POST(req: Request) {
   const supabaseSSR = await createSupabaseServerClient();
   const {
     data: { user },
   } = await supabaseSSR.auth.getUser();
 
   if (!user) {
-    throw new Error("UNAUTHENTICATED");
-  }
-
-  return user.id;
-}
-
-export async function POST(req: Request) {
-  let effectiveUserId: string;
-
-  try {
-    effectiveUserId = await getEffectiveUserId();
-  } catch (e: any) {
-    const msg = e?.message ?? "Unauthorized";
-    return json(
-      { ok: false, error: msg },
-      msg === "UNAUTHENTICATED" ? 401 : 500
-    );
+    return json({ ok: false, error: "Unauthorized" }, 401);
   }
 
   const admin = adminSupabase();
 
-  if (!isBypass()) {
-    const { data: ent, error: entErr } = await admin
-      .from("entitlements")
-      .select("is_active, expires_at")
-      .eq("user_id", effectiveUserId)
-      .maybeSingle();
+  const { data: ent, error: entErr } = await admin
+    .from("entitlements")
+    .select("is_active, expires_at")
+    .eq("user_id", user.id)
+    .maybeSingle();
 
-    if (entErr) {
-      return json({ ok: false, error: entErr.message }, 500);
-    }
+  if (entErr) {
+    return json({ ok: false, error: entErr.message }, 500);
+  }
 
-    if (!ent?.is_active) {
-      return json({ ok: false, error: "No entitlement" }, 403);
-    }
+  if (!ent?.is_active) {
+    return json({ ok: false, error: "No entitlement" }, 403);
+  }
 
-    if (ent.expires_at && new Date(ent.expires_at).getTime() < Date.now()) {
-      return json({ ok: false, error: "Access expired" }, 403);
-    }
+  if (ent.expires_at && new Date(ent.expires_at).getTime() < Date.now()) {
+    return json({ ok: false, error: "Access expired" }, 403);
   }
 
   const form = await req.formData();
@@ -110,7 +94,7 @@ export async function POST(req: Request) {
     return json({ ok: false, error: "Session not found" }, 404);
   }
 
-  if (!isBypass() && String(session.user_id ?? "") !== effectiveUserId) {
+  if (String(session.user_id ?? "") !== user.id) {
     return json({ ok: false, error: "Forbidden" }, 403);
   }
 
@@ -164,12 +148,28 @@ export async function POST(req: Request) {
       throw new Error(updErr.message);
     }
 
-    const aggregate = await bootstrapSessionFromTrame({
+    logInfo("bootstrap_start", {
+      sessionId,
+      hasOpenAiKey: Boolean(process.env.OPENAI_API_KEY),
+      extractedTextChars: extractedText.length,
+      sourceFilename: filename,
+    });
+
+    const aggregate = await bootstrapSessionFromTrameWithLlm({
       sessionId,
       rawTrameText: extractedText,
     });
 
     await saveAggregate(sessionId, aggregate);
+
+    logInfo("bootstrap_completed", {
+      sessionId,
+      phase: aggregate.phase,
+      currentDimensionId: aggregate.currentDimensionId,
+      currentIteration: aggregate.currentIteration,
+      totalSignals: aggregate.signalRegistry?.allSignals.length ?? 0,
+      firstWorksetQuestions: aggregate.currentWorkset?.questions.length ?? 0,
+    });
 
     return json(
       {
@@ -179,7 +179,7 @@ export async function POST(req: Request) {
       },
       200
     );
-  } catch (e: any) {
+  } catch (error) {
     await admin
       .from("diagnostic_sessions")
       .update({
@@ -188,10 +188,16 @@ export async function POST(req: Request) {
       })
       .eq("id", sessionId);
 
+    logError("bootstrap_failed", {
+      sessionId,
+      error: summarizeError(error),
+      hasOpenAiKey: Boolean(process.env.OPENAI_API_KEY),
+    });
+
     return json(
       {
         ok: false,
-        error: e?.message ?? "Ingestion failed",
+        error: summarizeError(error) || "Ingestion failed",
         session_id: sessionId,
       },
       500

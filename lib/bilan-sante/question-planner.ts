@@ -1,5 +1,3 @@
-// lib/bilan-sante/question-planner.ts
-
 import type { DimensionId, IterationNumber } from "@/lib/bilan-sante/protocol";
 import type {
   DiagnosticSessionAggregate,
@@ -39,10 +37,10 @@ type ThemeMemorySummary = {
   usableFactCount: number;
 };
 
-const QUESTIONS_PER_ITERATION: Record<IterationNumber, number> = {
-  1: 3,
-  2: 2,
-  3: 2,
+const CANDIDATE_POOL_SIZE: Record<IterationNumber, number> = {
+  1: 12,
+  2: 12,
+  3: 12,
 };
 
 function normalizeText(value: string | null | undefined): string {
@@ -139,7 +137,9 @@ function getThemeMemorySummary(
 
   const usable = all.filter((item) => item.isUsableBusinessMatter);
   const reframing = all.filter((item) => item.intent === "reframing");
-  const clarification = all.filter((item) => item.intent === "clarification_request");
+  const clarification = all.filter(
+    (item) => item.intent === "clarification_request"
+  );
   const challenge = all.filter((item) => item.intent === "challenge");
   const business = all.filter((item) => item.intent === "business_answer");
   const mixed = all.filter((item) => item.intent === "mixed");
@@ -404,6 +404,36 @@ function scoreRootCauseAlignment(
   return score;
 }
 
+function scoreIterationIntentFit(
+  signal: DiagnosticSignal,
+  iteration: IterationNumber
+): number {
+  let score = 0;
+
+  if (iteration === 1) {
+    if (signal.signalKind === "explicit") score += 12;
+    if (signal.entryAngle === "mechanism") score += 8;
+    if (signal.entryAngle === "formalization") score += 6;
+    if (signal.signalKind === "absence") score -= 4;
+  }
+
+  if (iteration === 2) {
+    if (signal.entryAngle === "causality") score += 20;
+    if (signal.entryAngle === "arbitration") score += 12;
+    if (signal.entryAngle === "dependency") score += 8;
+    if (signal.signalKind === "explicit") score += 4;
+  }
+
+  if (iteration === 3) {
+    if (signal.entryAngle === "economics") score += 15;
+    if (signal.entryAngle === "formalization") score += 10;
+    if (signal.entryAngle === "dependency") score += 6;
+    if (signal.signalKind === "absence") score += 10;
+  }
+
+  return score;
+}
+
 function scoreSignalForIteration(
   signal: DiagnosticSignal,
   iteration: IterationNumber,
@@ -415,23 +445,7 @@ function scoreSignalForIteration(
   if (signal.signalKind === "explicit") score += 8;
   if (signal.signalKind === "absence") score -= 4;
 
-  if (iteration === 1) {
-    if (signal.signalKind === "explicit") score += 12;
-    if (signal.entryAngle === "mechanism") score += 8;
-    if (signal.entryAngle === "formalization") score += 6;
-  }
-
-  if (iteration === 2) {
-    if (signal.entryAngle === "causality") score += 20;
-    if (signal.entryAngle === "arbitration") score += 12;
-    if (signal.entryAngle === "dependency") score += 8;
-  }
-
-  if (iteration === 3) {
-    if (signal.entryAngle === "economics") score += 15;
-    if (signal.entryAngle === "formalization") score += 8;
-    if (signal.signalKind === "absence") score += 10;
-  }
+  score += scoreIterationIntentFit(signal, iteration);
 
   if (alreadyUsedSignalIds.has(signal.id)) {
     score -= 40;
@@ -451,15 +465,14 @@ function scoreSignalForIteration(
 
 function selectDiverseSignals(
   signals: DiagnosticSignal[],
-  iteration: IterationNumber
+  maxCount: number
 ): DiagnosticSignal[] {
-  const max = QUESTIONS_PER_ITERATION[iteration];
   const selected: DiagnosticSignal[] = [];
   const usedThemes = new Set<string>();
   const usedSections = new Set<string>();
 
   for (const signal of signals) {
-    if (selected.length >= max) break;
+    if (selected.length >= maxCount) break;
 
     const normalizedTheme = normalizeText(signal.theme).toLowerCase();
     const sourceSection = normalizeText(signal.sourceSection);
@@ -737,7 +750,7 @@ export function planIterationQuestions(params: PlanParams): StructuredQuestion[]
 
   const selectedSignals = selectDiverseSignals(
     candidates.map((item) => item.signal),
-    iteration
+    CANDIDATE_POOL_SIZE[iteration]
   );
 
   return selectedSignals.map((signal, index) => {

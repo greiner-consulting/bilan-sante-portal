@@ -23,6 +23,27 @@ type MissingField = BaseTrameSnapshot["missingFields"][number];
 
 let cachedClient: OpenAI | null = null;
 
+const LOG_PREFIX = "[BilanSante][LlmSignalExtractor]";
+
+function logInfo(event: string, payload?: Record<string, unknown>) {
+  console.info(`${LOG_PREFIX} ${event}`, payload ?? {});
+}
+
+function logWarn(event: string, payload?: Record<string, unknown>) {
+  console.warn(`${LOG_PREFIX} ${event}`, payload ?? {});
+}
+
+function logError(event: string, payload?: Record<string, unknown>) {
+  console.error(`${LOG_PREFIX} ${event}`, payload ?? {});
+}
+
+function summarizeError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error ?? "unknown_error");
+}
+
 function getClient(): OpenAI | null {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) return null;
@@ -291,7 +312,24 @@ export async function extractSignalsForDimensionWithLlm(params: {
   dimensionId: DimensionId;
 }): Promise<LlmSignalExtractionResponse | null> {
   const client = getClient();
-  if (!client) return null;
+
+  logInfo("dimension_start", {
+    dimensionId: params.dimensionId,
+    model: llmModel(),
+    hasOpenAiKey: Boolean(process.env.OPENAI_API_KEY),
+    sections: safeArray(params.snapshot.sections).length,
+    missingFields: safeArray(params.snapshot.missingFields).filter(
+      (field) => field.dimensionId === params.dimensionId
+    ).length,
+  });
+
+  if (!client) {
+    logWarn("dimension_skipped_no_api_key", {
+      dimensionId: params.dimensionId,
+      hasOpenAiKey: false,
+    });
+    return null;
+  }
 
   const prompt = buildPrompt(params);
 
@@ -321,8 +359,26 @@ export async function extractSignalsForDimensionWithLlm(params: {
       snapshot: params.snapshot,
     });
 
+    logInfo("dimension_completed", {
+      dimensionId: params.dimensionId,
+      rawChars: raw.length,
+      parsedJson: Boolean(parsed),
+      explicitSignalsRaw: Array.isArray((parsed as { explicitSignals?: unknown[] } | null)?.explicitSignals)
+        ? ((parsed as { explicitSignals?: unknown[] }).explicitSignals?.length ?? 0)
+        : 0,
+      uncoveredThemesRaw: Array.isArray((parsed as { uncoveredThemes?: unknown[] } | null)?.uncoveredThemes)
+        ? ((parsed as { uncoveredThemes?: unknown[] }).uncoveredThemes?.length ?? 0)
+        : 0,
+      explicitSignalsSanitized: sanitized?.explicitSignals.length ?? 0,
+      uncoveredThemesSanitized: sanitized?.uncoveredThemes.length ?? 0,
+    });
+
     return sanitized ? compactJson(sanitized) : null;
-  } catch {
+  } catch (error) {
+    logError("dimension_failed", {
+      dimensionId: params.dimensionId,
+      error: summarizeError(error),
+    });
     return null;
   }
 }

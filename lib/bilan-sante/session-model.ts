@@ -1,5 +1,3 @@
-// lib/bilan-sante/session-model.ts
-
 import type { DimensionId, IterationNumber } from "@/lib/bilan-sante/protocol";
 
 export type SignalKind = "explicit" | "absence";
@@ -146,6 +144,23 @@ export interface IterationWorkset {
   answers: AnswerRecord[];
   closurePrompt: string;
   closureAskedAt?: string;
+
+  /**
+   * Nombre de questions effectivement construites pour ce workset.
+   */
+  targetQuestionCount: number;
+
+  /**
+   * Nombre minimal de réponses requis pour pouvoir demander la clôture
+   * de CE workset précis.
+   */
+  minimumRequiredCount: number;
+
+  /**
+   * Nombre de questions du tour précédent sur lequel ce tour a été borné.
+   * Null pour l’itération 1.
+   */
+  sourceIterationQuestionCount?: number | null;
 }
 
 export interface DimensionFact {
@@ -153,19 +168,15 @@ export interface DimensionFact {
   theme: string;
   nature: DimensionFactNature;
   statement: string;
-
   evidence?: string;
   confidence?: number;
   confidenceScore?: number;
   priorityScore?: number;
-
   sourceQuestionId?: string | null;
   sourceSignalId?: string | null;
-
   sources?: string[];
   supportingFactIds?: string[];
   tags?: string[];
-
   quadrant?: "strength" | "weakness" | "opportunity" | "threat";
   label?: string;
   detail?: string;
@@ -176,10 +187,8 @@ export interface RootCauseHypothesis {
   id?: string;
   label: string;
   rationale: string;
-
   confidence?: number;
   confidenceScore?: number;
-
   evidence?: string[];
   supportingFactIds?: string[];
   opposingFactIds?: string[];
@@ -192,7 +201,6 @@ export interface SwotItem {
   detail?: string;
   rationale?: string;
   evidence?: string;
-
   confidence?: number;
   confidenceScore?: number;
   supportingFactIds?: string[];
@@ -210,12 +218,10 @@ export interface ObjectiveSeed {
   id?: string;
   label: string;
   rationale?: string;
-
   ownerHint?: string;
   indicatorHint?: string;
   priority?: "high" | "medium" | "low";
   dueDateHint?: string;
-
   indicator?: string;
   suggestedDueDate?: string;
   potentialGain?: string;
@@ -328,26 +334,30 @@ export type MemoryInsight = {
   questionId: string | null;
   signalId: string | null;
   theme: string | null;
-
   intent: MemoryIntent;
   action: MemoryAction;
   confidence: number;
-
   summary: string;
   rationale: string;
   rawMessage: string;
-
   extractedFacts: string[];
   detectedRootCauses: MemoryRootCauseCategory[];
   reframingSignals: string[];
   contradictionSignals: string[];
   suggestedAngle: EntryAngle | null;
-
   shouldStoreAsAnswer: boolean;
   shouldRephraseQuestion: boolean;
   shouldPivotAngle: boolean;
   isUsableBusinessMatter: boolean;
 };
+
+export interface IterationHistoryRecord {
+  dimensionId: DimensionId;
+  iteration: IterationNumber;
+  questionCount: number;
+  answeredCount: number;
+  closedAt?: string;
+}
 
 export interface DiagnosticSessionAggregate {
   sessionId: string;
@@ -362,6 +372,7 @@ export interface DiagnosticSessionAggregate {
   createdAt: string;
   updatedAt: string;
   analysisMemory?: MemoryInsight[];
+  iterationHistory?: IterationHistoryRecord[];
 }
 
 export function createEmptySessionAggregate(
@@ -382,6 +393,7 @@ export function createEmptySessionAggregate(
     createdAt: now,
     updatedAt: now,
     analysisMemory: [],
+    iterationHistory: [],
   };
 }
 
@@ -392,6 +404,7 @@ export function touchSession(
     ...session,
     updatedAt: new Date().toISOString(),
     analysisMemory: session.analysisMemory ?? [],
+    iterationHistory: session.iterationHistory ?? [],
   };
 }
 
