@@ -8,12 +8,14 @@ import {
   submitIterationClosure,
 } from "@/lib/bilan-sante/protocol-engine";
 import { analyzeUserAnswer } from "@/lib/bilan-sante/answer-analyzer";
+import { registerAnswerInsight } from "@/lib/bilan-sante/coverage-tracker";
 import type {
+  ConversationTurn,
   DiagnosticSessionAggregate,
   DiagnosticSignal,
   EntryAngle,
-  StructuredQuestion,
   MemoryInsight,
+  StructuredQuestion,
 } from "@/lib/bilan-sante/session-model";
 import type { ObjectiveDecisionInput } from "@/lib/bilan-sante/objectives-builder";
 import {
@@ -47,6 +49,13 @@ export type SessionViewPayload = {
 
 function normalizeText(value: string | null | undefined): string {
   return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
+function normalizeForMatch(value: string | null | undefined): string {
+  return normalizeText(value)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
 }
 
 function isYes(value: string): boolean {
@@ -171,9 +180,9 @@ function buildObjectivesHelpMessage(
       "Format accepté pour valider les objectifs :\n" +
       '- "oui" pour valider tous les objectifs proposés\n' +
       '- ou une ligne par objectif, par exemple :\n' +
-      '  1: validé\n' +
-      '  2: refusé\n' +
-      '  3: ajusté | objectif=... | indicateur=... | echeance=90 jours | gain=... | quickwin=...',
+      "  1: validé\n" +
+      "  2: refusé\n" +
+      "  3: ajusté | objectif=... | indicateur=... | echeance=90 jours | gain=... | quickwin=...",
   };
 }
 
@@ -313,6 +322,8 @@ function ensureAnalysisMemory(
   return {
     ...session,
     analysisMemory: session.analysisMemory ?? [],
+    conversationHistory: session.conversationHistory ?? [],
+    themeCoverage: session.themeCoverage ?? [],
   };
 }
 
@@ -323,7 +334,7 @@ function appendAnswerAnalysisToMemory(params: {
   analysis: ReturnType<typeof analyzeUserAnswer>;
 }): DiagnosticSessionAggregate {
   const { session, rawMessage, question, analysis } = params;
-  const nextSession = ensureAnalysisMemory(session);
+  let nextSession = ensureAnalysisMemory(session);
 
   const extractedFacts =
     analysis.extractedFacts.length > 0
@@ -363,10 +374,145 @@ function appendAnswerAnalysisToMemory(params: {
       analysis.detectedRootCauses.length > 0,
   };
 
-  return {
+  nextSession = {
     ...nextSession,
     analysisMemory: [...(nextSession.analysisMemory ?? []), nextMemoryItem],
   };
+
+  const askedAngle = getQuestionEntryAngle(nextSession, question);
+  const confirmedAngle =
+    analysis.isUsableBusinessMatter || analysis.shouldStoreAsAnswer
+      ? analysis.suggestedAngle ?? askedAngle
+      : null;
+  const rejectedAngle =
+    analysis.intent === "challenge" || analysis.intent === "reframing"
+      ? askedAngle
+      : null;
+
+  if (nextSession.currentDimensionId && nextSession.currentIteration) {
+    nextSession = registerAnswerInsight({
+      session: nextSession,
+      dimensionId: nextSession.currentDimensionId,
+      iteration: nextSession.currentIteration,
+      question,
+      askedAngle,
+      confirmedAngle,
+      rejectedAngle,
+      extractedFacts,
+      note: analysis.summary,
+    });
+  }
+
+  return nextSession;
+}
+
+function turnId(prefix: string, parts: Array<string | number | null | undefined>): string {
+  const raw = parts.map((item) => normalizeText(String(item ?? ""))).join("|");
+  const normalized = normalizeForMatch(raw).replace(/[^a-z0-9]+/g, "-").slice(0, 120);
+  return `${prefix}-${normalized || "item"}`;
+}
+
+function appendConversationTurn(
+  session: DiagnosticSessionAggregate,
+  turn: ConversationTurn
+): DiagnosticSessionAggregate {
+  const history = session.conversationHistory ?? [];
+  if (history.some((item) => item.id === turn.id)) {
+    return session;
+  }
+
+  return {
+    ...session,
+    conversationHistory: [...history, turn],
+  };
+}
+
+function appendUserTurn(
+  session: DiagnosticSessionAggregate,
+  text: string
+): DiagnosticSessionAggregate {
+  const workset = session.currentWorkset;
+  const currentQuestion = getCurrentUnansweredQuestion(session);
+
+  return appendConversationTurn(session, {
+    id: turnId("user", [
+      session.phase,
+      workset?.dimensionId,
+      workset?.iteration,
+      text,
+      workset?.answers.length ?? 0,
+    ]),
+    createdAt: new Date().toISOString(),
+    role: "user",
+    text,
+    kind: "user_message",
+    phase: session.phase,
+    dimensionId: workset?.dimensionId ?? null,
+    iteration: workset?.iteration ?? null,
+    questionId: currentQuestion?.id ?? null,
+    signalId: currentQuestion?.signalId ?? null,
+    theme: currentQuestion?.theme ?? null,
+  });
+}
+
+function syncAssistantPayloadIntoConversation(params: {
+  session: DiagnosticSessionAggregate;
+  payload: SessionViewPayload;
+  kind: string;
+}): DiagnosticSessionAggregate {
+  let session = params.session;
+  const phase = session.phase;
+  const dimensionId = session.currentDimensionId;
+  const iteration = session.currentIteration;
+
+  const assistantMessage = normalizeText(params.payload.assistant_message);
+  if (assistantMessage) {
+    session = appendConversationTurn(session, {
+      id: turnId("assistant", [
+        params.kind,
+        phase,
+        dimensionId,
+        iteration,
+        assistantMessage,
+      ]),
+      createdAt: new Date().toISOString(),
+      role: "assistant",
+      text: assistantMessage,
+      kind: params.kind,
+      phase,
+      dimensionId,
+      iteration,
+    });
+  }
+
+  const questions = params.payload.questions ?? [];
+  const total = questions.length;
+
+  questions.forEach((question, index) => {
+    session = appendConversationTurn(session, {
+      id: turnId("question", [
+        question.fact_id,
+        phase,
+        dimensionId,
+        iteration,
+        question.question,
+      ]),
+      createdAt: new Date().toISOString(),
+      role: "question",
+      text: question.question,
+      kind: "structured_question",
+      phase,
+      dimensionId,
+      iteration,
+      questionId: session.currentWorkset?.questions[index]?.id ?? null,
+      signalId: question.fact_id ?? null,
+      theme: question.theme ?? null,
+      ordinal: index + 1,
+      total,
+    });
+  });
+
+  return session;
 }
 
 async function ensureAggregate(sessionId: string): Promise<{
@@ -403,8 +549,17 @@ export async function bootstrapOrReadSession(params: {
   sessionId: string;
   userId: string;
 }): Promise<SessionViewPayload> {
-  const { aggregate } = await ensureAggregate(params.sessionId);
-  const payload = toSessionView(aggregate);
+  let { aggregate } = await ensureAggregate(params.sessionId);
+  let payload = toSessionView(aggregate);
+
+  aggregate = syncAssistantPayloadIntoConversation({
+    session: aggregate,
+    payload,
+    kind: "bootstrap_view",
+  });
+
+  await saveAggregate(params.sessionId, aggregate);
+  payload = toSessionView(aggregate);
 
   await appendDiagnosticEvent({
     sessionId: params.sessionId,
@@ -431,6 +586,8 @@ export async function processSessionInput(params: {
   let aggregate = ensureAnalysisMemory(initialAggregate);
 
   if (rawMessage) {
+    aggregate = appendUserTurn(aggregate, rawMessage);
+
     await appendDiagnosticEvent({
       sessionId: params.sessionId,
       userId: params.userId,
@@ -443,7 +600,14 @@ export async function processSessionInput(params: {
   }
 
   if (!rawMessage) {
-    const payload = toSessionView(aggregate);
+    let payload = toSessionView(aggregate);
+    aggregate = syncAssistantPayloadIntoConversation({
+      session: aggregate,
+      payload,
+      kind: "empty_message_view",
+    });
+    await saveAggregate(params.sessionId, aggregate);
+    payload = toSessionView(aggregate);
 
     await appendDiagnosticEvent({
       sessionId: params.sessionId,
@@ -459,7 +623,14 @@ export async function processSessionInput(params: {
   }
 
   if (aggregate.phase === "report_ready") {
-    const payload = toSessionView(aggregate);
+    let payload = toSessionView(aggregate);
+    aggregate = syncAssistantPayloadIntoConversation({
+      session: aggregate,
+      payload,
+      kind: "report_ready_view",
+    });
+    await saveAggregate(params.sessionId, aggregate);
+    payload = toSessionView(aggregate);
 
     await appendDiagnosticEvent({
       sessionId: params.sessionId,
@@ -484,6 +655,13 @@ export async function processSessionInput(params: {
         needs_validation: true,
       };
 
+      aggregate = syncAssistantPayloadIntoConversation({
+        session: aggregate,
+        payload,
+        kind: "iteration_validation_help",
+      });
+      await saveAggregate(params.sessionId, aggregate);
+
       await appendDiagnosticEvent({
         sessionId: params.sessionId,
         userId: params.userId,
@@ -502,9 +680,14 @@ export async function processSessionInput(params: {
       decision: isYes(rawMessage) ? "yes" : "no",
     });
 
+    let payload = toSessionView(aggregate);
+    aggregate = syncAssistantPayloadIntoConversation({
+      session: aggregate,
+      payload,
+      kind: "iteration_closure_reply",
+    });
     await saveAggregate(params.sessionId, aggregate);
-
-    const payload = toSessionView(aggregate);
+    payload = toSessionView(aggregate);
 
     await appendDiagnosticEvent({
       sessionId: params.sessionId,
@@ -528,6 +711,13 @@ export async function processSessionInput(params: {
     if (decisions.length === 0) {
       const payload = buildObjectivesHelpMessage(aggregate);
 
+      aggregate = syncAssistantPayloadIntoConversation({
+        session: aggregate,
+        payload,
+        kind: "final_objectives_help",
+      });
+      await saveAggregate(params.sessionId, aggregate);
+
       await appendDiagnosticEvent({
         sessionId: params.sessionId,
         userId: params.userId,
@@ -546,9 +736,14 @@ export async function processSessionInput(params: {
       decisions,
     });
 
+    let payload = toSessionView(aggregate);
+    aggregate = syncAssistantPayloadIntoConversation({
+      session: aggregate,
+      payload,
+      kind: "final_objectives_reply",
+    });
     await saveAggregate(params.sessionId, aggregate);
-
-    const payload = toSessionView(aggregate);
+    payload = toSessionView(aggregate);
 
     await appendDiagnosticEvent({
       sessionId: params.sessionId,
@@ -571,7 +766,14 @@ export async function processSessionInput(params: {
   const questionId = currentQuestion?.id ?? firstUnansweredQuestionId(aggregate);
 
   if (!questionId || !currentQuestion) {
-    const payload = toSessionView(aggregate);
+    let payload = toSessionView(aggregate);
+    aggregate = syncAssistantPayloadIntoConversation({
+      session: aggregate,
+      payload,
+      kind: "no_unanswered_question",
+    });
+    await saveAggregate(params.sessionId, aggregate);
+    payload = toSessionView(aggregate);
 
     await appendDiagnosticEvent({
       sessionId: params.sessionId,
@@ -614,15 +816,20 @@ export async function processSessionInput(params: {
       session: aggregate,
       rawMessage,
       reason: analysis.intent,
-    });
+    }) as DiagnosticSessionAggregate;
 
-    await saveAggregate(params.sessionId, aggregate);
-
-    const payload: SessionViewPayload = {
+    let payload: SessionViewPayload = {
       ...toSessionView(aggregate),
       assistant_message: buildRewriteAssistantMessage(analysis.intent),
       needs_validation: false,
     };
+
+    aggregate = syncAssistantPayloadIntoConversation({
+      session: aggregate,
+      payload,
+      kind: "question_rephrased",
+    });
+    await saveAggregate(params.sessionId, aggregate);
 
     await appendDiagnosticEvent({
       sessionId: params.sessionId,
@@ -649,9 +856,14 @@ export async function processSessionInput(params: {
     answerText: rawMessage,
   });
 
+  let payload = toSessionView(aggregate);
+  aggregate = syncAssistantPayloadIntoConversation({
+    session: aggregate,
+    payload,
+    kind: "dimension_reply",
+  });
   await saveAggregate(params.sessionId, aggregate);
-
-  const payload = toSessionView(aggregate);
+  payload = toSessionView(aggregate);
 
   await appendDiagnosticEvent({
     sessionId: params.sessionId,

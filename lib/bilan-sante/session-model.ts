@@ -136,6 +136,32 @@ export interface AnswerRecord {
   answeredAt: string;
 }
 
+export type PlanningDiagnostic = {
+  signalId: string;
+  theme: string;
+  entryAngle: EntryAngle;
+  score: number;
+  rationale: string[];
+};
+
+export type WorksetPlanningDiagnostics = {
+  generatedAt: string;
+  strategy: string;
+  selectedQuestionIds: string[];
+  candidateDiagnostics: PlanningDiagnostic[];
+  notes: string[];
+};
+
+export type WorksetClosureDiagnostics = {
+  decidedAt?: string;
+  qualityStop: boolean;
+  remainingLowValue: boolean;
+  uncoveredMandatoryAngles: EntryAngle[];
+  highValueRemainderQuestionIds: string[];
+  reasonCodes: string[];
+  notes: string[];
+};
+
 export interface IterationWorkset {
   dimensionId: DimensionId;
   iteration: IterationNumber;
@@ -144,23 +170,11 @@ export interface IterationWorkset {
   answers: AnswerRecord[];
   closurePrompt: string;
   closureAskedAt?: string;
-
-  /**
-   * Nombre de questions effectivement construites pour ce workset.
-   */
   targetQuestionCount: number;
-
-  /**
-   * Nombre minimal de réponses requis pour pouvoir demander la clôture
-   * de CE workset précis.
-   */
   minimumRequiredCount: number;
-
-  /**
-   * Nombre de questions du tour précédent sur lequel ce tour a été borné.
-   * Null pour l’itération 1.
-   */
   sourceIterationQuestionCount?: number | null;
+  planningDiagnostics?: WorksetPlanningDiagnostics | null;
+  closureDiagnostics?: WorksetClosureDiagnostics | null;
 }
 
 export interface DimensionFact {
@@ -257,6 +271,9 @@ export interface FrozenDimensionDiagnosis {
   dominantRootCause: string;
   unmanagedZones: ZoneNonPilotee[];
   frozenAt: string;
+  exploredThemes?: string[];
+  exploredSignalIds?: string[];
+  analysisSnapshot?: DimensionAnalysisSnapshot;
 
   // compat consolidation / builder
   summary?: string;
@@ -268,7 +285,6 @@ export interface FrozenDimensionDiagnosis {
   keyFindings?: string[];
   nonPilotedAreas?: ZoneNonPilotee[];
   keyFactIds?: string[];
-  analysisSnapshot?: DimensionAnalysisSnapshot;
 }
 
 export interface FinalObjective {
@@ -359,6 +375,54 @@ export interface IterationHistoryRecord {
   closedAt?: string;
 }
 
+export type ThemeCoverageStatus = "open" | "saturated" | "closed";
+
+export type ThemeCoverageMarkStatus = "asked" | "confirmed" | "rejected";
+
+export type ThemeCoverageMark = {
+  angle: EntryAngle;
+  iteration: IterationNumber | null;
+  questionId: string | null;
+  status: ThemeCoverageMarkStatus;
+};
+
+export type ThemeCoverageRecord = {
+  id: string;
+  dimensionId: DimensionId;
+  theme: string;
+  askedAngles: EntryAngle[];
+  confirmedAngles: EntryAngle[];
+  rejectedAngles: EntryAngle[];
+  askedQuestionIds: string[];
+  confirmedQuestionIds: string[];
+  lastQuestionId: string | null;
+  lastQuestionText: string | null;
+  lastIteration: IterationNumber | null;
+  factDensity: number;
+  closureStatus: ThemeCoverageStatus;
+  angleHistory: ThemeCoverageMark[];
+  notes: string[];
+  updatedAt: string;
+};
+
+export type ConversationTurnRole = "assistant" | "user" | "question" | "system";
+
+export type ConversationTurn = {
+  id: string;
+  createdAt: string;
+  role: ConversationTurnRole;
+  text: string;
+  kind?: string | null;
+  phase?: SessionPhase | null;
+  dimensionId?: DimensionId | null;
+  iteration?: IterationNumber | null;
+  questionId?: string | null;
+  signalId?: string | null;
+  theme?: string | null;
+  ordinal?: number | null;
+  total?: number | null;
+};
+
 export interface DiagnosticSessionAggregate {
   sessionId: string;
   phase: SessionPhase;
@@ -373,6 +437,12 @@ export interface DiagnosticSessionAggregate {
   updatedAt: string;
   analysisMemory?: MemoryInsight[];
   iterationHistory?: IterationHistoryRecord[];
+  themeCoverage?: ThemeCoverageRecord[];
+  conversationHistory?: ConversationTurn[];
+}
+
+function deepClone<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
 }
 
 export function createEmptySessionAggregate(
@@ -394,6 +464,8 @@ export function createEmptySessionAggregate(
     updatedAt: now,
     analysisMemory: [],
     iterationHistory: [],
+    themeCoverage: [],
+    conversationHistory: [],
   };
 }
 
@@ -405,33 +477,20 @@ export function touchSession(
     updatedAt: new Date().toISOString(),
     analysisMemory: session.analysisMemory ?? [],
     iterationHistory: session.iterationHistory ?? [],
+    themeCoverage: session.themeCoverage ?? [],
+    conversationHistory: session.conversationHistory ?? [],
   };
 }
 
 export function cloneRegistry(registry: SignalRegistry): SignalRegistry {
-  return {
-    ...registry,
-    all: [...registry.all],
-    allSignals: [...registry.allSignals],
-    byDimension: {
-      d1: [...registry.byDimension.d1],
-      d2: [...registry.byDimension.d2],
-      d3: [...registry.byDimension.d3],
-      d4: [...registry.byDimension.d4],
-    },
-  };
+  return deepClone(registry);
 }
 
 export function cloneWorkset(
   workset: IterationWorkset | null
 ): IterationWorkset | null {
   if (!workset) return null;
-
-  return {
-    ...workset,
-    questions: [...workset.questions],
-    answers: [...workset.answers],
-  };
+  return deepClone(workset);
 }
 
 export function answeredQuestionIds(

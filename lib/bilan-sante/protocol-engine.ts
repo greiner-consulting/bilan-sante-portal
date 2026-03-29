@@ -19,31 +19,35 @@ import {
   cloneRegistry,
   cloneWorkset,
   createEmptySessionAggregate,
-  isWorksetFullyAnswered,
   touchSession,
   type AnswerRecord,
   type DiagnosticSessionAggregate,
   type DiagnosticSignal,
   type EntryAngle,
-  type FinalObjective,
   type FinalObjectiveSet,
   type FrozenDimensionDiagnosis,
   type IterationHistoryRecord,
   type IterationWorkset,
-  type MemoryInsight,
   type StructuredQuestion,
   type ZoneNonPilotee,
 } from "@/lib/bilan-sante/session-model";
-import { planIterationQuestions } from "@/lib/bilan-sante/question-planner";
 import {
   buildSignalRegistry,
   buildSignalRegistryWithLlm,
 } from "@/lib/bilan-sante/signal-extractor";
 import { readBaseTrame } from "@/lib/bilan-sante/trame-reader";
+import { analyzeUserAnswer } from "@/lib/bilan-sante/answer-analyzer";
+import { planIterationQuestionsWithDiagnostics } from "@/lib/bilan-sante/question-planner";
+import { decideIterationClosure, trimLowValueTail } from "@/lib/bilan-sante/iteration-closer";
+import { rewriteQuestionFromAnalysis } from "@/lib/bilan-sante/question-rewriter";
 import {
-  analyzeUserAnswer,
-  buildRephrasedQuestionFromAnalysis,
-} from "@/lib/bilan-sante/answer-analyzer";
+  closeCoverageForIteration,
+  registerWorksetQuestions,
+} from "@/lib/bilan-sante/coverage-tracker";
+import {
+  applyObjectiveDecisions,
+  buildFinalObjectiveSetFromFrozenDimensions,
+} from "@/lib/bilan-sante/objectives-builder";
 
 export interface EngineView {
   assistantMessage: string;
@@ -92,7 +96,28 @@ function withSafeMemory(
     ...session,
     analysisMemory: session.analysisMemory ?? [],
     iterationHistory: session.iterationHistory ?? [],
+    themeCoverage: session.themeCoverage ?? [],
+    conversationHistory: session.conversationHistory ?? [],
   };
+}
+
+function attachWorkset(
+  session: DiagnosticSessionAggregate,
+  workset: IterationWorkset | null
+): DiagnosticSessionAggregate {
+  if (!workset) {
+    return withSafeMemory({
+      ...session,
+      currentWorkset: null,
+    });
+  }
+
+  const nextSession = withSafeMemory({
+    ...session,
+    currentWorkset: workset,
+  });
+
+  return registerWorksetQuestions(nextSession);
 }
 
 function getAllSignals(session: DiagnosticSessionAggregate): DiagnosticSignal[] {
@@ -141,391 +166,39 @@ function getCurrentUnansweredQuestion(
   return workset.questions.find((question) => !answeredIds.has(question.id)) ?? null;
 }
 
-function getMemoryForTheme(
-  session: DiagnosticSessionAggregate,
-  dimensionId: DimensionId | null | undefined,
-  theme: string | null | undefined
-): MemoryInsight[] {
-  const normalizedTheme = normalizeForMatch(theme);
-  if (!normalizedTheme) return [];
-
-  return (session.analysisMemory ?? []).filter((item) => {
-    if (normalizeForMatch(item.theme) !== normalizedTheme) {
-      return false;
-    }
-
-    if (dimensionId == null) {
-      return true;
-    }
-
-    return item.dimensionId === dimensionId;
-  });
-}
-
-function getLatestUsableThemeMemory(
-  session: DiagnosticSessionAggregate,
-  dimensionId: DimensionId | null | undefined,
-  theme: string | null | undefined
-): MemoryInsight | null {
-  const usable = getMemoryForTheme(session, dimensionId, theme).filter(
-    (item) => item.isUsableBusinessMatter || item.shouldPivotAngle
-  );
-
-  return usable[usable.length - 1] ?? null;
-}
-
-function getDominantAngleFromThemeMemory(
-  session: DiagnosticSessionAggregate,
-  dimensionId: DimensionId | null | undefined,
-  theme: string | null | undefined
-): EntryAngle | null {
-  const memory = getMemoryForTheme(session, dimensionId, theme);
-  const counts = new Map<EntryAngle, number>();
-
-  for (const item of memory) {
-    if (!item.suggestedAngle) continue;
-    counts.set(item.suggestedAngle, (counts.get(item.suggestedAngle) ?? 0) + 1);
-  }
-
-  let bestAngle: EntryAngle | null = null;
-  let bestScore = -1;
-
-  for (const [angle, score] of counts.entries()) {
-    if (score > bestScore) {
-      bestScore = score;
-      bestAngle = angle;
-    }
-  }
-
-  return bestAngle;
-}
-
-function buildMemoryAnchor(params: {
-  session: DiagnosticSessionAggregate;
-  dimensionId: DimensionId | null | undefined;
-  theme: string | null | undefined;
-}): string {
-  const latest = getLatestUsableThemeMemory(
-    params.session,
-    params.dimensionId,
-    params.theme
-  );
-
-  if (!latest) return "";
-
-  const fact = latest.extractedFacts?.[0];
-  if (!fact) return "";
-
-  return ` Vous avez déjà indiqué notamment : "${shortenText(fact, 140)}".`;
-}
-
-function buildAngleSpecificRewrite(params: {
-  session: DiagnosticSessionAggregate;
-  dimensionId: DimensionId | null | undefined;
-  theme: string;
-  suggestedAngle: EntryAngle | null;
-  iteration: IterationNumber | null | undefined;
-}): string | null {
-  const { session, dimensionId, theme, suggestedAngle, iteration } = params;
-  const anchor = buildMemoryAnchor({ session, dimensionId, theme });
-
-  if (suggestedAngle === "causality") {
-    if (iteration === 1) {
-      return `Restons sur "${theme}", mais repartons du bon angle : quel mécanisme concret produit la difficulté aujourd’hui, et qu’est-ce qui l’explique selon vous ?${anchor}`;
-    }
-
-    return `Restons sur "${theme}", mais repartons du bon angle : selon vous, la difficulté vient-elle surtout d’un manque de compétences, d’expérience, de décisions inadaptées ou d’une organisation mal posée ?${anchor}`;
-  }
-
-  if (suggestedAngle === "arbitration") {
-    return `Sur "${theme}", qui décide réellement, qui valide, et à quel endroit la chaîne d’arbitrage ralentit ou déforme les décisions ?${anchor}`;
-  }
-
-  if (suggestedAngle === "economics") {
-    return `Sur "${theme}", quel est l’impact économique concret du problème évoqué : marge, coût réel, trésorerie ou rentabilité ?${anchor}`;
-  }
-
-  if (suggestedAngle === "formalization") {
-    return `Sur "${theme}", qu’est-ce qui relève surtout d’un défaut de cadre, de rôles, de méthode ou de pilotage formalisé ?${anchor}`;
-  }
-
-  if (suggestedAngle === "dependency") {
-    return `Sur "${theme}", où se situe la dépendance la plus critique aujourd’hui : une personne clé, un validateur, une ressource rare ou un point de blocage structurel ?${anchor}`;
-  }
-
-  if (suggestedAngle === "mechanism") {
-    return `Sur "${theme}", comment le problème se produit-il concrètement dans le fonctionnement réel : à quel moment, avec quels acteurs, et selon quel enchaînement ?${anchor}`;
-  }
-
-  return null;
-}
-
-function shouldRewriteFromAnalysis(
-  intent: ReturnType<typeof analyzeUserAnswer>["intent"],
-  shouldRephraseQuestion: boolean,
-  shouldPivotAngle: boolean
-): boolean {
-  if (shouldRephraseQuestion || shouldPivotAngle) {
-    return true;
-  }
-
-  if (intent === "challenge" || intent === "noise") {
-    return true;
-  }
-
-  return false;
-}
-
-function buildQuestionOpenRewrite(params: {
-  session: DiagnosticSessionAggregate;
-  question: StructuredQuestion;
-  rawMessage: string;
-  dimensionId: DimensionId | null | undefined;
-  iteration: IterationNumber | null | undefined;
-}): string {
-  const { session, question, rawMessage, dimensionId, iteration } = params;
-  const signal = findSignalById(session, question.signalId);
-
-  const analysis = analyzeUserAnswer({
-    rawMessage,
-    currentQuestion: {
-      theme: question.theme,
-      constat: question.constat,
-      questionOuverte: question.questionOuverte,
-      entryAngle: signal?.entryAngle ?? null,
-    },
-  });
-
-  if (
-    !shouldRewriteFromAnalysis(
-      analysis.intent,
-      analysis.shouldRephraseQuestion,
-      analysis.shouldPivotAngle
-    )
-  ) {
-    return question.questionOuverte;
-  }
-
-  const dominantMemoryAngle = getDominantAngleFromThemeMemory(
-    session,
-    dimensionId,
-    question.theme
-  );
-
-  const suggestedAngle = analysis.suggestedAngle ?? dominantMemoryAngle;
-
-  if (analysis.shouldPivotAngle && suggestedAngle) {
-    const angleSpecific = buildAngleSpecificRewrite({
-      session,
-      dimensionId,
-      theme: question.theme,
-      suggestedAngle,
-      iteration,
-    });
-
-    if (angleSpecific) {
-      return angleSpecific;
-    }
-  }
-
-  const rewritten = buildRephrasedQuestionFromAnalysis({
-    analysis,
-    currentQuestion: {
-      theme: question.theme,
-      constat: question.constat,
-      questionOuverte: question.questionOuverte,
-      entryAngle: suggestedAngle ?? signal?.entryAngle ?? null,
-    },
-  });
-
-  const anchor = buildMemoryAnchor({
-    session,
-    dimensionId,
-    theme: question.theme,
-  });
-
-  if (anchor && !normalizeText(rewritten).includes(normalizeText(anchor))) {
-    return `${normalizeText(rewritten)}${anchor}`;
-  }
-
-  return normalizeText(rewritten) || question.questionOuverte;
-}
-
-function rewriteCurrentQuestionInSession(params: {
-  session: DiagnosticSessionAggregate;
-  rawMessage?: string;
-}): DiagnosticSessionAggregate {
-  const { session } = params;
-  const rawMessage = normalizeText(params.rawMessage);
-
-  if (!rawMessage) {
-    return touchSession(withSafeMemory({ ...session }));
-  }
-
-  const workset = session.currentWorkset;
-  const currentQuestion = getCurrentUnansweredQuestion(workset);
-
-  if (!workset || !currentQuestion) {
-    return touchSession(withSafeMemory({ ...session }));
-  }
-
-  const nextQuestionOuverte = buildQuestionOpenRewrite({
-    session,
-    question: currentQuestion,
-    rawMessage,
-    dimensionId: workset.dimensionId,
-    iteration: workset.iteration,
-  });
-
-  if (nextQuestionOuverte === currentQuestion.questionOuverte) {
-    return touchSession(withSafeMemory({ ...session }));
-  }
-
-  const nextQuestions = workset.questions.map((question) =>
-    question.id === currentQuestion.id
-      ? {
-          ...question,
-          questionOuverte: nextQuestionOuverte,
-        }
-      : question
-  );
-
-  return touchSession(
-    withSafeMemory({
-      ...session,
-      currentWorkset: {
-        ...workset,
-        questions: nextQuestions,
-      },
-    })
-  );
-}
-
-function previewChallengedQuestion(params: {
-  session: DiagnosticSessionAggregate;
-  rawMessage?: string;
-}): StructuredQuestion | null {
-  const { session } = params;
-  const rawMessage = normalizeText(params.rawMessage);
-  const workset = session.currentWorkset;
-  const currentQuestion = getCurrentUnansweredQuestion(workset);
-
-  if (!currentQuestion || !workset) {
-    return null;
-  }
-
-  if (!rawMessage) {
-    return currentQuestion;
-  }
-
-  const nextQuestionOuverte = buildQuestionOpenRewrite({
-    session,
-    question: currentQuestion,
-    rawMessage,
-    dimensionId: workset.dimensionId,
-    iteration: workset.iteration,
-  });
-
-  return {
-    ...currentQuestion,
-    questionOuverte: nextQuestionOuverte,
-  };
-}
-
-function buildOpenQuestionFromSignal(
-  signal: DiagnosticSignal,
-  iteration: IterationNumber
-): string {
-  const excerpt = shortenText(signal.sourceExcerpt, 220);
-
-  switch (iteration) {
-    case 1:
-      if (signal.signalKind === "absence") {
-        return `Sur le thème "${signal.theme}", la trame ne met pas en évidence de pilotage structuré. Comment ce sujet est-il réellement traité aujourd’hui dans l’entreprise ?`;
-      }
-
-      if (excerpt) {
-        return `Sur le thème "${signal.theme}", la trame mentionne : "${excerpt}". Concrètement, comment ce sujet est-il géré aujourd’hui dans le fonctionnement réel de l’entreprise ?`;
-      }
-
-      return `Sur le thème "${signal.theme}", comment ce sujet est-il géré aujourd’hui dans le fonctionnement réel de l’entreprise ?`;
-
-    case 2:
-      return `Si l’on creuse ce point sur "${signal.theme}" : ${signal.constat} Quelles sont, selon vous, les causes principales de cette situation, et quels arbitrages ou dépendances la maintiennent ?`;
-
-    case 3:
-      return `Sur le sujet "${signal.theme}", qu’est-ce qui reste aujourd’hui insuffisamment piloté, formalisé ou sécurisé ? Quels impacts concrets observez-vous déjà ?`;
-
-    default:
-      return `Pouvez-vous préciser ce point sur le thème "${signal.theme}" ?`;
-  }
-}
-
-function buildQuestion(
+function buildLegacyQuestion(
   signal: DiagnosticSignal,
   iteration: IterationNumber,
   index: number
 ): StructuredQuestion {
+  const excerpt = shortenText(signal.sourceExcerpt, 160);
+
+  let questionOuverte = `Pouvez-vous préciser ce point sur le thème "${signal.theme}" ?`;
+
+  if (iteration === 1) {
+    questionOuverte = signal.signalKind === "absence"
+      ? `Sur le thème "${signal.theme}", la trame ne met pas en évidence de pilotage structuré. Comment ce sujet est-il réellement traité aujourd’hui dans l’entreprise ?`
+      : excerpt
+      ? `Sur le thème "${signal.theme}", la trame mentionne : "${excerpt}". Concrètement, comment ce sujet est-il géré aujourd’hui dans le fonctionnement réel de l’entreprise ?`
+      : `Sur le thème "${signal.theme}", comment ce sujet est-il géré aujourd’hui dans le fonctionnement réel de l’entreprise ?`;
+  }
+
+  if (iteration === 2) {
+    questionOuverte = `Si l’on creuse ce point sur "${signal.theme}" : ${signal.constat} Quelles sont, selon vous, les causes principales de cette situation, et quels arbitrages ou dépendances la maintiennent ?`;
+  }
+
+  if (iteration === 3) {
+    questionOuverte = `Sur le sujet "${signal.theme}", qu’est-ce qui reste aujourd’hui insuffisamment piloté, formalisé ou sécurisé ? Quels impacts concrets observez-vous déjà ?`;
+  }
+
   return {
     id: `q-${signal.id}-it${iteration}-${index}`,
     signalId: signal.id,
     theme: signal.theme,
     constat: signal.constat,
     risqueManagerial: signal.managerialRisk,
-    questionOuverte: buildOpenQuestionFromSignal(signal, iteration),
+    questionOuverte,
   };
-}
-
-function selectSignalsForIteration(
-  session: DiagnosticSessionAggregate,
-  dimensionId: DimensionId,
-  iteration: IterationNumber,
-  count: number
-): DiagnosticSignal[] {
-  const pool = [...getDimensionSignals(session, dimensionId)];
-  const frozen = session.frozenDimensions.find((d) => d.dimensionId === dimensionId);
-  if (frozen) return [];
-
-  const biasByIteration = (signal: DiagnosticSignal): number => {
-    let score = signal.criticalityScore * 2 + signal.confidenceScore;
-
-    if (iteration === 1) {
-      if (signal.signalKind === "explicit") score += 30;
-      if (
-        signal.entryAngle === "mechanism" ||
-        signal.entryAngle === "formalization"
-      ) {
-        score += 20;
-      }
-      if (signal.signalKind === "absence") {
-        score -= 30;
-      }
-    }
-
-    if (iteration === 2) {
-      if (
-        signal.entryAngle === "causality" ||
-        signal.entryAngle === "arbitration"
-      ) {
-        score += 25;
-      }
-      if (signal.entryAngle === "dependency") score += 18;
-    }
-
-    if (iteration === 3) {
-      if (signal.signalKind === "absence") score += 35;
-      if (
-        signal.entryAngle === "formalization" ||
-        signal.entryAngle === "economics"
-      ) {
-        score += 20;
-      }
-    }
-
-    return score;
-  };
-
-  return pool.sort((a, b) => biasByIteration(b) - biasByIteration(a)).slice(0, count);
 }
 
 function buildLegacyQuestions(
@@ -534,54 +207,17 @@ function buildLegacyQuestions(
   iteration: IterationNumber,
   targetCount: number
 ): StructuredQuestion[] {
-  const selectedSignals = selectSignalsForIteration(
-    session,
-    dimensionId,
-    iteration,
-    Math.max(targetCount, 1) * 2
-  );
+  const selectedSignals = [...getDimensionSignals(session, dimensionId)]
+    .sort((a, b) => {
+      const left = a.criticalityScore + a.confidenceScore;
+      const right = b.criticalityScore + b.confidenceScore;
+      return right - left;
+    })
+    .slice(0, Math.max(targetCount, 1) * 2);
 
   return uniqueById(
-    selectedSignals.map((signal, idx) => buildQuestion(signal, iteration, idx + 1))
+    selectedSignals.map((signal, idx) => buildLegacyQuestion(signal, iteration, idx + 1))
   ).slice(0, targetCount);
-}
-
-function buildPlannedQuestions(
-  session: DiagnosticSessionAggregate,
-  dimensionId: DimensionId,
-  iteration: IterationNumber,
-  targetCount: number
-): StructuredQuestion[] {
-  const registry = session.signalRegistry;
-  if (!registry) return [];
-
-  try {
-    const planned = uniqueById(
-      planIterationQuestions({
-        registry,
-        dimensionId,
-        iteration,
-        session,
-      }).filter(
-        (question: StructuredQuestion) =>
-          Boolean(question.id) &&
-          Boolean(question.signalId) &&
-          Boolean(question.theme) &&
-          Boolean(question.constat) &&
-          Boolean(question.questionOuverte)
-      )
-    );
-
-    if (planned.length >= targetCount) {
-      return planned.slice(0, targetCount);
-    }
-
-    const fallback = buildLegacyQuestions(session, dimensionId, iteration, targetCount);
-
-    return uniqueById([...planned, ...fallback]).slice(0, targetCount);
-  } catch {
-    return buildLegacyQuestions(session, dimensionId, iteration, targetCount);
-  }
 }
 
 function getPreviousIterationQuestionCount(
@@ -618,88 +254,20 @@ function computeIterationQuestionPolicy(params: {
     previousIterationQuestionCount = null,
   } = params;
 
-  const hardMax = maxQuestionsForIteration(iteration);
-  const floor = minimumFloorForIteration(iteration);
-
-  let cap = hardMax;
+  let cap = maxQuestionsForIteration(iteration);
 
   if ((iteration === 2 || iteration === 3) && previousIterationQuestionCount != null) {
     cap = Math.min(cap, previousIterationQuestionCount);
   }
 
   const targetQuestionCount = Math.max(0, Math.min(candidateCount, cap));
-
-  if (targetQuestionCount === 0) {
-    return {
-      targetQuestionCount: 0,
-      minimumRequiredCount: 0,
-    };
-  }
-
-  if (targetQuestionCount >= floor) {
-    return {
-      targetQuestionCount,
-      minimumRequiredCount: targetQuestionCount,
-    };
-  }
+  const floor = minimumFloorForIteration(iteration);
 
   return {
     targetQuestionCount,
-    minimumRequiredCount: targetQuestionCount,
+    minimumRequiredCount:
+      targetQuestionCount === 0 ? 0 : Math.min(targetQuestionCount, floor),
   };
-}
-
-function isWeakTailQuestion(question: StructuredQuestion): boolean {
-  const constat = normalizeForMatch(question.constat);
-  const questionText = normalizeForMatch(question.questionOuverte);
-  const theme = normalizeForMatch(question.theme);
-
-  const weakConstat =
-    constat.includes("no_evidence") ||
-    constat.includes("no evidence") ||
-    constat.includes("insuffisamment etaye") ||
-    constat.includes("insuffisamment étayé") ||
-    constat.includes("non documente") ||
-    constat.includes("non documenté");
-
-  const weakQuestion =
-    questionText.includes("ne met pas en evidence") ||
-    questionText.includes("ne met pas en évidence") ||
-    questionText.includes("comment ce sujet est il reellement traite") ||
-    questionText.includes("comment ce sujet est-il reellement traite") ||
-    questionText.includes("comment ce sujet est-il réellement traité");
-
-  const weakTheme =
-    theme.includes("recrutement et integration") ||
-    theme.includes("recrutement et intégration");
-
-  return weakConstat || weakQuestion || weakTheme;
-}
-
-function trimWeakTailQuestions(params: {
-  questions: StructuredQuestion[];
-  iteration: IterationNumber;
-}): StructuredQuestion[] {
-  const { iteration } = params;
-  const floor = minimumFloorForIteration(iteration);
-  const trimmed = [...params.questions];
-
-  if (iteration !== 1) {
-    return trimmed;
-  }
-
-  while (trimmed.length > floor) {
-    const tail = trimmed[trimmed.length - 1];
-    if (!tail) break;
-
-    if (!isWeakTailQuestion(tail)) {
-      break;
-    }
-
-    trimmed.pop();
-  }
-
-  return trimmed;
 }
 
 function applyEmptyWorksetAutoValidation(
@@ -733,32 +301,63 @@ function buildWorkset(
     iteration
   );
 
-  const candidateTarget = reopen
+  const initialTarget = reopen
     ? Math.max(maxQuestionsForIteration(iteration), 6)
     : maxQuestionsForIteration(iteration);
 
-  const candidateQuestions = buildPlannedQuestions(
-    session,
-    dimensionId,
-    iteration,
-    candidateTarget
-  );
+  let questions: StructuredQuestion[] = [];
+  let planningDiagnostics = null;
+  let planningNotes: string[] = [];
+
+  if (session.signalRegistry) {
+    const planned = planIterationQuestionsWithDiagnostics({
+      registry: session.signalRegistry,
+      dimensionId,
+      iteration,
+      session,
+    });
+
+    questions = planned.questions;
+    planningDiagnostics = {
+      generatedAt: new Date().toISOString(),
+      strategy: "heuristic_planner_with_coverage",
+      selectedQuestionIds: planned.questions.map((item) => item.id),
+      candidateDiagnostics: planned.diagnostics,
+      notes: planned.notes,
+    };
+    planningNotes = planned.notes;
+  }
+
+  if (questions.length === 0) {
+    questions = buildLegacyQuestions(session, dimensionId, iteration, initialTarget);
+    planningNotes = ["Fallback legacy planner utilisé."];
+    planningDiagnostics = {
+      generatedAt: new Date().toISOString(),
+      strategy: "legacy_fallback",
+      selectedQuestionIds: questions.map((item) => item.id),
+      candidateDiagnostics: [],
+      notes: planningNotes,
+    };
+  }
 
   const policy = computeIterationQuestionPolicy({
     iteration,
-    candidateCount: candidateQuestions.length,
+    candidateCount: questions.length,
     previousIterationQuestionCount: previousQuestionCount,
   });
 
-  const slicedQuestions = candidateQuestions.slice(0, policy.targetQuestionCount);
-  const questions = trimWeakTailQuestions({
-    questions: slicedQuestions,
+  const slicedQuestions = questions.slice(0, policy.targetQuestionCount);
+  const trimmedQuestions = trimLowValueTail({
+    session,
+    dimensionId,
     iteration,
+    questions: slicedQuestions,
+    minimumRequiredCount: policy.minimumRequiredCount,
   });
 
   const finalPolicy = computeIterationQuestionPolicy({
     iteration,
-    candidateCount: questions.length,
+    candidateCount: trimmedQuestions.length,
     previousIterationQuestionCount: previousQuestionCount,
   });
 
@@ -766,12 +365,19 @@ function buildWorkset(
     dimensionId,
     iteration,
     header: buildIterationHeader(dimensionId, iteration),
-    questions,
+    questions: trimmedQuestions.slice(0, finalPolicy.targetQuestionCount),
     answers: [],
     closurePrompt: buildIterationClosurePrompt(dimensionId, iteration),
     targetQuestionCount: finalPolicy.targetQuestionCount,
     minimumRequiredCount: finalPolicy.minimumRequiredCount,
     sourceIterationQuestionCount: previousQuestionCount,
+    planningDiagnostics: planningDiagnostics
+      ? {
+          ...planningDiagnostics,
+          selectedQuestionIds: trimmedQuestions.map((item) => item.id),
+          notes: [...planningNotes, `Questions retenues: ${trimmedQuestions.length}.`],
+        }
+      : null,
   };
 }
 
@@ -964,11 +570,51 @@ function buildUnmanagedZones(
   });
 }
 
+function getExploredSignalsForDimension(
+  session: DiagnosticSessionAggregate,
+  dimensionId: DimensionId
+): DiagnosticSignal[] {
+  const registrySignals = getDimensionSignals(session, dimensionId);
+  const exploredSignalIds = new Set<string>();
+
+  for (const item of session.analysisMemory ?? []) {
+    if (item.dimensionId === dimensionId && item.signalId) {
+      exploredSignalIds.add(item.signalId);
+    }
+  }
+
+  for (const turn of session.conversationHistory ?? []) {
+    if (
+      turn.role === "question" &&
+      turn.dimensionId === dimensionId &&
+      turn.signalId
+    ) {
+      exploredSignalIds.add(turn.signalId);
+    }
+  }
+
+  const exploredThemes = new Set(
+    (session.themeCoverage ?? [])
+      .filter((item) => item.dimensionId === dimensionId)
+      .map((item) => normalizeForMatch(item.theme))
+  );
+
+  const filtered = registrySignals.filter(
+    (signal) =>
+      exploredSignalIds.has(signal.id) ||
+      exploredThemes.has(normalizeForMatch(signal.theme))
+  );
+
+  return filtered.length > 0 ? filtered : registrySignals;
+}
+
 function freezeDimension(
   session: DiagnosticSessionAggregate,
   dimensionId: DimensionId
 ): FrozenDimensionDiagnosis {
-  const signals = getDimensionSignals(session, dimensionId);
+  const signals = getExploredSignalsForDimension(session, dimensionId);
+  const exploredThemes = [...new Set(signals.map((signal) => signal.theme))];
+  const exploredSignalIds = signals.map((signal) => signal.id);
 
   return {
     dimensionId,
@@ -977,47 +623,8 @@ function freezeDimension(
     dominantRootCause: deriveRootCause(session, dimensionId, signals),
     unmanagedZones: buildUnmanagedZones(session, dimensionId, signals),
     frozenAt: new Date().toISOString(),
-  };
-}
-
-function buildObjectiveFromFrozenDimension(
-  frozen: FrozenDimensionDiagnosis,
-  index: number
-): FinalObjective {
-  const dimensionName = dimensionTitle(frozen.dimensionId);
-  const mainZone = frozen.unmanagedZones[0];
-
-  return {
-    id: `obj-d${frozen.dimensionId}-${index}`,
-    dimensionId: frozen.dimensionId,
-    objectiveLabel: `Réduire sous 6 mois l’exposition de la dimension "${dimensionName}" à la zone non pilotée dominante`,
-    owner: "Dirigeant / responsable de dimension",
-    keyIndicator: `Indicateur de maîtrise du thème critique de la dimension ${frozen.dimensionId}`,
-    dueDate: "À définir avec le dirigeant",
-    potentialGain:
-      "Fourchette prudente à estimer lors de l’itération finale selon données disponibles",
-    gainHypotheses: [
-      "Aucun chiffre précis n’est inventé.",
-      "La fourchette devra être reliée à la conséquence économique probable identifiée.",
-      `Point de départ : ${
-        mainZone?.consequence ?? "conséquence à préciser en validation dirigeant"
-      }`,
-    ],
-    validationStatus: "proposed",
-    quickWin: `Sécuriser en premier le point : ${
-      mainZone?.constat ?? frozen.consolidatedFindings[0]
-    }`,
-  };
-}
-
-function buildFinalObjectiveSet(session: DiagnosticSessionAggregate): FinalObjectiveSet {
-  const objectives = session.frozenDimensions
-    .slice(0, 5)
-    .map((frozen, idx) => buildObjectiveFromFrozenDimension(frozen, idx + 1));
-
-  return {
-    header: FINAL_OBJECTIVES_HEADER,
-    objectives,
+    exploredThemes,
+    exploredSignalIds,
   };
 }
 
@@ -1060,16 +667,17 @@ function createBootstrappedSessionFromRegistry(params: {
   const trame = readBaseTrame(params.rawTrameText);
 
   let session = createEmptySessionAggregate(params.sessionId);
-  session = {
+  session = withSafeMemory({
     ...session,
     phase: "dimension_iteration",
     trame,
     signalRegistry: params.signalRegistry,
     currentDimensionId: 1,
     currentIteration: 1,
-  };
+  });
 
-  session.currentWorkset = buildWorkset(session, 1, 1, false);
+  const workset = buildWorkset(session, 1, 1, false);
+  session = attachWorkset(session, workset);
   session = applyEmptyWorksetAutoValidation(session);
 
   return touchSession(withSafeMemory(session));
@@ -1215,18 +823,31 @@ export function registerAnswer(params: {
     answers: [...workset.answers, nextAnswer],
   };
 
-  const answeredCount = nextWorkset.answers.length;
-  const required =
-    nextWorkset.minimumRequiredCount ?? nextWorkset.questions.length;
-
-  let nextSession: DiagnosticSessionAggregate = {
+  let nextSession: DiagnosticSessionAggregate = withSafeMemory({
     ...session,
     currentWorkset: nextWorkset,
-  };
+  });
 
-  if (answeredCount >= required && isWorksetFullyAnswered(nextWorkset)) {
-    nextWorkset.closureAskedAt = new Date().toISOString();
-    nextSession.phase = "iteration_validation";
+  const closure = decideIterationClosure(nextSession);
+
+  if (closure.shouldAskValidation) {
+    nextSession = {
+      ...nextSession,
+      phase: "iteration_validation",
+      currentWorkset: {
+        ...nextWorkset,
+        closureAskedAt: nextWorkset.closureAskedAt ?? new Date().toISOString(),
+        closureDiagnostics: {
+          decidedAt: new Date().toISOString(),
+          qualityStop: closure.qualityStop,
+          remainingLowValue: closure.remainingLowValue,
+          uncoveredMandatoryAngles: closure.uncoveredMandatoryAngles,
+          highValueRemainderQuestionIds: closure.highValueRemainderQuestionIds,
+          reasonCodes: closure.reasonCodes,
+          notes: closure.notes,
+        },
+      },
+    };
   }
 
   return touchSession(withSafeMemory(nextSession));
@@ -1245,16 +866,20 @@ export function submitIterationClosure(params: {
   const currentWorkset = requireCurrentWorkset(session);
 
   if (params.decision === "no") {
-    session = {
-      ...session,
-      phase: "dimension_iteration",
-      currentWorkset: buildWorkset(
-        session,
-        currentWorkset.dimensionId,
-        currentWorkset.iteration,
-        true
-      ),
-    };
+    const workset = buildWorkset(
+      session,
+      currentWorkset.dimensionId,
+      currentWorkset.iteration,
+      true
+    );
+
+    session = attachWorkset(
+      {
+        ...session,
+        phase: "dimension_iteration",
+      },
+      workset
+    );
 
     session = applyEmptyWorksetAutoValidation(session);
     return touchSession(withSafeMemory(session));
@@ -1268,20 +893,30 @@ export function submitIterationClosure(params: {
     closedAt: new Date().toISOString(),
   });
 
+  session = closeCoverageForIteration(
+    session,
+    currentWorkset.dimensionId,
+    currentWorkset.iteration
+  );
+
   if (!isLastIteration(currentWorkset.iteration)) {
     const nextIteration = nextIterationNumber(currentWorkset.iteration)!;
 
-    session = {
-      ...session,
-      phase: "dimension_iteration",
-      currentIteration: nextIteration,
-      currentWorkset: buildWorkset(
-        session,
-        currentWorkset.dimensionId,
-        nextIteration,
-        false
-      ),
-    };
+    const workset = buildWorkset(
+      session,
+      currentWorkset.dimensionId,
+      nextIteration,
+      false
+    );
+
+    session = attachWorkset(
+      {
+        ...session,
+        phase: "dimension_iteration",
+        currentIteration: nextIteration,
+      },
+      workset
+    );
 
     session = applyEmptyWorksetAutoValidation(session);
     return touchSession(withSafeMemory(session));
@@ -1302,19 +937,25 @@ export function submitIterationClosure(params: {
   if (!isLastDimension(currentWorkset.dimensionId)) {
     const nextDimension = nextDimensionId(currentWorkset.dimensionId)!;
 
-    session = {
-      ...session,
-      phase: "dimension_iteration",
-      currentDimensionId: nextDimension,
-      currentIteration: 1,
-      currentWorkset: buildWorkset(session, nextDimension, 1, false),
-    };
+    const workset = buildWorkset(session, nextDimension, 1, false);
+
+    session = attachWorkset(
+      {
+        ...session,
+        phase: "dimension_iteration",
+        currentDimensionId: nextDimension,
+        currentIteration: 1,
+      },
+      workset
+    );
 
     session = applyEmptyWorksetAutoValidation(session);
     return touchSession(withSafeMemory(session));
   }
 
-  const finalObjectives = buildFinalObjectiveSet(session);
+  const finalObjectives = buildFinalObjectiveSetFromFrozenDimensions(
+    session.frozenDimensions
+  );
 
   session = {
     ...session,
@@ -1336,6 +977,8 @@ export function captureObjectivesValidation(params: {
     adjustedLabel?: string;
     adjustedIndicator?: string;
     adjustedDueDate?: string;
+    adjustedPotentialGain?: string;
+    adjustedQuickWin?: string;
   }>;
 }): DiagnosticSessionAggregate {
   const { session: rawSession, decisions } = params;
@@ -1345,28 +988,9 @@ export function captureObjectivesValidation(params: {
     throw new Error("La session n’est pas en phase finale de validation des objectifs.");
   }
 
-  const decisionsById = new Map(decisions.map((d) => [d.objectiveId, d]));
-
-  const nextObjectives = session.finalObjectives.objectives.map((objective) => {
-    const decision = decisionsById.get(objective.id);
-    if (!decision) return objective;
-
-    return {
-      ...objective,
-      objectiveLabel:
-        decision.status === "adjusted" && decision.adjustedLabel
-          ? decision.adjustedLabel
-          : objective.objectiveLabel,
-      keyIndicator:
-        decision.status === "adjusted" && decision.adjustedIndicator
-          ? decision.adjustedIndicator
-          : objective.keyIndicator,
-      dueDate:
-        decision.status === "adjusted" && decision.adjustedDueDate
-          ? decision.adjustedDueDate
-          : objective.dueDate,
-      validationStatus: decision.status,
-    };
+  const nextObjectives = applyObjectiveDecisions({
+    objectives: session.finalObjectives.objectives,
+    decisions,
   });
 
   const nextSession: DiagnosticSessionAggregate = {
@@ -1376,7 +1000,7 @@ export function captureObjectivesValidation(params: {
       ...session.finalObjectives,
       objectives: nextObjectives,
       decisionsCapturedAt: new Date().toISOString(),
-    },
+    } as FinalObjectiveSet,
   };
 
   return touchSession(withSafeMemory(nextSession));
@@ -1402,6 +1026,8 @@ export function cloneSession(
       : null,
     analysisMemory: [...(session.analysisMemory ?? [])],
     iterationHistory: [...(session.iterationHistory ?? [])],
+    themeCoverage: [...(session.themeCoverage ?? [])],
+    conversationHistory: [...(session.conversationHistory ?? [])],
   };
 }
 
@@ -1445,22 +1071,62 @@ export function challengeCurrentQuestion(
       },
   arg2?: string
 ): StructuredQuestion | null | DiagnosticSessionAggregate {
-  if ("phase" in arg1) {
-    return previewChallengedQuestion({
-      session: withSafeMemory(arg1),
-      rawMessage: arg2,
-    });
+  const preview =
+    "phase" in arg1
+      ? withSafeMemory(arg1)
+      : withSafeMemory(arg1.session);
+
+  const rawMessage =
+    ("phase" in arg1 ? arg2 : arg1.rawMessage ?? arg1.message) ?? "";
+
+  const workset = preview.currentWorkset;
+  const currentQuestion = getCurrentUnansweredQuestion(workset);
+
+  if (!workset || !currentQuestion || !normalizeText(rawMessage)) {
+    return "phase" in arg1 ? currentQuestion : preview;
   }
 
-  if ("rawMessage" in arg1 || "sessionId" in arg1 || "reason" in arg1) {
-    return rewriteCurrentQuestionInSession({
-      session: withSafeMemory(arg1.session),
-      rawMessage: arg1.rawMessage ?? arg1.message,
-    });
-  }
-
-  return previewChallengedQuestion({
-    session: withSafeMemory(arg1.session),
-    rawMessage: arg1.message,
+  const signal = findSignalById(preview, currentQuestion.signalId);
+  const analysis = analyzeUserAnswer({
+    rawMessage,
+    currentQuestion: {
+      theme: currentQuestion.theme,
+      constat: currentQuestion.constat,
+      questionOuverte: currentQuestion.questionOuverte,
+      entryAngle: signal?.entryAngle ?? null,
+    },
   });
+
+  const nextQuestionOuverte = rewriteQuestionFromAnalysis({
+    session: preview,
+    question: currentQuestion,
+    rawMessage,
+    analysis,
+    dimensionId: workset.dimensionId,
+    iteration: workset.iteration,
+    currentAngle: signal?.entryAngle ?? null,
+  });
+
+  const rewrittenQuestion: StructuredQuestion = {
+    ...currentQuestion,
+    questionOuverte: nextQuestionOuverte,
+  };
+
+  if ("phase" in arg1) {
+    return rewrittenQuestion;
+  }
+
+  const nextQuestions = workset.questions.map((question) =>
+    question.id === currentQuestion.id ? rewrittenQuestion : question
+  );
+
+  return touchSession(
+    withSafeMemory({
+      ...preview,
+      currentWorkset: {
+        ...workset,
+        questions: nextQuestions,
+      },
+    })
+  );
 }

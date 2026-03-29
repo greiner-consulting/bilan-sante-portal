@@ -7,7 +7,10 @@ import type {
   MemoryInsight,
   EntryAngle,
   MemoryRootCauseCategory,
+  PlanningDiagnostic,
 } from "@/lib/bilan-sante/session-model";
+import { getThemeCoverage, wasAngleMarkedInPriorIterations } from "@/lib/bilan-sante/coverage-tracker";
+import { mandatoryAnglesForIteration } from "@/lib/bilan-sante/iteration-closer";
 
 type PlanParams = {
   registry: SignalRegistry;
@@ -35,12 +38,19 @@ type ThemeMemorySummary = {
   dominantRootCauses: MemoryRootCauseCategory[];
   extractedFacts: string[];
   usableFactCount: number;
+  askedAngles: EntryAngle[];
+  confirmedAngles: EntryAngle[];
+  rejectedAngles: EntryAngle[];
+  lastQuestionText: string | null;
+  lastIteration: IterationNumber | null;
+  saturationScore: number;
 };
 
 type ScoredSignal = {
   signal: DiagnosticSignal;
   themeMemory: ThemeMemorySummary;
   score: number;
+  rationale: string[];
 };
 
 const CANDIDATE_POOL_SIZE: Record<IterationNumber, number> = {
@@ -54,20 +64,14 @@ const MAX_ITERATION_QUESTIONS = 6;
 
 const ABSOLUTE_MIN_SCORE: Record<IterationNumber, number> = {
   1: 40,
-  2: 36,
-  3: 34,
+  2: 38,
+  3: 36,
 };
 
 const EXTENSION_MIN_SCORE: Record<IterationNumber, number> = {
   1: 48,
-  2: 42,
-  3: 40,
-};
-
-const EXTENSION_MAX_GAP_FROM_PREVIOUS: Record<IterationNumber, number> = {
-  1: 14,
-  2: 18,
-  3: 18,
+  2: 44,
+  3: 42,
 };
 
 function normalizeText(value: string | null | undefined): string {
@@ -100,6 +104,10 @@ function uniqueStrings(values: string[]): string[] {
   }
 
   return out;
+}
+
+function uniqueAngles(values: EntryAngle[]): EntryAngle[] {
+  return [...new Set(values)];
 }
 
 function buildQuestionId(
@@ -211,6 +219,15 @@ function getThemeMemorySummary(
     usable.flatMap((item) => item.extractedFacts ?? [])
   ).slice(0, 3);
 
+  const coverage = getThemeCoverage(session, dimensionId, theme);
+  const askedAngles = coverage?.askedAngles ?? [];
+  const confirmedAngles = coverage?.confirmedAngles ?? [];
+  const rejectedAngles = coverage?.rejectedAngles ?? [];
+  const saturationScore =
+    confirmedAngles.length * 24 +
+    extractedFacts.length * 12 +
+    (coverage?.factDensity ?? 0) * 10;
+
   return {
     theme,
     all,
@@ -226,10 +243,20 @@ function getThemeMemorySummary(
     latestClarification,
     latestChallenge,
     dominantSuggestedAngle,
-    coveredAngles: listCoveredAngles(usable.length > 0 ? usable : all),
+    coveredAngles: uniqueAngles([
+      ...listCoveredAngles(usable.length > 0 ? usable : all),
+      ...askedAngles,
+      ...confirmedAngles,
+    ]),
     dominantRootCauses,
     extractedFacts,
     usableFactCount: extractedFacts.length,
+    askedAngles,
+    confirmedAngles,
+    rejectedAngles,
+    lastQuestionText: coverage?.lastQuestionText ?? null,
+    lastIteration: coverage?.lastIteration ?? null,
+    saturationScore,
   };
 }
 
@@ -268,82 +295,109 @@ function countCoveredAngle(
     }
   }
 
+  if (themeMemory.askedAngles.includes(angle)) count += 1;
+  if (themeMemory.confirmedAngles.includes(angle)) count += 2;
+
   return count;
 }
 
 function wasAngleCoveredInPriorIterations(
+  session: DiagnosticSessionAggregate,
   themeMemory: ThemeMemorySummary,
+  dimensionId: DimensionId,
   angle: EntryAngle,
   currentIteration: IterationNumber
 ): boolean {
   if (currentIteration === 1) return false;
 
-  return themeMemory.usable.some(
+  const fromMemory = themeMemory.usable.some(
     (item) =>
       item.suggestedAngle === angle &&
       item.iteration != null &&
       item.iteration < currentIteration
   );
+
+  const fromCoverage = wasAngleMarkedInPriorIterations({
+    session,
+    dimensionId,
+    theme: themeMemory.theme,
+    angle,
+    currentIteration,
+  });
+
+  return fromMemory || fromCoverage;
 }
 
 function scoreAngleNovelty(
+  session: DiagnosticSessionAggregate,
   signal: DiagnosticSignal,
   themeMemory: ThemeMemorySummary,
+  dimensionId: DimensionId,
   iteration: IterationNumber
 ): number {
   const sameAngleCount = countCoveredAngle(themeMemory, signal.entryAngle);
 
-  if (themeMemory.usable.length === 0) {
-    return sameAngleCount > 0 ? -4 : 0;
+  if (themeMemory.usable.length === 0 && themeMemory.confirmedAngles.length === 0) {
+    return sameAngleCount > 0 ? -8 : 0;
   }
 
   if (sameAngleCount === 0) {
-    if (iteration === 1) return -2;
-    if (iteration === 2) return 16;
-    return 14;
+    if (iteration === 1) return 4;
+    if (iteration === 2) return 18;
+    return 16;
+  }
+
+  if (
+    wasAngleCoveredInPriorIterations(
+      session,
+      themeMemory,
+      dimensionId,
+      signal.entryAngle,
+      iteration
+    )
+  ) {
+    return iteration === 3 ? -28 : -18;
   }
 
   if (sameAngleCount === 1) {
-    if (iteration === 1) return -10;
-    if (iteration === 2) return -2;
-    return -4;
+    return iteration === 1 ? -8 : -4;
   }
 
-  if (iteration === 1) return -18;
-  if (iteration === 2) return -10;
-  return -12;
+  return iteration === 1 ? -16 : -12;
 }
 
 function scoreThemeContinuation(
   themeMemory: ThemeMemorySummary,
   iteration: IterationNumber
 ): number {
-  if (themeMemory.usable.length === 0) {
+  if (themeMemory.usable.length === 0 && themeMemory.confirmedAngles.length === 0) {
     if (
       themeMemory.reframing.length > 0 ||
       themeMemory.clarification.length > 0 ||
       themeMemory.challenge.length > 0
     ) {
-      return iteration === 1 ? 6 : 0;
+      return iteration === 1 ? 6 : 2;
     }
 
     return 0;
   }
 
-  if (themeMemory.usable.length === 1) {
-    if (iteration === 1) return -12;
+  if (themeMemory.saturationScore >= 60) {
+    return -18;
+  }
+
+  if (themeMemory.usable.length === 1 || themeMemory.confirmedAngles.length === 1) {
+    if (iteration === 1) return -8;
     if (iteration === 2) return 16;
+    return 10;
+  }
+
+  if (themeMemory.usable.length === 2 || themeMemory.confirmedAngles.length >= 2) {
+    if (iteration === 1) return -18;
+    if (iteration === 2) return 2;
     return 8;
   }
 
-  if (themeMemory.usable.length === 2) {
-    if (iteration === 1) return -18;
-    if (iteration === 2) return 6;
-    return 14;
-  }
-
-  if (iteration === 1) return -22;
-  if (iteration === 2) return -6;
   return -10;
 }
 
@@ -352,7 +406,7 @@ function scoreReframingRecovery(
   themeMemory: ThemeMemorySummary,
   iteration: IterationNumber
 ): number {
-  if (themeMemory.usable.length > 0) {
+  if (themeMemory.usable.length > 0 || themeMemory.confirmedAngles.length > 0) {
     return 0;
   }
 
@@ -360,7 +414,7 @@ function scoreReframingRecovery(
 
   if (themeMemory.clarification.length > 0) {
     if (iteration === 1 && signal.signalKind === "explicit") {
-      score += 10;
+      score += 8;
     }
 
     if (
@@ -374,20 +428,12 @@ function scoreReframingRecovery(
   if (themeMemory.reframing.length > 0 || themeMemory.mixed.length > 0) {
     if (
       signal.entryAngle === "mechanism" ||
-      signal.entryAngle === "formalization"
+      signal.entryAngle === "formalization" ||
+      signal.entryAngle === "causality"
     ) {
-      score += 12;
+      score += 10;
     } else {
       score -= 8;
-    }
-  }
-
-  if (themeMemory.challenge.length > 0) {
-    if (iteration === 1) {
-      score += 4;
-    }
-    if (signal.signalKind === "absence") {
-      score -= 6;
     }
   }
 
@@ -421,7 +467,7 @@ function scoreRootCauseAlignment(
     themeMemory.dominantRootCauses.includes("cash")
   ) {
     if (signal.entryAngle === "economics") {
-      score += 14;
+      score += 12;
     }
   }
 
@@ -446,24 +492,6 @@ function scoreRootCauseAlignment(
   return score;
 }
 
-function scoreRepeatedAnglePenalty(
-  signal: DiagnosticSignal,
-  themeMemory: ThemeMemorySummary,
-  iteration: IterationNumber
-): number {
-  if (iteration <= 1) return 0;
-
-  if (!wasAngleCoveredInPriorIterations(themeMemory, signal.entryAngle, iteration)) {
-    return 0;
-  }
-
-  if (iteration === 2) {
-    return -24;
-  }
-
-  return -60;
-}
-
 function scoreIterationIntentFit(
   signal: DiagnosticSignal,
   iteration: IterationNumber
@@ -471,25 +499,24 @@ function scoreIterationIntentFit(
   let score = 0;
 
   if (iteration === 1) {
-    if (signal.signalKind === "explicit") score += 12;
-    if (signal.entryAngle === "mechanism") score += 8;
-    if (signal.entryAngle === "formalization") score += 6;
-    if (signal.signalKind === "absence") score -= 10;
+    if (signal.signalKind === "explicit") score += 10;
+    if (signal.entryAngle === "mechanism") score += 10;
+    if (signal.entryAngle === "formalization") score += 8;
+    if (signal.signalKind === "absence") score -= 12;
   }
 
   if (iteration === 2) {
     if (signal.entryAngle === "causality") score += 20;
-    if (signal.entryAngle === "arbitration") score += 12;
+    if (signal.entryAngle === "arbitration") score += 16;
     if (signal.entryAngle === "dependency") score += 8;
-    if (signal.signalKind === "explicit") score += 4;
   }
 
   if (iteration === 3) {
-    if (signal.entryAngle === "formalization") score += 16;
-    if (signal.entryAngle === "dependency") score += 12;
-    if (signal.entryAngle === "arbitration") score += 10;
-    if (signal.entryAngle === "economics") score -= 12;
-    if (signal.signalKind === "absence") score += 8;
+    if (signal.entryAngle === "formalization") score += 18;
+    if (signal.entryAngle === "dependency") score += 16;
+    if (signal.entryAngle === "arbitration") score += 8;
+    if (signal.entryAngle === "economics") score -= 8;
+    if (signal.signalKind === "absence") score += 10;
   }
 
   return score;
@@ -523,25 +550,69 @@ function scoreLowEvidencePenalty(
   if (iteration === 1) {
     score -= 18;
   } else {
-    score -= 6;
-  }
-
-  if (themeMemory.usable.length > 0) {
-    score -= 10;
-  }
-
-  if (signal.signalKind === "absence") {
     score -= 8;
   }
 
+  if (themeMemory.usable.length > 0 || themeMemory.confirmedAngles.length > 0) {
+    score -= 12;
+  }
+
+  if (signal.signalKind === "absence") {
+    score -= 6;
+  }
+
   return score;
+}
+
+function scoreMandatoryAngleGap(
+  session: DiagnosticSessionAggregate,
+  signal: DiagnosticSignal,
+  dimensionId: DimensionId,
+  iteration: IterationNumber
+): number {
+  const mandatoryAngles = mandatoryAnglesForIteration(iteration);
+  if (!mandatoryAngles.includes(signal.entryAngle)) return 0;
+
+  const alreadyCovered = (session.themeCoverage ?? []).some(
+    (item) =>
+      item.dimensionId === dimensionId &&
+      item.angleHistory.some(
+        (mark) =>
+          mark.iteration === iteration &&
+          (mark.status === "asked" || mark.status === "confirmed") &&
+          mark.angle === signal.entryAngle
+      )
+  );
+
+  return alreadyCovered ? -6 : 18;
+}
+
+function scoreThemeSaturation(
+  signal: DiagnosticSignal,
+  themeMemory: ThemeMemorySummary,
+  iteration: IterationNumber
+): number {
+  if (themeMemory.saturationScore < 60) return 0;
+
+  if (
+    iteration === 3 &&
+    !themeMemory.confirmedAngles.includes(signal.entryAngle) &&
+    (signal.entryAngle === "formalization" || signal.entryAngle === "dependency")
+  ) {
+    return 8;
+  }
+
+  return -20;
 }
 
 function scoreSignalForIteration(
   signal: DiagnosticSignal,
   iteration: IterationNumber,
   themeMemory: ThemeMemorySummary,
-  alreadyUsedSignalIds: Set<string>
+  alreadyUsedSignalIds: Set<string>,
+  session: DiagnosticSessionAggregate,
+  dimensionId: DimensionId,
+  rationale: string[]
 ): number {
   let score = signal.criticalityScore + signal.confidenceScore;
 
@@ -552,14 +623,50 @@ function scoreSignalForIteration(
 
   if (alreadyUsedSignalIds.has(signal.id)) {
     score -= 40;
+    rationale.push("signal déjà utilisé");
   }
 
-  score += scoreThemeContinuation(themeMemory, iteration);
-  score += scoreAngleNovelty(signal, themeMemory, iteration);
-  score += scoreReframingRecovery(signal, themeMemory, iteration);
-  score += scoreRootCauseAlignment(signal, themeMemory);
-  score += scoreLowEvidencePenalty(signal, themeMemory, iteration);
-  score += scoreRepeatedAnglePenalty(signal, themeMemory, iteration);
+  const continuation = scoreThemeContinuation(themeMemory, iteration);
+  score += continuation;
+  if (continuation > 0) rationale.push("thème à creuser");
+  if (continuation < -10) rationale.push("thème déjà dense");
+
+  const novelty = scoreAngleNovelty(
+    session,
+    signal,
+    themeMemory,
+    dimensionId,
+    iteration
+  );
+  score += novelty;
+  if (novelty > 10) rationale.push("angle nouveau");
+  if (novelty < -12) rationale.push("angle déjà couvert");
+
+  const reframingRecovery = scoreReframingRecovery(signal, themeMemory, iteration);
+  score += reframingRecovery;
+  if (reframingRecovery > 0) rationale.push("récupération après recadrage");
+
+  const rootCauseAlignment = scoreRootCauseAlignment(signal, themeMemory);
+  score += rootCauseAlignment;
+  if (rootCauseAlignment > 0) rationale.push("alignement causes racines");
+
+  const lowEvidencePenalty = scoreLowEvidencePenalty(signal, themeMemory, iteration);
+  score += lowEvidencePenalty;
+  if (lowEvidencePenalty < 0) rationale.push("faible étayage");
+
+  const mandatoryGap = scoreMandatoryAngleGap(
+    session,
+    signal,
+    dimensionId,
+    iteration
+  );
+  score += mandatoryGap;
+  if (mandatoryGap > 0) rationale.push("angle obligatoire non couvert");
+
+  const saturation = scoreThemeSaturation(signal, themeMemory, iteration);
+  score += saturation;
+  if (saturation < -10) rationale.push("thème saturé");
+  if (saturation > 0) rationale.push("bonne clôture possible");
 
   if (themeMemory.latestUsable && themeMemory.usableFactCount > 0) {
     score += 4;
@@ -615,55 +722,6 @@ function buildRootCausePromptPart(
   return ` Vous avez déjà orienté le sujet vers ${labels[0]}, ${labels[1]} et ${labels[2]}.`;
 }
 
-function buildRootCauseChoiceHint(
-  categories: MemoryRootCauseCategory[]
-): string {
-  const rootCauses = uniqueStrings(categories).slice(0, 3);
-
-  if (rootCauses.length === 0) {
-    return " Est-ce surtout un sujet de compétences, d’expérience, de décisions, d’arbitrage ou d’organisation ?";
-  }
-
-  const labels = rootCauses.map((item) => {
-    switch (item) {
-      case "skills":
-        return "compétences";
-      case "experience":
-        return "expérience";
-      case "decision":
-        return "décisions";
-      case "arbitration":
-        return "arbitrage";
-      case "organization":
-        return "organisation";
-      case "resources":
-        return "ressources";
-      case "pricing":
-        return "prix ou chiffrage";
-      case "commercial":
-        return "dispositif commercial";
-      case "execution":
-        return "exécution";
-      case "quality":
-        return "qualité";
-      case "cash":
-        return "cash ou rentabilité";
-      default:
-        return item;
-    }
-  });
-
-  if (labels.length === 1) {
-    return ` Est-ce principalement un sujet de ${labels[0]} ?`;
-  }
-
-  if (labels.length === 2) {
-    return ` Est-ce surtout un sujet de ${labels[0]} ou de ${labels[1]} ?`;
-  }
-
-  return ` Est-ce surtout un sujet de ${labels[0]}, de ${labels[1]} ou de ${labels[2]} ?`;
-}
-
 function buildFactAnchor(facts: string[]): string {
   const selected = uniqueStrings(facts).slice(0, 1);
   if (selected.length === 0) return "";
@@ -710,7 +768,7 @@ function buildExplorationQuestion(
   const factAnchor = buildFactAnchor(themeMemory.extractedFacts);
 
   if (themeMemory.clarification.length > 0 && themeMemory.usable.length === 0) {
-    return `Reprenons simplement le thème "${signal.theme}" : qui s’en occupe réellement aujourd’hui, comment le sujet est-il piloté au quotidien, et quel problème concret observez-vous ?${factAnchor}`;
+    return `Reprenons simplement le thème "${signal.theme}" : qui s’en occupe réellement aujourd’hui, comment le sujet est-il piloté au quotidien, où le fonctionnement se dérègle-t-il concrètement, et qu’observez-vous sur le terrain ?${factAnchor}`;
   }
 
   if (
@@ -720,21 +778,21 @@ function buildExplorationQuestion(
     return `Sur le thème "${signal.theme}", repartons du bon angle. Dans le fonctionnement réel de l’entreprise, quel est le problème concret à regarder en priorité, qui est impliqué, et comment cela se manifeste-t-il aujourd’hui ?${factAnchor}`;
   }
 
-  if (themeMemory.usable.length > 0) {
-    return `Sur le thème "${signal.theme}", sans revenir sur ce qui est déjà acquis, quel point reste aujourd’hui le plus flou ou le moins sécurisé dans le fonctionnement réel ? Qui est impliqué et comment cela se manifeste-t-il concrètement ?${factAnchor}`;
+  if (themeMemory.usable.length > 0 || themeMemory.confirmedAngles.length > 0) {
+    return `Sur le thème "${signal.theme}", sans revenir sur ce qui est déjà acquis, quel point reste aujourd’hui le plus flou, le moins sécurisé ou le plus mal tenu dans le fonctionnement réel ? Qui est impliqué, et comment cela se voit-il concrètement ?${factAnchor}`;
   }
 
   if (signal.signalKind === "absence") {
-    return `Sur le thème "${signal.theme}", la trame ne met pas en évidence de pilotage structuré. Comment ce sujet est-il réellement traité aujourd’hui dans l’entreprise, par qui, et avec quels repères de pilotage ?${factAnchor}`;
+    return `Sur le thème "${signal.theme}", la trame ne met pas en évidence de pilotage structuré. Comment ce sujet est-il réellement traité aujourd’hui dans l’entreprise, par qui, et selon quels repères ou règles implicites ?${factAnchor}`;
   }
 
   const excerpt = shorten(signal.sourceExcerpt, 220);
 
   if (excerpt) {
-    return `Sur le thème "${signal.theme}", la trame mentionne : "${excerpt}". Concrètement, comment ce sujet est-il géré aujourd’hui dans le fonctionnement réel de l’entreprise ?${factAnchor}`;
+    return `Sur le thème "${signal.theme}", la trame mentionne : "${excerpt}". Concrètement, comment ce sujet fonctionne-t-il aujourd’hui dans la réalité opérationnelle, avec quels acteurs, quelles règles et quelles limites ?${factAnchor}`;
   }
 
-  return `Sur le thème "${signal.theme}", comment ce sujet est-il géré aujourd’hui dans le fonctionnement réel de l’entreprise ?${factAnchor}`;
+  return `Sur le thème "${signal.theme}", comment ce sujet est-il géré aujourd’hui dans le fonctionnement réel de l’entreprise, avec quels acteurs et selon quelles pratiques effectives ?${factAnchor}`;
 }
 
 function buildCausalityQuestion(
@@ -743,37 +801,36 @@ function buildCausalityQuestion(
 ): string {
   const factAnchor = buildFactAnchor(themeMemory.extractedFacts);
   const rootCausePart = buildRootCausePromptPart(themeMemory.dominantRootCauses);
-  const rootCauseChoice = buildRootCauseChoiceHint(themeMemory.dominantRootCauses);
 
   if (
-    themeMemory.dominantSuggestedAngle === "arbitration" &&
-    !wasAngleCoveredInPriorIterations(themeMemory, "arbitration", 2)
+    themeMemory.confirmedAngles.includes("arbitration") === false &&
+    themeMemory.dominantSuggestedAngle === "arbitration"
   ) {
     return `Sur "${signal.theme}", creusons la chaîne de décision : qui arbitre réellement, qui valide, où se situent les blocages, et en quoi cela explique la situation actuelle ?${factAnchor}`;
   }
 
   if (
-    themeMemory.dominantSuggestedAngle === "economics" &&
-    !wasAngleCoveredInPriorIterations(themeMemory, "economics", 2)
+    themeMemory.confirmedAngles.includes("economics") === false &&
+    themeMemory.dominantSuggestedAngle === "economics"
   ) {
     return `Sur "${signal.theme}", creusons le fond économique : en quoi la situation actuelle vient-elle du prix, du chiffrage, de la marge, du coût réel ou du niveau de rentabilité attendu ?${factAnchor}`;
   }
 
   if (
-    themeMemory.dominantSuggestedAngle === "formalization" &&
-    !wasAngleCoveredInPriorIterations(themeMemory, "formalization", 2)
+    themeMemory.confirmedAngles.includes("formalization") === false &&
+    themeMemory.dominantSuggestedAngle === "formalization"
   ) {
     return `Sur "${signal.theme}", qu’est-ce qui relève d’un défaut de cadre, de rôles, de méthode ou de pilotage formalisé ? Comment cela produit-il la situation observée ?${factAnchor}`;
   }
 
   if (
-    themeMemory.dominantSuggestedAngle === "dependency" &&
-    !wasAngleCoveredInPriorIterations(themeMemory, "dependency", 2)
+    themeMemory.confirmedAngles.includes("dependency") === false &&
+    themeMemory.dominantSuggestedAngle === "dependency"
   ) {
     return `Sur "${signal.theme}", où se situe la dépendance la plus critique aujourd’hui : une personne clé, un validateur, une ressource rare ou un point de blocage structurel ? Comment cela entretient-il la situation actuelle ?${factAnchor}`;
   }
 
-  return `Si l’on creuse ce point sur "${signal.theme}" : ${signal.constat} Quelles sont, selon vous, les causes principales de cette situation ?${rootCausePart}${factAnchor}${rootCauseChoice}`;
+  return `Si l’on remonte à la cause sur "${signal.theme}" : ${signal.constat} Qu’est-ce qui explique vraiment cette situation aujourd’hui, et qu’est-ce qui relève selon vous des compétences, des décisions, de l’organisation ou de la chaîne d’arbitrage ?${rootCausePart}${factAnchor}`;
 }
 
 function buildConsolidationQuestion(
@@ -782,44 +839,23 @@ function buildConsolidationQuestion(
 ): string {
   const factAnchor = buildFactAnchor(themeMemory.extractedFacts);
 
-  const economicsAlreadyCovered = wasAngleCoveredInPriorIterations(
-    themeMemory,
-    "economics",
-    3
-  );
-  const formalizationAlreadyCovered = wasAngleCoveredInPriorIterations(
-    themeMemory,
-    "formalization",
-    3
-  );
-  const arbitrationAlreadyCovered = wasAngleCoveredInPriorIterations(
-    themeMemory,
-    "arbitration",
-    3
-  );
-  const dependencyAlreadyCovered = wasAngleCoveredInPriorIterations(
-    themeMemory,
-    "dependency",
-    3
-  );
-
-  if (!formalizationAlreadyCovered) {
-    return `Sur le sujet "${signal.theme}", qu’est-ce qui reste aujourd’hui insuffisamment clarifié, formalisé ou sécurisé dans les rôles, règles de fonctionnement ou responsabilités ? Et quel indicateur simple permettrait de suivre ce point ?${factAnchor}`;
+  if (!themeMemory.confirmedAngles.includes("formalization")) {
+    return `Sur le sujet "${signal.theme}", qu’est-ce qui reste aujourd’hui insuffisamment clarifié, formalisé ou sécurisé dans les rôles, règles de fonctionnement ou responsabilités ? Et comment le repéreriez-vous plus tôt ?${factAnchor}`;
   }
 
-  if (!dependencyAlreadyCovered) {
-    return `Sur le sujet "${signal.theme}", quelle dépendance reste aujourd’hui la plus pénalisante : une personne clé, un validateur, une ressource rare ou une zone sans pilotage clair ? Et comment pouvez-vous la repérer concrètement ?${factAnchor}`;
+  if (!themeMemory.confirmedAngles.includes("dependency")) {
+    return `Sur le sujet "${signal.theme}", quelle dépendance reste aujourd’hui la plus pénalisante : une personne clé, un validateur, une ressource rare ou une zone sans relais fiable ? Et quel signal faible vous alerterait ?${factAnchor}`;
   }
 
-  if (!arbitrationAlreadyCovered) {
-    return `Sur le sujet "${signal.theme}", où la chaîne d’arbitrage reste-t-elle encore insuffisamment claire ou insuffisamment pilotée ? Et quel signal faible vous permettrait de voir la dérive plus tôt ?${factAnchor}`;
+  if (!themeMemory.confirmedAngles.includes("arbitration")) {
+    return `Sur le sujet "${signal.theme}", où la chaîne d’arbitrage reste-t-elle encore insuffisamment claire, trop centralisée ou trop lente ? Et à quel moment la dérive devient-elle visible ?${factAnchor}`;
   }
 
-  if (!economicsAlreadyCovered) {
-    return `Sur le sujet "${signal.theme}", quel impact économique concret reste aujourd’hui insuffisamment suivi : marge, coût réel, rentabilité, cash ou résultat ? Et quel indicateur vous manque encore pour le piloter ?${factAnchor}`;
+  if (!themeMemory.confirmedAngles.includes("economics")) {
+    return `Sur le sujet "${signal.theme}", quel impact économique concret reste aujourd’hui insuffisamment suivi : marge, coût réel, rentabilité, cash ou résultat ? Et quel indicateur simple vous manque encore pour le piloter ?${factAnchor}`;
   }
 
-  return `Sur le sujet "${signal.theme}", quelle zone reste aujourd’hui non pilotée ou insuffisamment objectivée ? Et quel indicateur simple permettrait de la rendre visible plus tôt ?${factAnchor}`;
+  return `Sur le sujet "${signal.theme}", quelle zone reste aujourd’hui non pilotée, insuffisamment objectivée ou trop dépendante des habitudes ? Et quel indicateur simple permettrait de la rendre visible plus tôt ?${factAnchor}`;
 }
 
 function hasStrongReasonToKeep(
@@ -830,30 +866,13 @@ function hasStrongReasonToKeep(
 
   if (signal.criticalityScore >= 85) return true;
   if (themeMemory.usableFactCount >= 2) return true;
-  if (themeMemory.dominantRootCauses.length >= 2 && iteration >= 2) return true;
+  if (themeMemory.confirmedAngles.length >= 2 && iteration >= 2) return true;
   if (
     iteration === 1 &&
     signal.signalKind === "explicit" &&
     (signal.entryAngle === "mechanism" || signal.entryAngle === "formalization") &&
     score >= EXTENSION_MIN_SCORE[iteration]
   ) {
-    return true;
-  }
-
-  return false;
-}
-
-function isWeakTailCandidate(
-  item: ScoredSignal,
-  iteration: IterationNumber
-): boolean {
-  const { signal, score } = item;
-
-  if (score < EXTENSION_MIN_SCORE[iteration] && isLowEvidenceSignal(signal)) {
-    return true;
-  }
-
-  if (iteration === 1 && signal.signalKind === "absence" && score < 55) {
     return true;
   }
 
@@ -895,25 +914,8 @@ function selectHighQualitySignals(
       continue;
     }
 
-    const previousScore = selected[selected.length - 1]?.score ?? score;
-    const scoreGap = previousScore - score;
-
-    if (score < EXTENSION_MIN_SCORE[iteration]) {
-      if (!hasStrongReasonToKeep(item, iteration)) {
-        break;
-      }
-    }
-
-    if (scoreGap > EXTENSION_MAX_GAP_FROM_PREVIOUS[iteration]) {
-      if (!hasStrongReasonToKeep(item, iteration)) {
-        break;
-      }
-    }
-
-    if (isWeakTailCandidate(item, iteration)) {
-      if (!hasStrongReasonToKeep(item, iteration)) {
-        break;
-      }
+    if (score < EXTENSION_MIN_SCORE[iteration] && !hasStrongReasonToKeep(item, iteration)) {
+      break;
     }
 
     selected.push(item);
@@ -929,37 +931,16 @@ function selectHighQualitySignals(
     return selected;
   }
 
-  const fallback: ScoredSignal[] = [];
-  const fallbackThemes = new Set<string>();
-  const fallbackSections = new Set<string>();
-
-  for (const item of scoredSignals) {
-    const normalizedTheme = normalizeText(item.signal.theme).toLowerCase();
-    const sourceSection = normalizeText(item.signal.sourceSection);
-
-    if (fallbackThemes.has(normalizedTheme)) continue;
-
-    if (
-      sourceSection &&
-      fallbackSections.has(sourceSection) &&
-      item.signal.signalKind === "explicit"
-    ) {
-      continue;
-    }
-
-    fallback.push(item);
-    fallbackThemes.add(normalizedTheme);
-    if (sourceSection) fallbackSections.add(sourceSection);
-
-    if (fallback.length >= Math.min(MIN_CORE_QUESTIONS, scoredSignals.length)) {
-      break;
-    }
-  }
-
-  return fallback;
+  return scoredSignals.slice(0, Math.min(MIN_CORE_QUESTIONS, scoredSignals.length));
 }
 
-export function planIterationQuestions(params: PlanParams): StructuredQuestion[] {
+export function planIterationQuestionsWithDiagnostics(
+  params: PlanParams
+): {
+  questions: StructuredQuestion[];
+  diagnostics: PlanningDiagnostic[];
+  notes: string[];
+} {
   const { registry, dimensionId, iteration, session } = params;
 
   const alreadyUsedSignalIds = getAlreadyUsedSignalIds(session);
@@ -968,15 +949,20 @@ export function planIterationQuestions(params: PlanParams): StructuredQuestion[]
     .filter((signal) => signal.dimensionId === dimensionId)
     .map((signal) => {
       const themeMemory = getThemeMemorySummary(session, dimensionId, signal.theme);
+      const rationale: string[] = [];
 
       return {
         signal,
         themeMemory,
+        rationale,
         score: scoreSignalForIteration(
           signal,
           iteration,
           themeMemory,
-          alreadyUsedSignalIds
+          alreadyUsedSignalIds,
+          session,
+          dimensionId,
+          rationale
         ),
       };
     })
@@ -985,7 +971,7 @@ export function planIterationQuestions(params: PlanParams): StructuredQuestion[]
 
   const selected = selectHighQualitySignals(candidates, iteration);
 
-  return selected.map((item, index) =>
+  const questions = selected.map((item, index) =>
     buildStructuredQuestion(
       item.signal,
       iteration,
@@ -993,4 +979,23 @@ export function planIterationQuestions(params: PlanParams): StructuredQuestion[]
       item.themeMemory
     )
   );
+
+  const diagnostics = candidates.map((item) => ({
+    signalId: item.signal.id,
+    theme: item.signal.theme,
+    entryAngle: item.signal.entryAngle,
+    score: item.score,
+    rationale: item.rationale.length > 0 ? item.rationale : ["score composite"],
+  }));
+
+  const notes = [
+    `Sélection ${questions.length} question(s) sur ${candidates.length} candidat(s).`,
+    `Itération ${iteration}/3 — angles prioritaires : ${mandatoryAnglesForIteration(iteration).join(", ")}.`,
+  ];
+
+  return { questions, diagnostics, notes };
+}
+
+export function planIterationQuestions(params: PlanParams): StructuredQuestion[] {
+  return planIterationQuestionsWithDiagnostics(params).questions;
 }
