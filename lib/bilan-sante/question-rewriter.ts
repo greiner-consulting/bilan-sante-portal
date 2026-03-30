@@ -1,10 +1,17 @@
-import { buildRephrasedQuestionFromAnalysis, type AnswerAnalysis } from "@/lib/bilan-sante/answer-analyzer";
+import {
+  buildRephrasedQuestionFromAnalysis,
+  type AnswerAnalysis,
+} from "@/lib/bilan-sante/answer-analyzer";
 import type {
   DiagnosticSessionAggregate,
   EntryAngle,
   StructuredQuestion,
 } from "@/lib/bilan-sante/session-model";
-import type { DimensionId, IterationNumber } from "@/lib/bilan-sante/protocol";
+import {
+  dimensionTitle,
+  type DimensionId,
+  type IterationNumber,
+} from "@/lib/bilan-sante/protocol";
 import { getThemeCoverage } from "@/lib/bilan-sante/coverage-tracker";
 import { composeQuestionWithLlm } from "@/lib/bilan-sante/llm-diagnostic-writer";
 
@@ -12,11 +19,25 @@ function normalizeText(value: string | null | undefined): string {
   return String(value ?? "").replace(/\s+/g, " ").trim();
 }
 
+function normalizeForMatch(value: string | null | undefined): string {
+  return normalizeText(value)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+}
+
 function shorten(value: string | null | undefined, max = 160): string {
   const text = normalizeText(value);
   if (!text) return "";
   if (text.length <= max) return text;
   return `${text.slice(0, max - 1).trim()}…`;
+}
+
+function sameTheme(
+  left: string | null | undefined,
+  right: string | null | undefined
+): boolean {
+  return normalizeForMatch(left) === normalizeForMatch(right);
 }
 
 function latestFactAnchor(
@@ -31,7 +52,7 @@ function latestFactAnchor(
     .reverse()
     .find(
       (item) =>
-        item.theme === normalizedTheme &&
+        sameTheme(item.theme, normalizedTheme) &&
         (dimensionId == null || item.dimensionId === dimensionId) &&
         item.isUsableBusinessMatter &&
         (item.extractedFacts?.length ?? 0) > 0
@@ -57,14 +78,19 @@ function buildAngleQuestion(params: {
         return `Restons sur "${theme}", mais repartons du bon angle : qu’est-ce qui produit réellement la difficulté aujourd’hui, et qu’est-ce qui l’explique dans le fonctionnement concret ?${anchor}`;
       }
       return `Sur "${theme}", si vous remontez à la cause racine, est-ce surtout un sujet de compétences, d’expérience, de décisions prises ou d’organisation mal posée ?${anchor}`;
+
     case "arbitration":
       return `Sur "${theme}", qui arbitre réellement, qui valide, où la décision se bloque-t-elle, et en quoi cette chaîne d’arbitrage entretient-elle la situation actuelle ?${anchor}`;
+
     case "economics":
       return `Sur "${theme}", quel est l’impact économique réellement subi aujourd’hui : marge, coût réel, cash, rentabilité ou sélectivité d’affaires ? Et comment cet impact se matérialise-t-il ?${anchor}`;
+
     case "formalization":
       return `Sur "${theme}", qu’est-ce qui relève surtout d’un manque de cadre, de rôles clairs, de méthode, de rituel ou de pilotage formalisé ?${anchor}`;
+
     case "dependency":
       return `Sur "${theme}", où se situe la dépendance la plus pénalisante aujourd’hui : une personne clé, un validateur, une ressource rare, un passage obligé ou une zone sans relais ?${anchor}`;
+
     case "mechanism":
     default:
       return `Sur "${theme}", comment le problème se produit-il concrètement dans le fonctionnement réel : à quel moment, avec quels acteurs, selon quel enchaînement, et avec quel effet visible ?${anchor}`;
@@ -90,7 +116,10 @@ export async function rewriteQuestionFromAnalysis(params: {
   } = params;
 
   const anchor = latestFactAnchor(session, dimensionId, question.theme);
-  const coverage = dimensionId != null ? getThemeCoverage(session, dimensionId, question.theme) : null;
+  const coverage =
+    dimensionId != null
+      ? getThemeCoverage(session, dimensionId, question.theme)
+      : null;
 
   let fallback = question.questionOuverte;
 
@@ -127,6 +156,7 @@ export async function rewriteQuestionFromAnalysis(params: {
         entryAngle: analysis.suggestedAngle ?? currentAngle,
       },
     });
+
     fallback = normalizeText(rewritten) || question.questionOuverte;
   }
 
@@ -134,32 +164,36 @@ export async function rewriteQuestionFromAnalysis(params: {
     return fallback;
   }
 
-  return composeQuestionWithLlm({
+  const normalizedConstat = normalizeForMatch(question.constat);
+  const isAbsence =
+    normalizedConstat.includes("no_evidence") ||
+    normalizedConstat.includes("no evidence") ||
+    normalizedConstat.includes("insuffisamment etaye") ||
+    normalizedConstat.includes("insuffisamment étaye") ||
+    normalizedConstat.includes("non documente") ||
+    normalizedConstat.includes("non documente");
+
+  const extractedFacts = (session.analysisMemory ?? [])
+    .filter(
+      (item) => sameTheme(item.theme, question.theme) && item.isUsableBusinessMatter
+    )
+    .flatMap((item) => item.extractedFacts ?? [])
+    .slice(-3);
+
+  const llmQuestion = await composeQuestionWithLlm({
     dimensionId,
+    dimensionTitle: dimensionTitle(dimensionId),
     iteration,
-    signal:{
-      id: question.signalId,
-      dimensionId,
-      theme: question.theme,
-      signalKind: "explicit",
-      sourceType: "user_answer",
-      sourceSection: null,
-      sourceExcerpt: question.questionOuverte,
-      constat: question.constat,
-      managerialRisk: question.risqueManagerial,
-      probableConsequence: "La reformulation doit aider à produire une réponse exploitable sans reposer la même question.",
-      entryAngle: analysis.suggestedAngle ?? currentAngle ?? "mechanism",
-      confidenceScore: 70,
-      criticalityScore: 70,
-    },
-    fallbackQuestion: fallback,
-    extractedFacts: (session.analysisMemory ?? [])
-      .filter((item) => item.theme === question.theme && item.isUsableBusinessMatter)
-      .flatMap((item) => item.extractedFacts ?? [])
-      .slice(-3),
+    theme: question.theme,
+    constat: question.constat,
+    managerialRisk: question.risqueManagerial,
+    entryAngle: analysis.suggestedAngle ?? currentAngle ?? "mechanism",
+    trameEvidence: question.constat,
+    extractedFacts,
     coveredAngles: coverage?.confirmedAngles ?? [],
     rejectedAngles: coverage?.rejectedAngles ?? [],
-    lastQuestionText: question.questionOuverte,
-    rewriteReason: analysis.intent,
+    isAbsence,
   });
+
+  return normalizeText(llmQuestion) || fallback;
 }

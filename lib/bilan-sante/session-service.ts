@@ -701,8 +701,12 @@ export async function processSessionInput(params: {
       shouldPivotAngle: analysis.shouldPivotAngle,
     })
   ) {
-    aggregate = challengeCurrentQuestion({ session: aggregate, rawMessage, reason: analysis.intent }) as DiagnosticSessionAggregate;
-
+    aggregate = (await challengeCurrentQuestion({
+  session: aggregate,
+  rawMessage,
+  reason: analysis.intent,
+})) as DiagnosticSessionAggregate;
+    
     const payload: SessionViewPayload = {
       ...toSessionView(aggregate),
       assistant_message: buildRewriteAssistantMessage(analysis.intent),

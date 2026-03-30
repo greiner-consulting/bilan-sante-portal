@@ -819,31 +819,42 @@ export function answeredCount(session: DiagnosticSessionAggregate): number {
 export function answeredQuestionIdSet(session: DiagnosticSessionAggregate): Set<string> {
   return answeredQuestionIds(session.currentWorkset);
 }
-
 export function challengeCurrentQuestion(
   session: DiagnosticSessionAggregate,
   message?: string
-): StructuredQuestion | null;
+): Promise<StructuredQuestion | null>;
+
 export function challengeCurrentQuestion(params: {
   session: DiagnosticSessionAggregate;
   message?: string;
-}): StructuredQuestion | null;
+}): Promise<StructuredQuestion | null>;
+
 export function challengeCurrentQuestion(params: {
   session: DiagnosticSessionAggregate;
   sessionId?: string;
   rawMessage?: string;
   message?: string;
   reason?: string;
-}): DiagnosticSessionAggregate;
+}): Promise<DiagnosticSessionAggregate>;
 
-export function challengeCurrentQuestion(
+export async function challengeCurrentQuestion(
   arg1:
     | DiagnosticSessionAggregate
-    | { session: DiagnosticSessionAggregate; sessionId?: string; rawMessage?: string; message?: string; reason?: string },
+    | {
+        session: DiagnosticSessionAggregate;
+        sessionId?: string;
+        rawMessage?: string;
+        message?: string;
+        reason?: string;
+      },
   arg2?: string
-): StructuredQuestion | null | DiagnosticSessionAggregate {
-  const preview = "phase" in arg1 ? withSafeMemory(arg1) : withSafeMemory(arg1.session);
-  const rawMessage = (("phase" in arg1 ? arg2 : arg1.rawMessage ?? arg1.message) ?? "");
+): Promise<StructuredQuestion | null | DiagnosticSessionAggregate> {
+  const preview =
+    "phase" in arg1 ? withSafeMemory(arg1) : withSafeMemory(arg1.session);
+
+  const rawMessage =
+    ("phase" in arg1 ? arg2 : arg1.rawMessage ?? arg1.message) ?? "";
+
   const workset = preview.currentWorkset;
   const currentQuestion = getCurrentUnansweredQuestion(workset);
 
@@ -852,6 +863,7 @@ export function challengeCurrentQuestion(
   }
 
   const signal = findSignalById(preview, currentQuestion.signalId);
+
   const analysis = analyzeUserAnswer({
     rawMessage,
     currentQuestion: {
@@ -862,7 +874,7 @@ export function challengeCurrentQuestion(
     },
   });
 
-  const nextQuestionOuverte = rewriteQuestionFromAnalysis({
+  const nextQuestionOuverte = await rewriteQuestionFromAnalysis({
     session: preview,
     question: currentQuestion,
     rawMessage,
@@ -872,8 +884,14 @@ export function challengeCurrentQuestion(
     currentAngle: signal?.entryAngle ?? null,
   });
 
-  const rewrittenQuestion: StructuredQuestion = { ...currentQuestion, questionOuverte: nextQuestionOuverte };
-  if ("phase" in arg1) return rewrittenQuestion;
+  const rewrittenQuestion: StructuredQuestion = {
+    ...currentQuestion,
+    questionOuverte: nextQuestionOuverte,
+  };
+
+  if ("phase" in arg1) {
+    return rewrittenQuestion;
+  }
 
   const nextQuestions = workset.questions.map((question) =>
     question.id === currentQuestion.id ? rewrittenQuestion : question
@@ -882,7 +900,11 @@ export function challengeCurrentQuestion(
   return touchSession(
     withSafeMemory({
       ...preview,
-      currentWorkset: { ...workset, questions: nextQuestions },
+      currentWorkset: {
+        ...workset,
+        questions: nextQuestions,
+      },
     })
   );
 }
+
