@@ -101,6 +101,10 @@ export async function GET(req: Request) {
     const loaded = await loadAggregate(sessionId);
     const row = loaded.row;
     const aggregate = loaded.aggregate;
+    const activeQuestionBatch =
+      aggregate?.phase === "dimension_iteration" && aggregate.currentWorkset?.questions
+        ? aggregate.currentWorkset.questions
+        : [];
 
     return NextResponse.json({
       ok: true,
@@ -120,15 +124,13 @@ export async function GET(req: Request) {
         has_extracted_text: Boolean(row.extracted_text),
       },
       engine_state: {
-        question_batch_json: aggregate?.currentWorkset?.questions
-          ? aggregate.currentWorkset.questions.map((q) => ({
-              fact_id: q.signalId,
-              theme: q.theme,
-              constat: q.constat,
-              risque_managerial: q.risqueManagerial,
-              question: q.questionOuverte,
-            }))
-          : [],
+        question_batch_json: activeQuestionBatch.map((q) => ({
+          fact_id: q.signalId,
+          theme: q.theme,
+          constat: q.constat,
+          risque_managerial: q.risqueManagerial,
+          question: q.questionOuverte,
+        })),
         final_objectives_json: aggregate?.finalObjectives ?? null,
         consolidation_json: aggregate?.frozenDimensions ?? [],
         conversation_history_json: aggregate?.conversationHistory ?? [],

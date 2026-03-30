@@ -75,8 +75,9 @@ function mapStatus(aggregate: DiagnosticSessionAggregate): string {
     case "awaiting_trame":
       return "collected";
     case "report_ready":
-    case "completed":
       return "report_ready";
+    case "completed":
+      return "completed";
     case "dimension_iteration":
     case "iteration_validation":
     case "final_objectives_validation":
@@ -104,19 +105,14 @@ function emptyFinalObjectives(): FinalObjectiveSet {
 }
 
 function buildMirrorPatch(aggregate: DiagnosticSessionAggregate): SessionPatch {
-  const questionCount = aggregate.currentWorkset?.questions.length ?? 0;
   const answeredCount = aggregate.currentWorkset?.answers.length ?? 0;
-  const safeIndex =
-    questionCount <= 0
-      ? 0
-      : Math.max(0, Math.min(answeredCount, questionCount - 1));
 
   return {
     status: mapStatus(aggregate),
     phase: aggregate.phase,
     dimension: aggregate.currentDimensionId,
     iteration: aggregate.currentIteration,
-    question_index: safeIndex,
+    question_index: answeredCount,
     question_batch_json: mapLegacyQuestions(aggregate.currentWorkset?.questions ?? []),
     final_objectives_json: aggregate.finalObjectives ?? emptyFinalObjectives(),
     consolidation_json: aggregate.frozenDimensions,

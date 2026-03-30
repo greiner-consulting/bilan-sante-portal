@@ -108,48 +108,45 @@ export function buildIterationClosurePrompt(
 }
 
 /**
- * Cadre méthodologique haut niveau.
- * Le moteur réel de fermeture doit désormais s’appuyer sur le workset
- * effectivement construit, pas sur cette valeur seule.
+ * Nouveau cadre cible : 5 / 5 / 4.
+ * On réduit la pression de remplissage en fin d’itération,
+ * sans remettre en cause les 3 itérations obligatoires.
  */
 export function maxQuestionsForIteration(
   iteration: IterationNumber
 ): number {
   switch (iteration) {
     case 1:
-      return 6;
+      return 5;
     case 2:
-      return 6;
+      return 5;
     case 3:
-      return 6;
+      return 4;
     default:
-      return 6;
+      return 5;
   }
 }
 
 /**
- * Plancher méthodologique : en dessous de 3, on considère que l’itération
- * manque de matière, sauf cas d’exception explicite géré par le moteur.
+ * Plancher qualitatif : on accepte une fermeture anticipée seulement
+ * si le reliquat est faible ET si le moteur a déjà produit suffisamment
+ * de matière exploitable. Le plancher reste légèrement inférieur au cap.
  */
 export function minimumFloorForIteration(
   iteration: IterationNumber
 ): number {
   switch (iteration) {
     case 1:
-      return 3;
+      return 4;
     case 2:
-      return 3;
+      return 4;
     case 3:
       return 3;
     default:
-      return 3;
+      return 4;
   }
 }
 
-/**
- * Compat descendante temporaire.
- * À terme, remplacer tous les usages par minimumFloorForIteration / workset.
- */
 export function minQuestionsForIteration(
   iteration: IterationNumber
 ): number {

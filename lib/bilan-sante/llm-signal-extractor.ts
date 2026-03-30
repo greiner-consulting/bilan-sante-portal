@@ -38,20 +38,14 @@ function logError(event: string, payload?: Record<string, unknown>) {
 }
 
 function summarizeError(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message;
-  }
+  if (error instanceof Error) return error.message;
   return String(error ?? "unknown_error");
 }
 
 function getClient(): OpenAI | null {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) return null;
-
-  if (!cachedClient) {
-    cachedClient = new OpenAI({ apiKey });
-  }
-
+  if (!cachedClient) cachedClient = new OpenAI({ apiKey });
   return cachedClient;
 }
 
@@ -74,10 +68,7 @@ function compactJson<T>(value: T): T {
 }
 
 function serializeSections(sections: TrameSection[]): string {
-  if (sections.length === 0) {
-    return "[]";
-  }
-
+  if (sections.length === 0) return "[]";
   return JSON.stringify(
     sections.map((section) => ({
       id: String(section.id ?? "").trim(),
@@ -90,10 +81,7 @@ function serializeSections(sections: TrameSection[]): string {
 }
 
 function serializeMissingFields(fields: MissingField[]): string {
-  if (fields.length === 0) {
-    return "[]";
-  }
-
+  if (fields.length === 0) return "[]";
   return JSON.stringify(
     fields.map((field) => ({
       label: normalizeExtractionText(field.label),
@@ -105,10 +93,7 @@ function serializeMissingFields(fields: MissingField[]): string {
   );
 }
 
-function buildPrompt(params: {
-  dimensionId: DimensionId;
-  snapshot: BaseTrameSnapshot;
-}): string {
+function buildPrompt(params: { dimensionId: DimensionId; snapshot: BaseTrameSnapshot }): string {
   const dimension = DIAGNOSTIC_DIMENSIONS.find((item) => item.id === params.dimensionId);
   const allowedThemes = dimension?.requiredThemes ?? [];
   const relevantMissingFields = safeArray(params.snapshot.missingFields).filter(
@@ -120,15 +105,30 @@ function buildPrompt(params: {
     "Tu dois extraire uniquement des signaux fiables à partir de la trame fournie.",
     "Tu n'inventes aucun fait.",
     "Tu ne peux utiliser QUE les thèmes autorisés.",
+    "",
+    "Règle clé : ne pas exiger un libellé littéral du thème pour accepter un signal.",
+    "Des indices convergents, cohérents et managérialement exploitables suffisent si le texte décrit clairement :",
+    "- un processus réel,",
+    "- une pratique récurrente,",
+    "- une dépendance au dirigeant ou à un acteur clé,",
+    "- une faiblesse durable de pilotage,",
+    "- un arbitrage, une organisation, une tension de charge ou un besoin de recrutement / remplacement / montée en compétence.",
+    "",
     "Un simple voisinage lexical ne suffit pas.",
-    "Un exemple client, un projet ponctuel, une anecdote ou un retour d'expérience isolé ne doivent PAS être considérés comme preuve structurelle, sauf si le texte décrit explicitement une pratique récurrente, un défaut durable de pilotage, une dépendance structurelle ou une absence de formalisation.",
-    "Quand la matière est trop faible, préfère classer le thème dans uncoveredThemes plutôt que créer un faux positif.",
+    "Mais un signal indirect convergent est recevable si la matière métier pointe clairement vers le thème.",
+    "Exemples acceptables :",
+    "- départs, remplacements, difficultés de recrutement, intégration ou fidélisation => peuvent couvrir 'recrutement et intégration'",
+    "- rôle du dirigeant, plan de conquête, animation commerciale, déclinaison opérationnelle => peuvent couvrir 'portage managérial et déploiement réel'",
+    "- critères de sélection, pipe, qualification, taux de réussite => peuvent couvrir 'indicateurs funnel / taux de succès'",
+    "",
+    "Quand la matière est faible mais exploitable, préfère produire un explicitSignal avec evidenceNature='illustrative' ou 'unclear' plutôt que classer trop vite le thème dans uncoveredThemes.",
+    "Réserve uncoveredThemes aux cas où la matière est vraiment insuffisante ou trop ambiguë.",
     "",
     "Définitions obligatoires :",
     '- evidenceNature="structural" : preuve claire d’un fonctionnement durable, d’une faiblesse structurelle, d’une absence de pilotage, d’un arbitrage, d’une dépendance ou d’une pratique récurrente',
-    '- evidenceNature="illustrative" : exemple utile mais insuffisant seul pour conclure',
+    '- evidenceNature="illustrative" : exemple convergent utile, insuffisant seul mais suffisamment relié au thème pour ouvrir une question robuste',
     '- evidenceNature="anecdotal" : cas ponctuel, récit isolé, matière non généralisable',
-    '- evidenceNature="unclear" : matière ambiguë, possiblement utile, mais pas clairement structurelle',
+    '- evidenceNature="unclear" : matière ambiguë mais pouvant orienter une question utile',
     "",
     "Taxonomie fermée des entry angles :",
     '- "causality"',
@@ -171,8 +171,8 @@ function buildPrompt(params: {
     "- theme doit appartenir strictement à la liste autorisée",
     "- sourceSectionId doit correspondre à une section fournie",
     "- sourceExcerpt doit être extrait du texte, pas inventé",
-    "- si un extrait n'est pas structurel, ne pas le sur-vendre",
-    "- si un thème n'est pas suffisamment étayé, le mettre dans uncoveredThemes",
+    "- si un extrait est seulement partiellement convergent, tu peux quand même créer un explicitSignal si whyRelevant explique clairement le lien métier",
+    "- ne bascule pas trop vite en uncoveredThemes",
     "- répondre STRICTEMENT en JSON, sans aucun texte hors JSON",
     "",
     `DIMENSION : ${params.dimensionId} — ${dimensionTitle(params.dimensionId)}`,
@@ -200,12 +200,10 @@ function sanitizeExplicitSignals(params: {
   allowedSectionIds: Set<string>;
 }): LlmExtractedExplicitSignal[] {
   if (!Array.isArray(params.raw)) return [];
-
   const out: LlmExtractedExplicitSignal[] = [];
 
   for (const item of params.raw) {
     if (!item || typeof item !== "object") continue;
-
     const row = item as Record<string, unknown>;
     const theme = normalizeExtractionText(row.theme);
     const sourceSectionId = normalizeExtractionText(row.sourceSectionId);
@@ -242,17 +240,12 @@ function sanitizeExplicitSignals(params: {
   return out;
 }
 
-function sanitizeUncoveredThemes(params: {
-  raw: unknown;
-  allowedThemes: Set<string>;
-}): LlmUncoveredTheme[] {
+function sanitizeUncoveredThemes(params: { raw: unknown; allowedThemes: Set<string> }): LlmUncoveredTheme[] {
   if (!Array.isArray(params.raw)) return [];
-
   const out: LlmUncoveredTheme[] = [];
 
   for (const item of params.raw) {
     if (!item || typeof item !== "object") continue;
-
     const row = item as Record<string, unknown>;
     const theme = normalizeExtractionText(row.theme);
     const reason = row.reason;
@@ -282,9 +275,7 @@ function sanitizeResponse(params: {
   const dimension = DIAGNOSTIC_DIMENSIONS.find((item) => item.id === params.dimensionId);
   const allowedThemes = new Set<string>(dimension?.requiredThemes ?? []);
   const allowedSectionIds = new Set<string>(
-    safeArray(params.snapshot.sections)
-      .map((section) => String(section.id ?? "").trim())
-      .filter(Boolean)
+    safeArray(params.snapshot.sections).map((section) => String(section.id ?? "").trim()).filter(Boolean)
   );
 
   const row = params.raw as Record<string, unknown>;
@@ -296,10 +287,7 @@ function sanitizeResponse(params: {
       allowedThemes,
       allowedSectionIds,
     }),
-    uncoveredThemes: sanitizeUncoveredThemes({
-      raw: row.uncoveredThemes,
-      allowedThemes,
-    }),
+    uncoveredThemes: sanitizeUncoveredThemes({ raw: row.uncoveredThemes, allowedThemes }),
   };
 }
 
@@ -318,16 +306,11 @@ export async function extractSignalsForDimensionWithLlm(params: {
     model: llmModel(),
     hasOpenAiKey: Boolean(process.env.OPENAI_API_KEY),
     sections: safeArray(params.snapshot.sections).length,
-    missingFields: safeArray(params.snapshot.missingFields).filter(
-      (field) => field.dimensionId === params.dimensionId
-    ).length,
+    missingFields: safeArray(params.snapshot.missingFields).filter((field) => field.dimensionId === params.dimensionId).length,
   });
 
   if (!client) {
-    logWarn("dimension_skipped_no_api_key", {
-      dimensionId: params.dimensionId,
-      hasOpenAiKey: false,
-    });
+    logWarn("dimension_skipped_no_api_key", { dimensionId: params.dimensionId, hasOpenAiKey: false });
     return null;
   }
 
@@ -342,33 +325,20 @@ export async function extractSignalsForDimensionWithLlm(params: {
         {
           role: "system",
           content:
-            "Tu extrais des signaux de diagnostic dirigeant. Tu n'inventes aucun fait. Tu réponds strictement en JSON.",
+            "Tu extrais des signaux de diagnostic dirigeant. Tu n'inventes aucun fait. Tu n'es pas excessivement conservateur : des indices convergents peuvent justifier un signal explicite. Tu réponds strictement en JSON.",
         },
-        {
-          role: "user",
-          content: prompt,
-        },
+        { role: "user", content: prompt },
       ],
     });
 
     const raw = response.choices[0]?.message?.content ?? "{}";
     const parsed = tryParseJson(raw);
-    const sanitized = sanitizeResponse({
-      raw: parsed,
-      dimensionId: params.dimensionId,
-      snapshot: params.snapshot,
-    });
+    const sanitized = sanitizeResponse({ raw: parsed, dimensionId: params.dimensionId, snapshot: params.snapshot });
 
     logInfo("dimension_completed", {
       dimensionId: params.dimensionId,
       rawChars: raw.length,
       parsedJson: Boolean(parsed),
-      explicitSignalsRaw: Array.isArray((parsed as { explicitSignals?: unknown[] } | null)?.explicitSignals)
-        ? ((parsed as { explicitSignals?: unknown[] }).explicitSignals?.length ?? 0)
-        : 0,
-      uncoveredThemesRaw: Array.isArray((parsed as { uncoveredThemes?: unknown[] } | null)?.uncoveredThemes)
-        ? ((parsed as { uncoveredThemes?: unknown[] }).uncoveredThemes?.length ?? 0)
-        : 0,
       explicitSignalsSanitized: sanitized?.explicitSignals.length ?? 0,
       uncoveredThemesSanitized: sanitized?.uncoveredThemes.length ?? 0,
     });

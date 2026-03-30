@@ -48,6 +48,7 @@ import {
   applyObjectiveDecisions,
   buildFinalObjectiveSetFromFrozenDimensions,
 } from "@/lib/bilan-sante/objectives-builder";
+import { buildFrozenDimensionNarrativeWithLlm } from "@/lib/bilan-sante/llm-diagnostic-writer";
 
 export interface EngineView {
   assistantMessage: string;
@@ -61,13 +62,11 @@ export interface EngineView {
 function uniqueById<T extends { id: string }>(items: T[]): T[] {
   const seen = new Set<string>();
   const out: T[] = [];
-
   for (const item of items) {
     if (seen.has(item.id)) continue;
     seen.add(item.id);
     out.push(item);
   }
-
   return out;
 }
 
@@ -106,32 +105,17 @@ function attachWorkset(
   workset: IterationWorkset | null
 ): DiagnosticSessionAggregate {
   if (!workset) {
-    return withSafeMemory({
-      ...session,
-      currentWorkset: null,
-    });
+    return withSafeMemory({ ...session, currentWorkset: null });
   }
-
-  const nextSession = withSafeMemory({
-    ...session,
-    currentWorkset: workset,
-  });
-
+  const nextSession = withSafeMemory({ ...session, currentWorkset: workset });
   return registerWorksetQuestions(nextSession);
 }
 
 function getAllSignals(session: DiagnosticSessionAggregate): DiagnosticSignal[] {
   const registry = session.signalRegistry;
   if (!registry) return [];
-
-  if ("all" in registry && Array.isArray(registry.all)) {
-    return registry.all;
-  }
-
-  if ("allSignals" in registry && Array.isArray(registry.allSignals)) {
-    return registry.allSignals;
-  }
-
+  if ("all" in registry && Array.isArray(registry.all)) return registry.all;
+  if ("allSignals" in registry && Array.isArray(registry.allSignals)) return registry.allSignals;
   return [
     ...registry.byDimension.d1,
     ...registry.byDimension.d2,
@@ -146,7 +130,6 @@ function getDimensionSignals(
 ): DiagnosticSignal[] {
   const registry = session.signalRegistry;
   if (!registry) return [];
-
   return registry.byDimension[dimensionKey(dimensionId)] ?? [];
 }
 
@@ -161,7 +144,6 @@ function getCurrentUnansweredQuestion(
   workset: IterationWorkset | null | undefined
 ): StructuredQuestion | null {
   if (!workset) return null;
-
   const answeredIds = answeredQuestionIds(workset);
   return workset.questions.find((question) => !answeredIds.has(question.id)) ?? null;
 }
@@ -172,12 +154,11 @@ function buildLegacyQuestion(
   index: number
 ): StructuredQuestion {
   const excerpt = shortenText(signal.sourceExcerpt, 160);
-
   let questionOuverte = `Pouvez-vous préciser ce point sur le thème "${signal.theme}" ?`;
 
   if (iteration === 1) {
     questionOuverte = signal.signalKind === "absence"
-      ? `Sur le thème "${signal.theme}", la trame ne met pas en évidence de pilotage structuré. Comment ce sujet est-il réellement traité aujourd’hui dans l’entreprise ?`
+      ? `Sur le thème "${signal.theme}", la trame ne permet pas de voir clairement comment le sujet est piloté. Comment ce sujet fonctionne-t-il réellement aujourd’hui, qui intervient, et où se situent les principaux points de fragilité ?`
       : excerpt
       ? `Sur le thème "${signal.theme}", la trame mentionne : "${excerpt}". Concrètement, comment ce sujet est-il géré aujourd’hui dans le fonctionnement réel de l’entreprise ?`
       : `Sur le thème "${signal.theme}", comment ce sujet est-il géré aujourd’hui dans le fonctionnement réel de l’entreprise ?`;
@@ -188,7 +169,7 @@ function buildLegacyQuestion(
   }
 
   if (iteration === 3) {
-    questionOuverte = `Sur le sujet "${signal.theme}", qu’est-ce qui reste aujourd’hui insuffisamment piloté, formalisé ou sécurisé ? Quels impacts concrets observez-vous déjà ?`;
+    questionOuverte = `Sur le sujet "${signal.theme}", quel point reste aujourd’hui le moins piloté ou le moins sécurisé, et quel risque concret cela crée-t-il pour l’entreprise ?`;
   }
 
   return {
@@ -226,17 +207,11 @@ function getPreviousIterationQuestionCount(
   iteration: IterationNumber
 ): number | null {
   if (iteration === 1) return null;
-
   const previousIteration = (iteration - 1) as IterationNumber;
   const history = session.iterationHistory ?? [];
-
-  const previous = [...history]
-    .reverse()
-    .find(
-      (item) =>
-        item.dimensionId === dimensionId && item.iteration === previousIteration
-    );
-
+  const previous = [...history].reverse().find(
+    (item) => item.dimensionId === dimensionId && item.iteration === previousIteration
+  );
   return previous?.questionCount ?? null;
 }
 
@@ -248,25 +223,16 @@ function computeIterationQuestionPolicy(params: {
   targetQuestionCount: number;
   minimumRequiredCount: number;
 } {
-  const {
-    iteration,
-    candidateCount,
-    previousIterationQuestionCount = null,
-  } = params;
-
+  const { iteration, candidateCount, previousIterationQuestionCount = null } = params;
   let cap = maxQuestionsForIteration(iteration);
-
   if ((iteration === 2 || iteration === 3) && previousIterationQuestionCount != null) {
     cap = Math.min(cap, previousIterationQuestionCount);
   }
-
   const targetQuestionCount = Math.max(0, Math.min(candidateCount, cap));
   const floor = minimumFloorForIteration(iteration);
-
   return {
     targetQuestionCount,
-    minimumRequiredCount:
-      targetQuestionCount === 0 ? 0 : Math.min(targetQuestionCount, floor),
+    minimumRequiredCount: targetQuestionCount === 0 ? 0 : Math.min(targetQuestionCount, floor),
   };
 }
 
@@ -274,11 +240,9 @@ function applyEmptyWorksetAutoValidation(
   session: DiagnosticSessionAggregate
 ): DiagnosticSessionAggregate {
   const workset = session.currentWorkset;
-
   if (!workset) return session;
   if (workset.questions.length > 0) return session;
   if (session.phase !== "dimension_iteration") return session;
-
   return {
     ...session,
     phase: "iteration_validation",
@@ -289,12 +253,12 @@ function applyEmptyWorksetAutoValidation(
   };
 }
 
-function buildWorkset(
+async function buildWorkset(
   session: DiagnosticSessionAggregate,
   dimensionId: DimensionId,
   iteration: IterationNumber,
   reopen = false
-): IterationWorkset {
+): Promise<IterationWorkset> {
   const previousQuestionCount = getPreviousIterationQuestionCount(
     session,
     dimensionId,
@@ -302,7 +266,7 @@ function buildWorkset(
   );
 
   const initialTarget = reopen
-    ? Math.max(maxQuestionsForIteration(iteration), 6)
+    ? Math.max(maxQuestionsForIteration(iteration), 5)
     : maxQuestionsForIteration(iteration);
 
   let questions: StructuredQuestion[] = [];
@@ -310,7 +274,7 @@ function buildWorkset(
   let planningNotes: string[] = [];
 
   if (session.signalRegistry) {
-    const planned = planIterationQuestionsWithDiagnostics({
+    const planned = await planIterationQuestionsWithDiagnostics({
       registry: session.signalRegistry,
       dimensionId,
       iteration,
@@ -320,7 +284,7 @@ function buildWorkset(
     questions = planned.questions;
     planningDiagnostics = {
       generatedAt: new Date().toISOString(),
-      strategy: "heuristic_planner_with_coverage",
+      strategy: "heuristic_planner_with_llm_composer",
       selectedQuestionIds: planned.questions.map((item) => item.id),
       candidateDiagnostics: planned.diagnostics,
       notes: planned.notes,
@@ -383,16 +347,10 @@ function buildWorkset(
 
 function conservativeScoreFromSignals(signals: DiagnosticSignal[]): 1 | 2 | 3 | 4 | 5 {
   if (signals.length === 0) return 2;
-
-  const avgCriticality =
-    signals.reduce((sum, item) => sum + item.criticalityScore, 0) / signals.length;
-  const absenceRatio =
-    signals.filter((item) => item.signalKind === "absence").length / signals.length;
-
+  const avgCriticality = signals.reduce((sum, item) => sum + item.criticalityScore, 0) / signals.length;
+  const absenceRatio = signals.filter((item) => item.signalKind === "absence").length / signals.length;
   const raw = 5 - Math.round((avgCriticality / 100) * 2 + absenceRatio * 2);
-  const clamped = Math.max(1, Math.min(5, raw));
-
-  return clamped as 1 | 2 | 3 | 4 | 5;
+  return Math.max(1, Math.min(5, raw)) as 1 | 2 | 3 | 4 | 5;
 }
 
 function deriveRootCause(
@@ -401,14 +359,10 @@ function deriveRootCause(
   signals: DiagnosticSignal[]
 ): string {
   const themeMemory = (session.analysisMemory ?? []).filter(
-    (item) =>
-      item.dimensionId === dimensionId &&
-      item.isUsableBusinessMatter &&
-      (item.detectedRootCauses?.length ?? 0) > 0
+    (item) => item.dimensionId === dimensionId && item.isUsableBusinessMatter && (item.detectedRootCauses?.length ?? 0) > 0
   );
 
   const causeCounts = new Map<string, number>();
-
   for (const item of themeMemory) {
     for (const cause of item.detectedRootCauses ?? []) {
       causeCounts.set(cause, (causeCounts.get(cause) ?? 0) + 1);
@@ -417,67 +371,18 @@ function deriveRootCause(
 
   const topCause = [...causeCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
 
-  if (topCause === "skills" || topCause === "experience") {
-    return "Le diagnostic converge vers un problème de compétences disponibles, d’expérience ou de maturité sur les sujets critiques.";
-  }
+  if (topCause === "skills" || topCause === "experience") return "Le diagnostic converge vers un problème de compétences disponibles, d’expérience ou de maturité sur les sujets critiques.";
+  if (topCause === "decision") return "Le diagnostic converge vers des décisions inadaptées, tardives ou insuffisamment sécurisées dans les points clés.";
+  if (topCause === "arbitration") return "Le diagnostic converge vers une chaîne d’arbitrage insuffisamment clarifiée ou trop centralisée.";
+  if (topCause === "organization") return "Le diagnostic converge vers un problème de cadre, de rôles ou d’organisation du pilotage.";
+  if (topCause === "resources") return "Le diagnostic converge vers une tension structurelle de ressources, de capacité ou de dépendance opérationnelle.";
+  if (topCause === "pricing" || topCause === "cash") return "Le diagnostic converge vers un désalignement entre pilotage opérationnel et impact économique réel.";
 
-  if (topCause === "decision") {
-    return "Le diagnostic converge vers des décisions inadaptées, tardives ou insuffisamment sécurisées dans les points clés.";
-  }
-
-  if (topCause === "arbitration") {
-    return "Le diagnostic converge vers une chaîne d’arbitrage insuffisamment clarifiée ou trop centralisée.";
-  }
-
-  if (topCause === "organization") {
-    return "Le diagnostic converge vers un problème de cadre, de rôles ou d’organisation du pilotage.";
-  }
-
-  if (topCause === "resources") {
-    return "Le diagnostic converge vers une tension structurelle de ressources, de capacité ou de dépendance opérationnelle.";
-  }
-
-  if (topCause === "pricing" || topCause === "cash") {
-    return "Le diagnostic converge vers un désalignement entre pilotage opérationnel et impact économique réel.";
-  }
-
-  const text = signals
-    .map((s) => `${s.theme} ${s.managerialRisk} ${s.probableConsequence}`)
-    .join(" ")
-    .toLowerCase();
-
-  if (
-    text.includes("non document") ||
-    text.includes("non suivi") ||
-    text.includes("formalis")
-  ) {
-    return "Pilotage insuffisamment formalisé sur des sujets structurants.";
-  }
-
-  if (
-    text.includes("arbitrage") ||
-    text.includes("décide") ||
-    text.includes("validation")
-  ) {
-    return "Chaîne d’arbitrage insuffisamment clarifiée ou trop centralisée.";
-  }
-
-  if (
-    text.includes("dépend") ||
-    text.includes("clé") ||
-    text.includes("quelques personnes")
-  ) {
-    return "Dépendance excessive à des personnes ou relais clés.";
-  }
-
-  if (
-    text.includes("marge") ||
-    text.includes("cash") ||
-    text.includes("rentabilité")
-  ) {
-    return "Pilotage économique insuffisamment relié aux décisions opérationnelles ou commerciales.";
-  }
-
+  const text = signals.map((s) => `${s.theme} ${s.managerialRisk} ${s.probableConsequence}`).join(" ").toLowerCase();
+  if (text.includes("non document") || text.includes("non suivi") || text.includes("formalis")) return "Pilotage insuffisamment formalisé sur des sujets structurants.";
+  if (text.includes("arbitrage") || text.includes("decide") || text.includes("décide") || text.includes("validation")) return "Chaîne d’arbitrage insuffisamment clarifiée ou trop centralisée.";
+  if (text.includes("depend") || text.includes("dépend") || text.includes("clé")) return "Dépendance excessive à des personnes ou relais clés.";
+  if (text.includes("marge") || text.includes("cash") || text.includes("rentabilité")) return "Pilotage économique insuffisamment relié aux décisions opérationnelles ou commerciales.";
   return "Écarts entre fonctionnement réel, responsabilités tenues et cadre de pilotage attendu.";
 }
 
@@ -486,21 +391,11 @@ function getLatestFactsByTheme(
   dimensionId: DimensionId
 ): Map<string, string> {
   const latestFactsByTheme = new Map<string, string>();
-
   for (const item of session.analysisMemory ?? []) {
-    if (
-      item.dimensionId === dimensionId &&
-      item.theme &&
-      item.isUsableBusinessMatter &&
-      (item.extractedFacts?.length ?? 0) > 0
-    ) {
-      latestFactsByTheme.set(
-        normalizeForMatch(item.theme),
-        item.extractedFacts[0]
-      );
+    if (item.dimensionId === dimensionId && item.theme && item.isUsableBusinessMatter && (item.extractedFacts?.length ?? 0) > 0) {
+      latestFactsByTheme.set(normalizeForMatch(item.theme), item.extractedFacts[0]);
     }
   }
-
   return latestFactsByTheme;
 }
 
@@ -509,23 +404,17 @@ function buildConsolidatedFindings(
   dimensionId: DimensionId,
   signals: DiagnosticSignal[]
 ): [string, string, string] {
-  const top = [...signals]
-    .sort((a, b) => b.criticalityScore - a.criticalityScore)
-    .slice(0, 3);
-
+  const top = [...signals].sort((a, b) => b.criticalityScore - a.criticalityScore).slice(0, 3);
   const latestFactsByTheme = getLatestFactsByTheme(session, dimensionId);
 
   const findings = top.map((signal) => {
     const fact = latestFactsByTheme.get(normalizeForMatch(signal.theme));
     const factPart = fact ? ` Élément confirmé en échange : ${shortenText(fact, 140)}.` : "";
-
     return `${signal.theme} — ${signal.constat.replace(/\.$/, "")}. Conséquence probable : ${signal.probableConsequence.replace(/\.$/, "")}.${factPart}`;
   });
 
   while (findings.length < 3) {
-    findings.push(
-      "Un ensemble de sujets reste partiellement documenté, ce qui limite la robustesse du diagnostic et révèle une zone de pilotage à sécuriser."
-    );
+    findings.push("Un ensemble de sujets reste partiellement documenté, ce qui limite la robustesse du diagnostic et révèle une zone de pilotage à sécuriser.");
   }
 
   return [findings[0], findings[1], findings[2]];
@@ -544,12 +433,9 @@ function buildUnmanagedZones(
   if (selected.length === 0) {
     return [
       {
-        constat:
-          "Peu de zones non pilotées massives ressortent, mais plusieurs sujets restent dépendants d’usages plus que d’un cadre structuré.",
-        risqueManagerial:
-          "Risque de dérive progressive sans signal faible suffisamment remonté.",
-        consequence:
-          "Dégradation lente de la tenue des engagements, de la coordination ou de la visibilité économique.",
+        constat: "Peu de zones non pilotées massives ressortent, mais plusieurs sujets restent dépendants d’usages plus que d’un cadre structuré.",
+        risqueManagerial: "Risque de dérive progressive sans signal faible suffisamment remonté.",
+        consequence: "Dégradation lente de la tenue des engagements, de la coordination ou de la visibilité économique.",
       },
     ];
   }
@@ -558,10 +444,7 @@ function buildUnmanagedZones(
 
   return selected.map((signal) => {
     const fact = latestFactsByTheme.get(normalizeForMatch(signal.theme));
-    const constat = fact
-      ? `${signal.constat} Fait terrain mentionné : ${shortenText(fact, 140)}.`
-      : signal.constat;
-
+    const constat = fact ? `${signal.constat} Fait terrain mentionné : ${shortenText(fact, 140)}.` : signal.constat;
     return {
       constat,
       risqueManagerial: signal.managerialRisk,
@@ -578,19 +461,11 @@ function getExploredSignalsForDimension(
   const exploredSignalIds = new Set<string>();
 
   for (const item of session.analysisMemory ?? []) {
-    if (item.dimensionId === dimensionId && item.signalId) {
-      exploredSignalIds.add(item.signalId);
-    }
+    if (item.dimensionId === dimensionId && item.signalId) exploredSignalIds.add(item.signalId);
   }
 
   for (const turn of session.conversationHistory ?? []) {
-    if (
-      turn.role === "question" &&
-      turn.dimensionId === dimensionId &&
-      turn.signalId
-    ) {
-      exploredSignalIds.add(turn.signalId);
-    }
+    if (turn.role === "question" && turn.dimensionId === dimensionId && turn.signalId) exploredSignalIds.add(turn.signalId);
   }
 
   const exploredThemes = new Set(
@@ -600,28 +475,40 @@ function getExploredSignalsForDimension(
   );
 
   const filtered = registrySignals.filter(
-    (signal) =>
-      exploredSignalIds.has(signal.id) ||
-      exploredThemes.has(normalizeForMatch(signal.theme))
+    (signal) => exploredSignalIds.has(signal.id) || exploredThemes.has(normalizeForMatch(signal.theme))
   );
 
   return filtered.length > 0 ? filtered : registrySignals;
 }
 
-function freezeDimension(
+async function freezeDimension(
   session: DiagnosticSessionAggregate,
   dimensionId: DimensionId
-): FrozenDimensionDiagnosis {
+): Promise<FrozenDimensionDiagnosis> {
   const signals = getExploredSignalsForDimension(session, dimensionId);
   const exploredThemes = [...new Set(signals.map((signal) => signal.theme))];
   const exploredSignalIds = signals.map((signal) => signal.id);
 
-  return {
-    dimensionId,
-    score: conservativeScoreFromSignals(signals),
+  const fallback = {
     consolidatedFindings: buildConsolidatedFindings(session, dimensionId, signals),
     dominantRootCause: deriveRootCause(session, dimensionId, signals),
     unmanagedZones: buildUnmanagedZones(session, dimensionId, signals),
+  };
+
+  const llmNarrative = await buildFrozenDimensionNarrativeWithLlm({
+    dimensionId,
+    dimensionTitle: dimensionTitle(dimensionId),
+    signals,
+    memory: (session.analysisMemory ?? []).filter((item) => item.dimensionId === dimensionId),
+    fallback,
+  });
+
+  return {
+    dimensionId,
+    score: conservativeScoreFromSignals(signals),
+    consolidatedFindings: llmNarrative.consolidatedFindings,
+    dominantRootCause: llmNarrative.dominantRootCause,
+    unmanagedZones: llmNarrative.unmanagedZones,
     frozenAt: new Date().toISOString(),
     exploredThemes,
     exploredSignalIds,
@@ -629,9 +516,7 @@ function freezeDimension(
 }
 
 function requireCurrentWorkset(session: DiagnosticSessionAggregate): IterationWorkset {
-  if (!session.currentWorkset) {
-    throw new Error("Aucune itération active dans la session.");
-  }
+  if (!session.currentWorkset) throw new Error("Aucune itération active dans la session.");
   return session.currentWorkset;
 }
 
@@ -641,31 +526,23 @@ function appendIterationHistory(
 ): DiagnosticSessionAggregate {
   const history = session.iterationHistory ?? [];
   const filtered = history.filter(
-    (item) =>
-      !(
-        item.dimensionId === record.dimensionId &&
-        item.iteration === record.iteration
-      )
+    (item) => !(item.dimensionId === record.dimensionId && item.iteration === record.iteration)
   );
-
   return {
     ...session,
     iterationHistory: [...filtered, record].sort((a, b) => {
-      if (a.dimensionId !== b.dimensionId) {
-        return a.dimensionId - b.dimensionId;
-      }
+      if (a.dimensionId !== b.dimensionId) return a.dimensionId - b.dimensionId;
       return a.iteration - b.iteration;
     }),
   };
 }
 
-function createBootstrappedSessionFromRegistry(params: {
+async function createBootstrappedSessionFromRegistry(params: {
   sessionId: string;
   rawTrameText: string;
   signalRegistry: ReturnType<typeof buildSignalRegistry>;
-}): DiagnosticSessionAggregate {
+}): Promise<DiagnosticSessionAggregate> {
   const trame = readBaseTrame(params.rawTrameText);
-
   let session = createEmptySessionAggregate(params.sessionId);
   session = withSafeMemory({
     ...session,
@@ -676,20 +553,18 @@ function createBootstrappedSessionFromRegistry(params: {
     currentIteration: 1,
   });
 
-  const workset = buildWorkset(session, 1, 1, false);
+  const workset = await buildWorkset(session, 1, 1, false);
   session = attachWorkset(session, workset);
   session = applyEmptyWorksetAutoValidation(session);
-
   return touchSession(withSafeMemory(session));
 }
 
-export function bootstrapSessionFromTrame(params: {
+export async function bootstrapSessionFromTrame(params: {
   sessionId: string;
   rawTrameText: string;
-}): DiagnosticSessionAggregate {
+}): Promise<DiagnosticSessionAggregate> {
   const trame = readBaseTrame(params.rawTrameText);
   const signalRegistry = buildSignalRegistry(trame);
-
   return createBootstrappedSessionFromRegistry({
     sessionId: params.sessionId,
     rawTrameText: params.rawTrameText,
@@ -703,7 +578,6 @@ export async function bootstrapSessionFromTrameWithLlm(params: {
 }): Promise<DiagnosticSessionAggregate> {
   const trame = readBaseTrame(params.rawTrameText);
   const signalRegistry = await buildSignalRegistryWithLlm(trame);
-
   return createBootstrappedSessionFromRegistry({
     sessionId: params.sessionId,
     rawTrameText: params.rawTrameText,
@@ -714,8 +588,7 @@ export async function bootstrapSessionFromTrameWithLlm(params: {
 export function getEngineView(session: DiagnosticSessionAggregate): EngineView {
   if (session.phase === "awaiting_trame") {
     return {
-      assistantMessage:
-        "Le diagnostic ne peut pas démarrer sans trame de base exploitée.",
+      assistantMessage: "Le diagnostic ne peut pas démarrer sans trame de base exploitée.",
       questions: [],
       needsValidation: false,
       phase: session.phase,
@@ -727,14 +600,10 @@ export function getEngineView(session: DiagnosticSessionAggregate): EngineView {
   if (session.phase === "final_objectives_validation") {
     const objectives = session.finalObjectives?.objectives ?? [];
     const lines = objectives.map(
-      (objective, index) =>
-        `${index + 1}. ${objective.objectiveLabel} — ${objective.keyIndicator}`
+      (objective, index) => `${index + 1}. ${objective.objectiveLabel} — ${objective.keyIndicator}`
     );
-
     return {
-      assistantMessage: `${FINAL_OBJECTIVES_HEADER}\n\nObjectifs proposés :\n${lines.join(
-        "\n"
-      )}\n\nMerci d’indiquer pour chaque objectif : Validé / Ajusté / Refusé.`,
+      assistantMessage: `${FINAL_OBJECTIVES_HEADER}\n\nObjectifs proposés :\n${lines.join("\n")}\n\nMerci d’indiquer pour chaque objectif : Validé / Ajusté / Refusé.`,
       questions: [],
       needsValidation: true,
       phase: session.phase,
@@ -745,8 +614,7 @@ export function getEngineView(session: DiagnosticSessionAggregate): EngineView {
 
   if (session.phase === "report_ready") {
     return {
-      assistantMessage:
-        "Le diagnostic est séquencé, les 4 dimensions sont gelées et l’itération finale objectifs est capturée. La session est prête pour le report builder standardisé.",
+      assistantMessage: "Le diagnostic est séquencé, les 4 dimensions sont gelées et l’itération finale objectifs est capturée. La session est prête pour le report builder standardisé.",
       questions: [],
       needsValidation: false,
       phase: session.phase,
@@ -756,7 +624,6 @@ export function getEngineView(session: DiagnosticSessionAggregate): EngineView {
   }
 
   const workset = session.currentWorkset;
-
   if (!workset) {
     return {
       assistantMessage: "Aucune itération active trouvée.",
@@ -795,22 +662,12 @@ export function registerAnswer(params: {
   answerText: string;
 }): DiagnosticSessionAggregate {
   const { session, questionId, answerText } = params;
-
-  if (session.phase !== "dimension_iteration") {
-    throw new Error("La session n’est pas en phase de questions.");
-  }
-
+  if (session.phase !== "dimension_iteration") throw new Error("La session n’est pas en phase de questions.");
   const workset = requireCurrentWorkset(session);
   const question = workset.questions.find((q) => q.id === questionId);
-
-  if (!question) {
-    throw new Error(`Question introuvable: ${questionId}`);
-  }
-
+  if (!question) throw new Error(`Question introuvable: ${questionId}`);
   const alreadyAnswered = workset.answers.some((a) => a.questionId === questionId);
-  if (alreadyAnswered) {
-    throw new Error(`La question ${questionId} a déjà reçu une réponse.`);
-  }
+  if (alreadyAnswered) throw new Error(`La question ${questionId} a déjà reçu une réponse.`);
 
   const nextAnswer: AnswerRecord = {
     questionId,
@@ -818,18 +675,10 @@ export function registerAnswer(params: {
     answeredAt: new Date().toISOString(),
   };
 
-  const nextWorkset: IterationWorkset = {
-    ...workset,
-    answers: [...workset.answers, nextAnswer],
-  };
-
-  let nextSession: DiagnosticSessionAggregate = withSafeMemory({
-    ...session,
-    currentWorkset: nextWorkset,
-  });
+  const nextWorkset: IterationWorkset = { ...workset, answers: [...workset.answers, nextAnswer] };
+  let nextSession: DiagnosticSessionAggregate = withSafeMemory({ ...session, currentWorkset: nextWorkset });
 
   const closure = decideIterationClosure(nextSession);
-
   if (closure.shouldAskValidation) {
     nextSession = {
       ...nextSession,
@@ -853,34 +702,17 @@ export function registerAnswer(params: {
   return touchSession(withSafeMemory(nextSession));
 }
 
-export function submitIterationClosure(params: {
+export async function submitIterationClosure(params: {
   session: DiagnosticSessionAggregate;
   decision: ValidationDecision;
-}): DiagnosticSessionAggregate {
+}): Promise<DiagnosticSessionAggregate> {
   let session = withSafeMemory(params.session);
-
-  if (session.phase !== "iteration_validation") {
-    throw new Error("La session n’attend pas de validation d’itération.");
-  }
-
+  if (session.phase !== "iteration_validation") throw new Error("La session n’attend pas de validation d’itération.");
   const currentWorkset = requireCurrentWorkset(session);
 
   if (params.decision === "no") {
-    const workset = buildWorkset(
-      session,
-      currentWorkset.dimensionId,
-      currentWorkset.iteration,
-      true
-    );
-
-    session = attachWorkset(
-      {
-        ...session,
-        phase: "dimension_iteration",
-      },
-      workset
-    );
-
+    const workset = await buildWorkset(session, currentWorkset.dimensionId, currentWorkset.iteration, true);
+    session = attachWorkset({ ...session, phase: "dimension_iteration" }, workset);
     session = applyEmptyWorksetAutoValidation(session);
     return touchSession(withSafeMemory(session));
   }
@@ -893,70 +725,32 @@ export function submitIterationClosure(params: {
     closedAt: new Date().toISOString(),
   });
 
-  session = closeCoverageForIteration(
-    session,
-    currentWorkset.dimensionId,
-    currentWorkset.iteration
-  );
+  session = closeCoverageForIteration(session, currentWorkset.dimensionId, currentWorkset.iteration);
 
   if (!isLastIteration(currentWorkset.iteration)) {
     const nextIteration = nextIterationNumber(currentWorkset.iteration)!;
-
-    const workset = buildWorkset(
-      session,
-      currentWorkset.dimensionId,
-      nextIteration,
-      false
-    );
-
-    session = attachWorkset(
-      {
-        ...session,
-        phase: "dimension_iteration",
-        currentIteration: nextIteration,
-      },
-      workset
-    );
-
+    const workset = await buildWorkset(session, currentWorkset.dimensionId, nextIteration, false);
+    session = attachWorkset({ ...session, phase: "dimension_iteration", currentIteration: nextIteration }, workset);
     session = applyEmptyWorksetAutoValidation(session);
     return touchSession(withSafeMemory(session));
   }
 
-  const frozen = freezeDimension(session, currentWorkset.dimensionId);
-  const existing = session.frozenDimensions.filter(
-    (item) => item.dimensionId !== currentWorkset.dimensionId
-  );
-
+  const frozen = await freezeDimension(session, currentWorkset.dimensionId);
+  const existing = session.frozenDimensions.filter((item) => item.dimensionId !== currentWorkset.dimensionId);
   session = {
     ...session,
-    frozenDimensions: [...existing, frozen].sort(
-      (a, b) => a.dimensionId - b.dimensionId
-    ),
+    frozenDimensions: [...existing, frozen].sort((a, b) => a.dimensionId - b.dimensionId),
   };
 
   if (!isLastDimension(currentWorkset.dimensionId)) {
     const nextDimension = nextDimensionId(currentWorkset.dimensionId)!;
-
-    const workset = buildWorkset(session, nextDimension, 1, false);
-
-    session = attachWorkset(
-      {
-        ...session,
-        phase: "dimension_iteration",
-        currentDimensionId: nextDimension,
-        currentIteration: 1,
-      },
-      workset
-    );
-
+    const workset = await buildWorkset(session, nextDimension, 1, false);
+    session = attachWorkset({ ...session, phase: "dimension_iteration", currentDimensionId: nextDimension, currentIteration: 1 }, workset);
     session = applyEmptyWorksetAutoValidation(session);
     return touchSession(withSafeMemory(session));
   }
 
-  const finalObjectives = buildFinalObjectiveSetFromFrozenDimensions(
-    session.frozenDimensions
-  );
-
+  const finalObjectives = buildFinalObjectiveSetFromFrozenDimensions(session.frozenDimensions);
   session = {
     ...session,
     phase: "final_objectives_validation",
@@ -965,7 +759,6 @@ export function submitIterationClosure(params: {
     currentWorkset: null,
     finalObjectives,
   };
-
   return touchSession(withSafeMemory(session));
 }
 
@@ -983,7 +776,6 @@ export function captureObjectivesValidation(params: {
 }): DiagnosticSessionAggregate {
   const { session: rawSession, decisions } = params;
   const session = withSafeMemory(rawSession);
-
   if (session.phase !== "final_objectives_validation" || !session.finalObjectives) {
     throw new Error("La session n’est pas en phase finale de validation des objectifs.");
   }
@@ -1006,24 +798,13 @@ export function captureObjectivesValidation(params: {
   return touchSession(withSafeMemory(nextSession));
 }
 
-export function cloneSession(
-  session: DiagnosticSessionAggregate
-): DiagnosticSessionAggregate {
+export function cloneSession(session: DiagnosticSessionAggregate): DiagnosticSessionAggregate {
   return {
     ...session,
-    signalRegistry: session.signalRegistry
-      ? cloneRegistry(session.signalRegistry)
-      : null,
-    currentWorkset: session.currentWorkset
-      ? cloneWorkset(session.currentWorkset)
-      : null,
+    signalRegistry: session.signalRegistry ? cloneRegistry(session.signalRegistry) : null,
+    currentWorkset: session.currentWorkset ? cloneWorkset(session.currentWorkset) : null,
     frozenDimensions: [...session.frozenDimensions],
-    finalObjectives: session.finalObjectives
-      ? {
-          ...session.finalObjectives,
-          objectives: [...session.finalObjectives.objectives],
-        }
-      : null,
+    finalObjectives: session.finalObjectives ? { ...session.finalObjectives, objectives: [...session.finalObjectives.objectives] } : null,
     analysisMemory: [...(session.analysisMemory ?? [])],
     iterationHistory: [...(session.iterationHistory ?? [])],
     themeCoverage: [...(session.themeCoverage ?? [])],
@@ -1035,9 +816,7 @@ export function answeredCount(session: DiagnosticSessionAggregate): number {
   return session.currentWorkset?.answers.length ?? 0;
 }
 
-export function answeredQuestionIdSet(
-  session: DiagnosticSessionAggregate
-): Set<string> {
+export function answeredQuestionIdSet(session: DiagnosticSessionAggregate): Set<string> {
   return answeredQuestionIds(session.currentWorkset);
 }
 
@@ -1045,12 +824,10 @@ export function challengeCurrentQuestion(
   session: DiagnosticSessionAggregate,
   message?: string
 ): StructuredQuestion | null;
-
 export function challengeCurrentQuestion(params: {
   session: DiagnosticSessionAggregate;
   message?: string;
 }): StructuredQuestion | null;
-
 export function challengeCurrentQuestion(params: {
   session: DiagnosticSessionAggregate;
   sessionId?: string;
@@ -1062,23 +839,11 @@ export function challengeCurrentQuestion(params: {
 export function challengeCurrentQuestion(
   arg1:
     | DiagnosticSessionAggregate
-    | {
-        session: DiagnosticSessionAggregate;
-        sessionId?: string;
-        rawMessage?: string;
-        message?: string;
-        reason?: string;
-      },
+    | { session: DiagnosticSessionAggregate; sessionId?: string; rawMessage?: string; message?: string; reason?: string },
   arg2?: string
 ): StructuredQuestion | null | DiagnosticSessionAggregate {
-  const preview =
-    "phase" in arg1
-      ? withSafeMemory(arg1)
-      : withSafeMemory(arg1.session);
-
-  const rawMessage =
-    ("phase" in arg1 ? arg2 : arg1.rawMessage ?? arg1.message) ?? "";
-
+  const preview = "phase" in arg1 ? withSafeMemory(arg1) : withSafeMemory(arg1.session);
+  const rawMessage = (("phase" in arg1 ? arg2 : arg1.rawMessage ?? arg1.message) ?? "");
   const workset = preview.currentWorkset;
   const currentQuestion = getCurrentUnansweredQuestion(workset);
 
@@ -1107,14 +872,8 @@ export function challengeCurrentQuestion(
     currentAngle: signal?.entryAngle ?? null,
   });
 
-  const rewrittenQuestion: StructuredQuestion = {
-    ...currentQuestion,
-    questionOuverte: nextQuestionOuverte,
-  };
-
-  if ("phase" in arg1) {
-    return rewrittenQuestion;
-  }
+  const rewrittenQuestion: StructuredQuestion = { ...currentQuestion, questionOuverte: nextQuestionOuverte };
+  if ("phase" in arg1) return rewrittenQuestion;
 
   const nextQuestions = workset.questions.map((question) =>
     question.id === currentQuestion.id ? rewrittenQuestion : question
@@ -1123,10 +882,7 @@ export function challengeCurrentQuestion(
   return touchSession(
     withSafeMemory({
       ...preview,
-      currentWorkset: {
-        ...workset,
-        questions: nextQuestions,
-      },
+      currentWorkset: { ...workset, questions: nextQuestions },
     })
   );
 }

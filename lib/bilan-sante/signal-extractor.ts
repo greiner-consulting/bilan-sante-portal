@@ -174,6 +174,9 @@ const KEYWORDS_BY_DIMENSION: Record<DimensionId, ThemeKeywordMap> = {
       "expérience",
       "seniorité",
       "formation",
+      "chef de chantier",
+      "chefs de chantier",
+      "niveau à date",
     ],
     "ressources vs charge": [
       "charge",
@@ -183,6 +186,11 @@ const KEYWORDS_BY_DIMENSION: Record<DimensionId, ThemeKeywordMap> = {
       "surcharge",
       "planning",
       "disponibilité",
+      "charge capacité",
+      "planifier",
+      "planification",
+      "staffing",
+      "5 semaines",
     ],
     "turnover absentéisme stabilité": [
       "turnover",
@@ -191,6 +199,7 @@ const KEYWORDS_BY_DIMENSION: Record<DimensionId, ThemeKeywordMap> = {
       "départ",
       "fidélisation",
       "rotation",
+      "absenteisme",
     ],
     "recrutement et intégration": [
       "recrutement",
@@ -198,6 +207,9 @@ const KEYWORDS_BY_DIMENSION: Record<DimensionId, ThemeKeywordMap> = {
       "intégration",
       "onboarding",
       "embauche",
+      "embauches",
+      "besoins",
+      "intégrer",
     ],
     "clarté des rôles": [
       "rôle",
@@ -206,6 +218,8 @@ const KEYWORDS_BY_DIMENSION: Record<DimensionId, ThemeKeywordMap> = {
       "périmètre",
       "délégation",
       "poste",
+      "autorité",
+      "périmètre de responsabilité",
     ],
   },
   2: {
@@ -1088,8 +1102,8 @@ function buildAbsenceSignals(
       const constat = llmMissing
         ? `Le thème "${theme}" ressort comme insuffisamment étayé dans la trame (${llmMissing.reason}).`
         : missingFieldHit
-        ? `Le thème "${theme}" ressort comme absent, incomplet ou insuffisamment documenté dans la trame, notamment via le champ "${missingFieldHit.label}".`
-        : `Le thème "${theme}" est absent, peu documenté ou insuffisamment suivi dans la trame.`;
+          ? `Le thème "${theme}" ressort comme absent, incomplet ou insuffisamment documenté dans la trame, notamment via le champ "${missingFieldHit.label}".`
+          : `Le thème "${theme}" est absent, peu documenté ou insuffisamment suivi dans la trame.`;
 
       results.push({
         id: makeSignalId(dimension.id, theme, "absence", runningIndex++),
@@ -1425,6 +1439,30 @@ function buildLlmUncoveredMap(
   return out;
 }
 
+function signalThemeKey(signal: DiagnosticSignal): string {
+  return `${signal.dimensionId}|${normalizeText(signal.theme)}`;
+}
+
+function mergeExplicitSignalsWithDeterministicRescue(params: {
+  llmSignals: DiagnosticSignal[];
+  deterministicSignals: DiagnosticSignal[];
+}): {
+  explicitSignals: DiagnosticSignal[];
+  rescuedSignals: DiagnosticSignal[];
+} {
+  const llmThemeKeys = new Set(params.llmSignals.map(signalThemeKey));
+  const rescuedSignals = params.deterministicSignals.filter((signal) => {
+    if (signal.signalKind !== "explicit") return false;
+    if (signal.confidenceScore < 64) return false;
+    return !llmThemeKeys.has(signalThemeKey(signal));
+  });
+
+  return {
+    explicitSignals: dedupeSignals([...params.llmSignals, ...rescuedSignals]),
+    rescuedSignals,
+  };
+}
+
 function buildRegistryFromSignals(signals: DiagnosticSignal[]): SignalRegistry {
   const allSignals = [...signals].sort((a, b) => {
     if (a.dimensionId !== b.dimensionId) return a.dimensionId - b.dimensionId;
@@ -1538,21 +1576,28 @@ export async function buildSignalRegistryWithLlm(
       return deterministicRegistry;
     }
 
-    const explicitSignals = buildExplicitSignalsFromLlm({
+    const llmExplicitSignals = buildExplicitSignalsFromLlm({
       snapshot,
       responses,
       logContext: "primary",
     });
+    const deterministicExplicitSignals = buildExplicitSignalsDeterministic(snapshot);
+    const merged = mergeExplicitSignalsWithDeterministicRescue({
+      llmSignals: llmExplicitSignals,
+      deterministicSignals: deterministicExplicitSignals,
+    });
 
     const uncoveredMap = buildLlmUncoveredMap(responses);
-    const absenceSignals = buildAbsenceSignals(snapshot, explicitSignals, uncoveredMap);
-    const llmRegistry = buildRegistryFromSignals([...explicitSignals, ...absenceSignals]);
+    const absenceSignals = buildAbsenceSignals(snapshot, merged.explicitSignals, uncoveredMap);
+    const llmRegistry = buildRegistryFromSignals([...merged.explicitSignals, ...absenceSignals]);
 
     logInfo("llm_registry_ready", {
       hasOpenAiKey: true,
       responsesReceived: responses.length,
       rawExplicitSignals,
-      explicitSignalsFromLlm: explicitSignals.length,
+      explicitSignalsFromLlm: llmExplicitSignals.length,
+      explicitSignalsRescuedDeterministically: merged.rescuedSignals.length,
+      explicitSignalsFinal: merged.explicitSignals.length,
       uncoveredThemes: uncoveredMap.size,
       fallbackUsed: false,
       ...summarizeRegistry(llmRegistry),

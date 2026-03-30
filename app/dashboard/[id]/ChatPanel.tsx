@@ -12,7 +12,7 @@ type StructuredQuestion = {
 
 type FinalObjective = {
   id: string;
-  dimensionId: number;
+  dimensionId: string | number;
   objectiveLabel: string;
   owner: string;
   keyIndicator: string;
@@ -59,11 +59,7 @@ type PersistedTurn = {
 };
 
 type DisplayMessage =
-  | {
-      role: "assistant" | "user" | "system";
-      text: string;
-      key: string;
-    }
+  | { role: "assistant" | "user" | "system"; text: string; key: string }
   | {
       role: "question";
       text: string;
@@ -121,20 +117,14 @@ type ContextApiResponse = {
 type BuildReportApiResponse = {
   ok: boolean;
   report?: unknown;
-  compliance?: {
-    ok: boolean;
-    warnings?: Array<{ code?: string; message?: string } | string>;
-    summary?: string[];
-  };
+  compliance?: { ok: boolean; warnings?: Array<{ code?: string; message?: string } | string>; summary?: string[] };
   blocking_issues?: Array<{ code?: string; message?: string }>;
   warnings?: Array<{ code?: string; message?: string }>;
   summary?: string[];
   error?: string;
 };
 
-type Props = {
-  sessionId: string;
-};
+type Props = { sessionId: string };
 
 function initialAssistantMessage() {
   return "Le diagnostic démarrera automatiquement dès qu’une trame exploitable sera disponible.";
@@ -148,7 +138,6 @@ function clampIndex(index: number, total: number) {
 
 function normalizeQuestions(value: unknown): StructuredQuestion[] {
   if (!Array.isArray(value)) return [];
-
   return value
     .filter((item) => item && typeof item === "object")
     .map((item) => {
@@ -161,21 +150,11 @@ function normalizeQuestions(value: unknown): StructuredQuestion[] {
         question: String(row.question ?? "").trim(),
       };
     })
-    .filter(
-      (item) =>
-        Boolean(item.constat) &&
-        Boolean(item.risque_managerial) &&
-        Boolean(item.question)
-    );
+    .filter((item) => Boolean(item.constat) && Boolean(item.risque_managerial) && Boolean(item.question));
 }
 
-function mergeSessionState(
-  current: SessionState | null,
-  next?: SessionState | null,
-  fallbackId?: string
-): SessionState | null {
+function mergeSessionState(current: SessionState | null, next?: SessionState | null, fallbackId?: string): SessionState | null {
   if (!current && !next && !fallbackId) return null;
-
   return {
     ...(current ?? { id: fallbackId ?? "" }),
     ...(next ?? {}),
@@ -193,11 +172,7 @@ function normalizeAssistantResponse(data: AnswerApiResponse): AssistantResponse 
     };
   }
 
-  if (
-    typeof data.assistant_message !== "undefined" ||
-    typeof data.questions !== "undefined" ||
-    typeof data.needs_validation !== "undefined"
-  ) {
+  if (typeof data.assistant_message !== "undefined" || typeof data.questions !== "undefined" || typeof data.needs_validation !== "undefined") {
     return {
       assistant_message: String(data.assistant_message ?? "").trim(),
       questions: normalizeQuestions(data.questions),
@@ -228,8 +203,8 @@ function phaseLabel(phase?: string | null) {
   }
 }
 
-function dimensionLabel(dimension?: number | null) {
-  switch (dimension) {
+function dimensionLabel(dimension?: number | string | null) {
+  switch (Number(dimension)) {
     case 1:
       return "1 — Organisation & RH";
     case 2:
@@ -248,27 +223,13 @@ function iterationLabel(iteration?: number | null) {
   return `${iteration}/3`;
 }
 
-function buildPlaceholder(params: {
-  currentQuestion: StructuredQuestion | null;
-  awaitingValidation: boolean;
-  phase?: string | null;
-}) {
+function buildPlaceholder(params: { currentQuestion: StructuredQuestion | null; awaitingValidation: boolean; phase?: string | null }) {
   if (params.phase === "final_objectives_validation") {
     return 'Exemple : 1: validé | 2: refusé | 3: ajusté | objectif=... | indicateur=...';
   }
-
-  if (params.currentQuestion) {
-    return "Votre réponse à la question affichée...";
-  }
-
-  if (params.awaitingValidation) {
-    return 'Répondez "oui" ou "non"...';
-  }
-
-  if (params.phase === "report_ready") {
-    return "Le protocole est terminé. Vous pouvez construire le rapport.";
-  }
-
+  if (params.currentQuestion) return "Votre réponse à la question affichée...";
+  if (params.awaitingValidation) return 'Répondez "oui" ou "non"...';
+  if (params.phase === "report_ready") return "Le protocole est terminé. Vous pouvez construire le rapport.";
   return "Votre réponse...";
 }
 
@@ -282,11 +243,9 @@ function stringifyReportPreview(report: unknown): string {
 
 function buildMessagesFromHistory(turns: PersistedTurn[]): DisplayMessage[] {
   const out: DisplayMessage[] = [];
-
   for (const turn of turns) {
     const text = String(turn.text ?? "").trim();
     if (!text) continue;
-
     if (turn.role === "question") {
       out.push({
         role: "question",
@@ -300,34 +259,14 @@ function buildMessagesFromHistory(turns: PersistedTurn[]): DisplayMessage[] {
       });
       continue;
     }
-
-    out.push({
-      role: turn.role,
-      key: turn.id,
-      text,
-    });
+    out.push({ role: turn.role, key: turn.id, text });
   }
 
-  return out.length > 0
-    ? out
-    : [
-        {
-          role: "assistant",
-          key: "initial-assistant",
-          text: initialAssistantMessage(),
-        },
-      ];
+  return out.length > 0 ? out : [{ role: "assistant", key: "initial-assistant", text: initialAssistantMessage() }];
 }
 
 export default function ChatPanel({ sessionId }: Props) {
-  const [messages, setMessages] = useState<DisplayMessage[]>([
-    {
-      role: "assistant",
-      key: "initial-assistant",
-      text: initialAssistantMessage(),
-    },
-  ]);
-
+  const [messages, setMessages] = useState<DisplayMessage[]>([{ role: "assistant", key: "initial-assistant", text: initialAssistantMessage() }]);
   const [questions, setQuestions] = useState<StructuredQuestion[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [awaitingValidation, setAwaitingValidation] = useState(false);
@@ -345,20 +284,14 @@ export default function ChatPanel({ sessionId }: Props) {
 
   const currentQuestion = useMemo(() => {
     if (questions.length === 0) return null;
+    if (sessionState?.phase !== "dimension_iteration") return null;
     return questions[clampIndex(currentIndex, questions.length)] ?? null;
-  }, [questions, currentIndex]);
+  }, [questions, currentIndex, sessionState?.phase]);
 
   function pushMessage(role: "assistant" | "user" | "system", text: string) {
     const content = String(text || "").trim();
     if (!content) return;
-    setMessages((prev) => [
-      ...prev,
-      {
-        role,
-        key: `${role}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        text: content,
-      },
-    ]);
+    setMessages((prev) => [...prev, { role, key: `${role}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, text: content }]);
   }
 
   function resetQuestionState() {
@@ -366,29 +299,17 @@ export default function ChatPanel({ sessionId }: Props) {
     setCurrentIndex(0);
   }
 
-  function applyAssistantPayload(
-    assistant?: AssistantResponse | null,
-    nextSession?: SessionState | null
-  ) {
+  function applyAssistantPayload(assistant?: AssistantResponse | null, nextSession?: SessionState | null) {
     if (!assistant) return;
 
     const nextQuestions = normalizeQuestions(assistant.questions);
     const needsValidation = Boolean(assistant.needs_validation);
     const nextPhase = String(nextSession?.phase ?? "");
 
-    if (nextQuestions.length > 0) {
-      const nextIndex = clampIndex(
-        Number(nextSession?.question_index ?? 0),
-        nextQuestions.length
-      );
-
+    if (nextQuestions.length > 0 && nextPhase === "dimension_iteration") {
+      const nextIndex = clampIndex(Number(nextSession?.question_index ?? 0), nextQuestions.length);
       setQuestions([...nextQuestions]);
       setCurrentIndex(nextIndex);
-      setAwaitingValidation(false);
-      return;
-    }
-
-    if (nextPhase === "dimension_iteration" && questions.length > 0) {
       setAwaitingValidation(false);
       return;
     }
@@ -403,66 +324,34 @@ export default function ChatPanel({ sessionId }: Props) {
     }
 
     const nextQuestions = normalizeQuestions(data.engine_state?.question_batch_json);
+    const nextPhase = String(data.session?.phase ?? "awaiting_trame");
 
-    if (nextQuestions.length > 0) {
-      const nextIndex = clampIndex(
-        Number(data.session?.question_index ?? 0),
-        nextQuestions.length
-      );
+    if (nextQuestions.length > 0 && nextPhase === "dimension_iteration") {
+      const nextIndex = clampIndex(Number(data.session?.question_index ?? 0), nextQuestions.length);
       setQuestions([...nextQuestions]);
       setCurrentIndex(nextIndex);
     } else {
       resetQuestionState();
     }
 
-    setFinalObjectives(
-      data.engine_state?.final_objectives_json &&
-        typeof data.engine_state.final_objectives_json === "object"
-        ? (data.engine_state.final_objectives_json as FinalObjectiveSet)
-        : null
-    );
+    setFinalObjectives(data.engine_state?.final_objectives_json && typeof data.engine_state.final_objectives_json === "object" ? (data.engine_state.final_objectives_json as FinalObjectiveSet) : null);
+    setFrozenDimensions(Array.isArray(data.engine_state?.consolidation_json) ? (data.engine_state?.consolidation_json as FrozenDimension[]) : []);
 
-    setFrozenDimensions(
-      Array.isArray(data.engine_state?.consolidation_json)
-        ? (data.engine_state?.consolidation_json as FrozenDimension[])
-        : []
-    );
-
-    const historyTurns = Array.isArray(data.engine_state?.conversation_history_json)
-      ? (data.engine_state?.conversation_history_json as PersistedTurn[])
-      : [];
-
+    const historyTurns = Array.isArray(data.engine_state?.conversation_history_json) ? (data.engine_state?.conversation_history_json as PersistedTurn[]) : [];
     setMessages(buildMessagesFromHistory(historyTurns));
 
-    const phase = String(data.session?.phase ?? "awaiting_trame");
-    setAwaitingValidation(
-      phase === "iteration_validation" ||
-        phase === "final_objectives_validation"
-    );
+    setAwaitingValidation(nextPhase === "iteration_validation" || nextPhase === "final_objectives_validation");
   }
 
   async function loadContext() {
     setBootstrapping(true);
-
     try {
-      const res = await fetch(`/api/session/context?id=${sessionId}`, {
-        method: "GET",
-        cache: "no-store",
-        credentials: "include",
-      });
-
+      const res = await fetch(`/api/session/context?id=${sessionId}`, { method: "GET", cache: "no-store", credentials: "include" });
       const data: ContextApiResponse = await res.json();
-
-      if (!data.ok) {
-        throw new Error(data.error || "Erreur de chargement du contexte");
-      }
-
+      if (!data.ok) throw new Error(data.error || "Erreur de chargement du contexte");
       applyContextData(data);
     } catch (e: any) {
-      pushMessage(
-        "system",
-        "Erreur de chargement du contexte : " + (e?.message || "Erreur inconnue")
-      );
+      pushMessage("system", "Erreur de chargement du contexte : " + (e?.message || "Erreur inconnue"));
     } finally {
       setBootstrapping(false);
     }
@@ -470,15 +359,9 @@ export default function ChatPanel({ sessionId }: Props) {
 
   async function loadSideStateSilently() {
     try {
-      const res = await fetch(`/api/session/context?id=${sessionId}`, {
-        method: "GET",
-        cache: "no-store",
-        credentials: "include",
-      });
-
+      const res = await fetch(`/api/session/context?id=${sessionId}`, { method: "GET", cache: "no-store", credentials: "include" });
       const data: ContextApiResponse = await res.json();
       if (!data.ok) return;
-
       applyContextData(data);
     } catch {
       // silence volontaire
@@ -487,37 +370,23 @@ export default function ChatPanel({ sessionId }: Props) {
 
   async function sendMessage(message: string) {
     setLoading(true);
-
     try {
-      const payload: Record<string, unknown> = {
-        message,
-        client_ts: new Date().toISOString(),
-      };
-
+      const payload: Record<string, unknown> = { message, client_ts: new Date().toISOString() };
       const res = await fetch(`/api/session/${sessionId}/answer`, {
         method: "POST",
         credentials: "include",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
 
       const data: AnswerApiResponse = await res.json();
-
-      if (!data.ok) {
-        throw new Error(data.error || "Erreur moteur diagnostic");
-      }
+      if (!data.ok) throw new Error(data.error || "Erreur moteur diagnostic");
 
       const mergedSession = mergeSessionState(sessionState, data.session, sessionId);
-
-      if (mergedSession) {
-        setSessionState(mergedSession);
-      }
+      if (mergedSession) setSessionState(mergedSession);
 
       const assistant = normalizeAssistantResponse(data);
       applyAssistantPayload(assistant, mergedSession);
-
       await loadSideStateSilently();
     } catch (e: any) {
       pushMessage("system", "Erreur : " + (e?.message || "Erreur inconnue"));
@@ -529,46 +398,23 @@ export default function ChatPanel({ sessionId }: Props) {
   async function buildReport() {
     setBuildingReport(true);
     setReportPreview(null);
-
     try {
-      const res = await fetch(`/api/session/${sessionId}/build-report`, {
-        method: "POST",
-        credentials: "include",
-      });
-
+      const res = await fetch(`/api/session/${sessionId}/build-report`, { method: "POST", credentials: "include" });
       const data: BuildReportApiResponse = await res.json();
-
       if (!data.ok) {
         const issues = Array.isArray(data.blocking_issues)
-          ? data.blocking_issues
-              .map((x) => `[${x.code ?? "ISSUE"}] ${x.message ?? ""}`.trim())
-              .join("\n")
+          ? data.blocking_issues.map((x) => `[${x.code ?? "ISSUE"}] ${x.message ?? ""}`.trim()).join("\n")
           : "";
-
-        throw new Error(
-          [data.error || "Erreur build-report", issues].filter(Boolean).join("\n")
-        );
+        throw new Error([data.error || "Erreur build-report", issues].filter(Boolean).join("\n"));
       }
 
-      pushMessage(
-        "assistant",
-        "Le modèle standardisé du rapport a été construit avec succès."
-      );
-
+      pushMessage("assistant", "Le modèle standardisé du rapport a été construit avec succès.");
       if (data.compliance?.summary?.length) {
-        pushMessage(
-          "system",
-          "Conformité rapport :\n" + data.compliance.summary.join("\n")
-        );
+        pushMessage("system", "Conformité rapport :\n" + data.compliance.summary.join("\n"));
       }
-
       setReportPreview(stringifyReportPreview(data.report));
     } catch (e: any) {
-      pushMessage(
-        "system",
-        "Erreur lors de la construction du rapport : " +
-          (e?.message || "Erreur inconnue")
-      );
+      pushMessage("system", "Erreur lors de la construction du rapport : " + (e?.message || "Erreur inconnue"));
     } finally {
       setBuildingReport(false);
     }
@@ -577,13 +423,10 @@ export default function ChatPanel({ sessionId }: Props) {
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     if (loading || bootstrapping) return;
-
     const userText = input.trim();
     if (!userText) return;
-
     pushMessage("user", userText);
     setInput("");
-
     await sendMessage(userText);
   }
 
@@ -595,13 +438,7 @@ export default function ChatPanel({ sessionId }: Props) {
     setFinalObjectives(null);
     setFrozenDimensions([]);
     setReportPreview(null);
-    setMessages([
-      {
-        role: "assistant",
-        key: "initial-assistant",
-        text: initialAssistantMessage(),
-      },
-    ]);
+    setMessages([{ role: "assistant", key: "initial-assistant", text: initialAssistantMessage() }]);
   }, [sessionId]);
 
   useEffect(() => {
@@ -614,46 +451,25 @@ export default function ChatPanel({ sessionId }: Props) {
     function handleTrameIngested(event: Event) {
       const customEvent = event as CustomEvent<{ sessionId?: string }>;
       if (customEvent.detail?.sessionId !== sessionId) return;
-
-      pushMessage(
-        "system",
-        "Trame ingérée avec succès. Le contexte de diagnostic est rechargé."
-      );
-
+      pushMessage("system", "Trame ingérée avec succès. Le contexte de diagnostic est rechargé.");
       loadContext();
     }
 
     window.addEventListener("bilan-trame-ingested", handleTrameIngested);
-
-    return () => {
-      window.removeEventListener("bilan-trame-ingested", handleTrameIngested);
-    };
+    return () => window.removeEventListener("bilan-trame-ingested", handleTrameIngested);
   }, [sessionId]);
 
   useEffect(() => {
     if (!scrollRef.current) return;
     scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-  }, [
-    messages,
-    currentIndex,
-    questions.length,
-    awaitingValidation,
-    loading,
-    finalObjectives,
-    frozenDimensions,
-  ]);
+  }, [messages, currentIndex, questions.length, awaitingValidation, loading, finalObjectives, frozenDimensions]);
 
   useEffect(() => {
     if (questions.length === 0) return;
     setCurrentIndex((prev) => clampIndex(prev, questions.length));
   }, [questions]);
 
-  const placeholder = buildPlaceholder({
-    currentQuestion,
-    awaitingValidation,
-    phase: sessionState?.phase,
-  });
-
+  const placeholder = buildPlaceholder({ currentQuestion, awaitingValidation, phase: sessionState?.phase });
   const canBuildReport = sessionState?.phase === "report_ready";
 
   return (
@@ -668,25 +484,12 @@ export default function ChatPanel({ sessionId }: Props) {
 
         {sessionState && (
           <div className="mt-3 text-xs text-gray-600 space-y-1">
-            <div>
-              Session : <strong>{sessionState.id}</strong>
-            </div>
-            <div>
-              Statut : <strong>{sessionState.status ?? "n/a"}</strong>
-            </div>
-            <div>
-              Phase : <strong>{phaseLabel(sessionState.phase)}</strong>
-            </div>
-            <div>
-              Dimension : <strong>{dimensionLabel(sessionState.dimension)}</strong>
-            </div>
-            <div>
-              Itération : <strong>{iterationLabel(sessionState.iteration)}</strong>
-            </div>
-            <div>
-              Réponses enregistrées sur l’itération courante :{" "}
-              <strong>{sessionState.question_index ?? 0}</strong>
-            </div>
+            <div>Session : <strong>{sessionState.id}</strong></div>
+            <div>Statut : <strong>{sessionState.status ?? "n/a"}</strong></div>
+            <div>Phase : <strong>{phaseLabel(sessionState.phase)}</strong></div>
+            <div>Dimension : <strong>{dimensionLabel(sessionState.dimension)}</strong></div>
+            <div>Itération : <strong>{iterationLabel(sessionState.iteration)}</strong></div>
+            <div>Réponses enregistrées sur l’itération courante : <strong>{sessionState.question_index ?? 0}</strong></div>
           </div>
         )}
       </div>
@@ -694,61 +497,60 @@ export default function ChatPanel({ sessionId }: Props) {
       {frozenDimensions.length > 0 && (
         <div className="border rounded p-4 bg-white space-y-3">
           <div className="font-semibold">Dimensions gelées</div>
-
           <div className="grid gap-3">
-            {frozenDimensions
-              .slice()
-              .sort((a, b) => a.dimensionId - b.dimensionId)
-              .map((dim) => (
-                <div key={dim.dimensionId} className="rounded border p-3 bg-gray-50">
-                  <div className="flex items-center justify-between gap-4">
-                    <div className="font-medium">
-                      {dimensionLabel(dim.dimensionId)}
-                    </div>
-                    <div className="text-sm">
-                      Score : <strong>{dim.score}/5</strong>
-                    </div>
-                  </div>
-
-                  <div className="mt-2 text-sm">
-                    <div className="font-medium">Cause racine dominante</div>
-                    <div>{dim.dominantRootCause}</div>
-                  </div>
+            {frozenDimensions.slice().sort((a, b) => a.dimensionId - b.dimensionId).map((dim) => (
+              <div key={dim.dimensionId} className="rounded border p-3 bg-gray-50 space-y-3">
+                <div className="flex items-center justify-between gap-4">
+                  <div className="font-medium">{dimensionLabel(dim.dimensionId)}</div>
+                  <div className="text-sm">Score : <strong>{dim.score}/5</strong></div>
                 </div>
-              ))}
+
+                <div className="text-sm space-y-1">
+                  <div className="font-medium">Constats consolidés</div>
+                  <ul className="list-disc pl-5 space-y-1">
+                    {(dim.consolidatedFindings ?? []).filter(Boolean).map((finding, index) => (
+                      <li key={`${dim.dimensionId}-finding-${index}`}>{finding}</li>
+                    ))}
+                  </ul>
+                </div>
+
+                <div className="text-sm">
+                  <div className="font-medium">Cause racine dominante</div>
+                  <div>{dim.dominantRootCause}</div>
+                </div>
+
+                {Array.isArray(dim.unmanagedZones) && dim.unmanagedZones.length > 0 && (
+                  <div className="text-sm space-y-2">
+                    <div className="font-medium">Zones non pilotées</div>
+                    <div className="grid gap-2">
+                      {dim.unmanagedZones.map((zone, index) => (
+                        <div key={`${dim.dimensionId}-zone-${index}`} className="rounded border bg-white p-3 space-y-1">
+                          <div><span className="font-medium">Constat :</span> {zone.constat}</div>
+                          <div><span className="font-medium">Risque :</span> {zone.risqueManagerial}</div>
+                          <div><span className="font-medium">Conséquence :</span> {zone.consequence}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
           </div>
         </div>
       )}
 
       {finalObjectives?.objectives?.length ? (
         <div className="border rounded p-4 bg-white space-y-3">
-          <div className="font-semibold">
-            {finalObjectives.header || "Objectifs finaux"}
-          </div>
-
+          <div className="font-semibold">{finalObjectives.header || "Objectifs finaux"}</div>
           <div className="grid gap-3">
             {finalObjectives.objectives.map((objective, index) => (
               <div key={objective.id} className="rounded border p-3 bg-gray-50 space-y-2">
-                <div className="font-medium">
-                  {index + 1}. {objective.objectiveLabel}
-                </div>
+                <div className="font-medium">{index + 1}. {objective.objectiveLabel}</div>
                 <div className="text-sm text-gray-700">
-                  <div>
-                    <span className="font-medium">Dimension :</span>{" "}
-                    {dimensionLabel(objective.dimensionId)}
-                  </div>
-                  <div>
-                    <span className="font-medium">Indicateur :</span>{" "}
-                    {objective.keyIndicator}
-                  </div>
-                  <div>
-                    <span className="font-medium">Échéance :</span>{" "}
-                    {objective.dueDate}
-                  </div>
-                  <div>
-                    <span className="font-medium">Statut :</span>{" "}
-                    {objective.validationStatus}
-                  </div>
+                  <div><span className="font-medium">Dimension :</span> {dimensionLabel(objective.dimensionId)}</div>
+                  <div><span className="font-medium">Indicateur :</span> {objective.keyIndicator}</div>
+                  <div><span className="font-medium">Échéance :</span> {objective.dueDate}</div>
+                  <div><span className="font-medium">Statut :</span> {objective.validationStatus}</div>
                 </div>
               </div>
             ))}
@@ -756,54 +558,34 @@ export default function ChatPanel({ sessionId }: Props) {
 
           {sessionState?.phase === "final_objectives_validation" && (
             <div className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-              Validez les objectifs par chat. Vous pouvez répondre simplement{" "}
-              <strong>oui</strong>, ou détailler objectif par objectif.
+              Validez les objectifs par chat. Vous pouvez répondre simplement <strong>oui</strong>, ou détailler objectif par objectif.
             </div>
           )}
         </div>
       ) : null}
 
-      <div
-        ref={scrollRef}
-        className="border rounded p-4 max-h-[380px] overflow-y-auto space-y-3 bg-white"
-      >
+      <div ref={scrollRef} className="border rounded p-4 max-h-[380px] overflow-y-auto space-y-3 bg-white">
         {messages.map((m) => {
           if (m.role === "question") {
             return (
               <div key={m.key} className="bg-gray-50 mr-8 rounded p-3 border">
                 <div className="text-xs text-gray-500 mb-2">
-                  Dimension {m.dimension ?? "?"} — Itération {m.iteration ?? "?"}/3
-                  {" — "}
-                  Question {m.ordinal ?? "?"} / {m.total ?? "?"}
+                  Dimension {m.dimension ?? "?"} — Itération {m.iteration ?? "?"}/3 — Question {m.ordinal ?? "?"} / {m.total ?? "?"}
                 </div>
-
-                {m.theme && (
-                  <div className="text-xs text-gray-500 mb-2">
-                    Thème : {m.theme}
-                  </div>
-                )}
-
-                <div>
-                  <span className="font-semibold">Question : </span>
-                  {m.text}
-                </div>
+                {m.theme && <div className="text-xs text-gray-500 mb-2">Thème : {m.theme}</div>}
+                <div><span className="font-semibold">Question : </span>{m.text}</div>
               </div>
             );
           }
 
           const isUser = m.role === "user";
           const isSystem = m.role === "system";
-
           return (
             <div
               key={m.key}
               className={[
                 "whitespace-pre-line rounded p-3",
-                isUser
-                  ? "bg-black text-white ml-8"
-                  : isSystem
-                    ? "bg-red-50 text-red-700"
-                    : "bg-gray-50 mr-8",
+                isUser ? "bg-black text-white ml-8" : isSystem ? "bg-red-50 text-red-700" : "bg-gray-50 mr-8",
               ].join(" ")}
             >
               {m.text}
@@ -815,34 +597,14 @@ export default function ChatPanel({ sessionId }: Props) {
       {currentQuestion && (
         <div className="border rounded p-4 bg-gray-50 space-y-4">
           <div className="flex items-center justify-between text-sm">
-            <div className="font-semibold">
-              Dimension {sessionState?.dimension ?? "?"} — Itération{" "}
-              {sessionState?.iteration ?? "?"}/3
-            </div>
-            <div>
-              Question {Math.min(currentIndex + 1, questions.length)} / {questions.length}
-            </div>
+            <div className="font-semibold">Dimension {sessionState?.dimension ?? "?"} — Itération {sessionState?.iteration ?? "?"}/3</div>
+            <div>Question {Math.min(currentIndex + 1, questions.length)} / {questions.length}</div>
           </div>
-
-          {currentQuestion.theme && (
-            <div className="text-xs text-gray-500">
-              Thème : {currentQuestion.theme}
-            </div>
-          )}
-
+          {currentQuestion.theme && <div className="text-xs text-gray-500">Thème : {currentQuestion.theme}</div>}
           <div className="border rounded bg-white p-4 space-y-3">
-            <div>
-              <span className="font-semibold">Constat : </span>
-              {currentQuestion.constat}
-            </div>
-            <div>
-              <span className="font-semibold">Risque managérial : </span>
-              {currentQuestion.risque_managerial}
-            </div>
-            <div>
-              <span className="font-semibold">Question : </span>
-              {currentQuestion.question}
-            </div>
+            <div><span className="font-semibold">Constat : </span>{currentQuestion.constat}</div>
+            <div><span className="font-semibold">Risque managérial : </span>{currentQuestion.risque_managerial}</div>
+            <div><span className="font-semibold">Question : </span>{currentQuestion.question}</div>
           </div>
         </div>
       )}
@@ -850,20 +612,13 @@ export default function ChatPanel({ sessionId }: Props) {
       {!currentQuestion && awaitingValidation && (
         <div className="border rounded p-4 bg-gray-50">
           <div className="font-semibold mb-2">
-            {sessionState?.phase === "final_objectives_validation"
-              ? "Validation des objectifs"
-              : "Validation d’itération"}
+            {sessionState?.phase === "final_objectives_validation" ? "Validation des objectifs" : "Validation d’itération"}
           </div>
           <div className="text-sm text-gray-700">
             {sessionState?.phase === "final_objectives_validation" ? (
-              <>
-                Répondez par <strong>oui</strong> pour tout valider, ou détaillez
-                objectif par objectif.
-              </>
+              <>Répondez par <strong>oui</strong> pour tout valider, ou détaillez objectif par objectif.</>
             ) : (
-              <>
-                Répondez simplement par <strong>oui</strong> ou <strong>non</strong>.
-              </>
+              <>Répondez simplement par <strong>oui</strong> ou <strong>non</strong>.</>
             )}
           </div>
         </div>
@@ -872,11 +627,7 @@ export default function ChatPanel({ sessionId }: Props) {
       {canBuildReport && (
         <div className="border rounded p-4 bg-white space-y-3">
           <div className="font-semibold">Rapport standardisé</div>
-          <div className="text-sm text-gray-700">
-            Le protocole est terminé. Vous pouvez maintenant construire le modèle
-            standardisé du rapport dirigeant.
-          </div>
-
+          <div className="text-sm text-gray-700">Le protocole est terminé. Vous pouvez maintenant construire le modèle standardisé du rapport dirigeant.</div>
           <button
             type="button"
             onClick={buildReport}
@@ -891,9 +642,7 @@ export default function ChatPanel({ sessionId }: Props) {
       {reportPreview && (
         <div className="border rounded p-4 bg-white space-y-2">
           <div className="font-semibold">Aperçu JSON du rapport</div>
-          <pre className="text-xs overflow-x-auto whitespace-pre-wrap bg-gray-50 p-3 rounded border">
-            {reportPreview}
-          </pre>
+          <pre className="text-xs overflow-x-auto whitespace-pre-wrap bg-gray-50 p-3 rounded border">{reportPreview}</pre>
         </div>
       )}
 
@@ -905,15 +654,9 @@ export default function ChatPanel({ sessionId }: Props) {
           onChange={(e) => setInput(e.target.value)}
           disabled={loading || bootstrapping || canBuildReport}
         />
-
         <button
           type="submit"
-          disabled={
-            loading ||
-            bootstrapping ||
-            canBuildReport ||
-            input.trim().length === 0
-          }
+          disabled={loading || bootstrapping || canBuildReport || input.trim().length === 0}
           className="bg-black text-white px-4 py-2 rounded disabled:opacity-50"
         >
           {loading ? "Envoi..." : bootstrapping ? "Chargement..." : "Envoyer"}

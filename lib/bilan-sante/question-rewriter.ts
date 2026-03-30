@@ -6,6 +6,7 @@ import type {
 } from "@/lib/bilan-sante/session-model";
 import type { DimensionId, IterationNumber } from "@/lib/bilan-sante/protocol";
 import { getThemeCoverage } from "@/lib/bilan-sante/coverage-tracker";
+import { composeQuestionWithLlm } from "@/lib/bilan-sante/llm-diagnostic-writer";
 
 function normalizeText(value: string | null | undefined): string {
   return String(value ?? "").replace(/\s+/g, " ").trim();
@@ -70,7 +71,7 @@ function buildAngleQuestion(params: {
   }
 }
 
-export function rewriteQuestionFromAnalysis(params: {
+export async function rewriteQuestionFromAnalysis(params: {
   session: DiagnosticSessionAggregate;
   question: StructuredQuestion;
   rawMessage: string;
@@ -78,7 +79,7 @@ export function rewriteQuestionFromAnalysis(params: {
   dimensionId: DimensionId | null | undefined;
   iteration: IterationNumber | null | undefined;
   currentAngle: EntryAngle | null;
-}): string {
+}): Promise<string> {
   const {
     session,
     question,
@@ -89,49 +90,76 @@ export function rewriteQuestionFromAnalysis(params: {
   } = params;
 
   const anchor = latestFactAnchor(session, dimensionId, question.theme);
-  const coverage =
-    dimensionId != null ? getThemeCoverage(session, dimensionId, question.theme) : null;
+  const coverage = dimensionId != null ? getThemeCoverage(session, dimensionId, question.theme) : null;
+
+  let fallback = question.questionOuverte;
 
   if (analysis.intent === "clarification_request") {
-    return `Je reformule simplement. Sur "${question.theme}", quel est aujourd’hui le problème concret observé, qui est impliqué, et comment ce sujet est-il réellement piloté ?${anchor}`;
-  }
-
-  if (analysis.shouldPivotAngle && analysis.suggestedAngle) {
-    return buildAngleQuestion({
+    fallback = `Je reformule simplement. Sur "${question.theme}", quel est aujourd’hui le problème concret observé, qui est impliqué, et comment ce sujet est-il réellement piloté ?${anchor}`;
+  } else if (analysis.shouldPivotAngle && analysis.suggestedAngle) {
+    fallback = buildAngleQuestion({
       theme: question.theme,
       angle: analysis.suggestedAngle,
       iteration,
       anchor,
     });
-  }
-
-  if (analysis.intent === "challenge") {
+  } else if (analysis.intent === "challenge") {
     const fallbackAngle = analysis.suggestedAngle ?? currentAngle ?? "mechanism";
-    return `Vous contestez le postulat initial. Reprenons donc "${question.theme}" sans présupposé : ${buildAngleQuestion({
+    fallback = `Vous contestez le postulat initial. Reprenons donc "${question.theme}" sans présupposé : ${buildAngleQuestion({
       theme: question.theme,
       angle: fallbackAngle,
       iteration,
       anchor: "",
     })}${anchor}`;
-  }
-
-  if (analysis.intent === "noise") {
+  } else if (analysis.intent === "noise") {
     if (coverage?.confirmedAngles.includes("mechanism")) {
-      return `Restons sur "${question.theme}". Donnez-moi un exemple précis, récent et observable qui montre où le sujet se dérègle réellement aujourd’hui.${anchor}`;
+      fallback = `Restons sur "${question.theme}". Donnez-moi un exemple précis, récent et observable qui montre où le sujet se dérègle réellement aujourd’hui.${anchor}`;
+    } else {
+      fallback = `Restons sur "${question.theme}". Décrivez-moi un cas concret, récent, vécu, qui montre comment le sujet fonctionne réellement aujourd’hui.${anchor}`;
     }
-
-    return `Restons sur "${question.theme}". Décrivez-moi un cas concret, récent, vécu, qui montre comment le sujet fonctionne réellement aujourd’hui.${anchor}`;
+  } else {
+    const rewritten = buildRephrasedQuestionFromAnalysis({
+      analysis,
+      currentQuestion: {
+        theme: question.theme,
+        constat: question.constat,
+        questionOuverte: question.questionOuverte,
+        entryAngle: analysis.suggestedAngle ?? currentAngle,
+      },
+    });
+    fallback = normalizeText(rewritten) || question.questionOuverte;
   }
 
-  const rewritten = buildRephrasedQuestionFromAnalysis({
-    analysis,
-    currentQuestion: {
-      theme: question.theme,
-      constat: question.constat,
-      questionOuverte: question.questionOuverte,
-      entryAngle: analysis.suggestedAngle ?? currentAngle,
-    },
-  });
+  if (dimensionId == null || iteration == null) {
+    return fallback;
+  }
 
-  return normalizeText(rewritten) || question.questionOuverte;
+  return composeQuestionWithLlm({
+    dimensionId,
+    iteration,
+    signal:{
+      id: question.signalId,
+      dimensionId,
+      theme: question.theme,
+      signalKind: "explicit",
+      sourceType: "user_answer",
+      sourceSection: null,
+      sourceExcerpt: question.questionOuverte,
+      constat: question.constat,
+      managerialRisk: question.risqueManagerial,
+      probableConsequence: "La reformulation doit aider à produire une réponse exploitable sans reposer la même question.",
+      entryAngle: analysis.suggestedAngle ?? currentAngle ?? "mechanism",
+      confidenceScore: 70,
+      criticalityScore: 70,
+    },
+    fallbackQuestion: fallback,
+    extractedFacts: (session.analysisMemory ?? [])
+      .filter((item) => item.theme === question.theme && item.isUsableBusinessMatter)
+      .flatMap((item) => item.extractedFacts ?? [])
+      .slice(-3),
+    coveredAngles: coverage?.confirmedAngles ?? [],
+    rejectedAngles: coverage?.rejectedAngles ?? [],
+    lastQuestionText: question.questionOuverte,
+    rewriteReason: analysis.intent,
+  });
 }
