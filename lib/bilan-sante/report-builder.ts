@@ -1,5 +1,3 @@
-// lib/bilan-sante/report-builder.ts
-
 import { dimensionTitle } from "@/lib/bilan-sante/protocol";
 import {
   assertComplianceOrThrow,
@@ -113,10 +111,57 @@ export type StandardDiagnosticReport = {
   };
 };
 
+export type PreviewSection = {
+  id: string;
+  title: string;
+  paragraphs?: string[];
+  bullets?: string[];
+  tables?: Array<{
+    title?: string;
+    headers: string[];
+    rows: string[][];
+  }>;
+};
+
+export type PreviewDiagnosticReport = {
+  title: string;
+  generatedAt: string;
+  sections: PreviewSection[];
+};
+
 type BuildReportOptions = {
   companyLabel?: string;
   dirigeantLabel?: string;
 };
+
+function normalizeText(value: string | null | undefined): string {
+  return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
+function nonEmpty(values: Array<string | null | undefined>): string[] {
+  return values.map((value) => normalizeText(value)).filter(Boolean);
+}
+
+function truncate(value: string, max = 240): string {
+  const text = normalizeText(value);
+  if (text.length <= max) return text;
+  return `${text.slice(0, max - 1).trim()}…`;
+}
+
+function escapeXml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function sentenceList(values: string[]): string {
+  const cleaned = nonEmpty(values);
+  if (cleaned.length === 0) return "Aucun élément consolidé disponible à ce stade.";
+  return cleaned.map((item) => item.endsWith(".") ? item : `${item}.`).join(" ");
+}
 
 function getFrozenDimensions(
   session: Pick<DiagnosticSessionAggregate, "frozenDimensions">
@@ -472,4 +517,343 @@ export function buildStandardDiagnosticReport(
     confidentiality: buildConfidentialitySection(),
     complianceChecklist: buildChecklist(compliance),
   };
+}
+
+function zoneRowsToPreviewTable(zoneTables: Array<{ title: string; rows: VisibleTableRow[] }>) {
+  return zoneTables.map((table) => ({
+    title: table.title,
+    headers: ["Champ", "Contenu"],
+    rows: table.rows.map((row) => [row.label, row.value]),
+  }));
+}
+
+function swotToPreviewTable(swot: SwotTable) {
+  return {
+    headers: ["Forces", "Faiblesses", "Opportunités", "Risques"],
+    rows: Array.from({ length: Math.max(swot.forces.length, swot.faiblesses.length, swot.opportunites.length, swot.risques.length) }).map((_, index) => [
+      swot.forces[index] ?? "",
+      swot.faiblesses[index] ?? "",
+      swot.opportunites[index] ?? "",
+      swot.risques[index] ?? "",
+    ]),
+  };
+}
+
+export function buildPreviewDiagnosticReport(report: StandardDiagnosticReport): PreviewDiagnosticReport {
+  const sections: PreviewSection[] = [];
+
+  sections.push({
+    id: "identification",
+    title: "1. Page d’identification",
+    bullets: [
+      `Entreprise : ${report.identificationPage.companyLabel}`,
+      `Dirigeant : ${report.identificationPage.dirigeantLabel}`,
+      `Date de génération : ${report.identificationPage.generatedAt}`,
+      `Session : ${report.identificationPage.sessionId}`,
+    ],
+    paragraphs: [report.identificationPage.note],
+  });
+
+  sections.push({
+    id: "executive-summary",
+    title: "2. Synthèse exécutive (Page 0)",
+    paragraphs: [report.executiveSummaryPage0.synthesis],
+    bullets: [
+      `Score global : ${report.executiveSummaryPage0.globalScore}/5`,
+      `Niveau global : ${report.executiveSummaryPage0.globalLevel}`,
+      `Enjeu majeur : ${report.executiveSummaryPage0.majorIssue}`,
+    ],
+    tables: [
+      {
+        title: "Constats structurants et vulnérabilités",
+        headers: ["Forces / constats structurants", "Vulnérabilités / expositions"],
+        rows: Array.from({
+          length: Math.max(
+            report.executiveSummaryPage0.keyStrengths.length,
+            report.executiveSummaryPage0.keyVulnerabilities.length
+          ),
+        }).map((_, index) => [
+          report.executiveSummaryPage0.keyStrengths[index] ?? "",
+          report.executiveSummaryPage0.keyVulnerabilities[index] ?? "",
+        ]),
+      },
+      {
+        title: "Objectifs structurants proposés",
+        headers: ["Objectif"],
+        rows: report.executiveSummaryPage0.priorityObjectives.map((item) => [item]),
+      },
+    ],
+  });
+
+  sections.push({
+    id: "input-history",
+    title: "3. Historique & données d’entrée",
+    bullets: report.inputHistory.inputRules,
+    tables: [
+      {
+        title: "Qualité de trame",
+        headers: ["Flags qualité", "Champs non suivis / absents"],
+        rows: Array.from({
+          length: Math.max(
+            report.inputHistory.trameQualityFlags.length || 1,
+            report.inputHistory.missingFieldSignals.length || 1
+          ),
+        }).map((_, index) => [
+          report.inputHistory.trameQualityFlags[index] ?? "",
+          report.inputHistory.missingFieldSignals[index] ?? "",
+        ]),
+      },
+    ],
+  });
+
+  for (const dimension of report.dimensionDiagnostics) {
+    sections.push({
+      id: `dimension-${dimension.dimensionId}`,
+      title: `4.${dimension.dimensionId} ${dimension.title}`,
+      bullets: [`Score : ${dimension.score}/5`, `Cause racine dominante : ${dimension.dominantRootCause}`],
+      paragraphs: [
+        "Constats consolidés",
+        ...dimension.consolidatedFindings.map((finding, index) => `${index + 1}. ${finding}`),
+      ],
+      tables: [
+        ...zoneRowsToPreviewTable(dimension.unmanagedZoneTables),
+        {
+          title: "SWOT",
+          headers: swotToPreviewTable(dimension.swot).headers,
+          rows: swotToPreviewTable(dimension.swot).rows,
+        },
+      ],
+    });
+  }
+
+  sections.push({
+    id: "transverse-zones",
+    title: "5. Synthèse transverse des zones non pilotées",
+    tables: report.transverseUnmanagedZones.tables.map((table) => ({
+      title: table.title,
+      headers: ["Champ", "Contenu"],
+      rows: table.rows.map((row) => [row.label, row.value]),
+    })),
+  });
+
+  sections.push({
+    id: "action-plan",
+    title: "6. Plan d’actions — objectifs orientés résultats",
+    tables: report.actionPlanCards.cards.map((card) => ({
+      title: card.title,
+      headers: ["Champ", "Contenu"],
+      rows: card.rows.map((row) => [row.label, row.value]),
+    })),
+  });
+
+  sections.push({
+    id: "leader-conclusion",
+    title: "7. Conclusion dirigeant — enjeux, impacts, cohérence globale",
+    paragraphs: [report.leaderConclusion.closingStatement],
+    tables: [
+      {
+        title: "Lecture transverse",
+        headers: ["Alignements", "Désalignements", "Contradictions", "Impacts globaux"],
+        rows: Array.from({
+          length: Math.max(
+            report.leaderConclusion.alignments.length || 1,
+            report.leaderConclusion.misalignments.length || 1,
+            report.leaderConclusion.contradictions.length || 1,
+            report.leaderConclusion.globalImpacts.length || 1
+          ),
+        }).map((_, index) => [
+          report.leaderConclusion.alignments[index] ?? "",
+          report.leaderConclusion.misalignments[index] ?? "",
+          report.leaderConclusion.contradictions[index] ?? "",
+          report.leaderConclusion.globalImpacts[index] ?? "",
+        ]),
+      },
+    ],
+  });
+
+  sections.push({
+    id: "confidentiality",
+    title: "8. Confidentialité & anonymisation",
+    bullets: report.confidentiality.rules,
+  });
+
+  sections.push({
+    id: "compliance",
+    title: "9. Checklist de conformité finale",
+    bullets: [
+      `Conforme : ${report.complianceChecklist.isCompliant ? "oui" : "non"}`,
+      ...report.complianceChecklist.summary,
+      ...report.complianceChecklist.warnings,
+    ],
+  });
+
+  return {
+    title: report.title,
+    generatedAt: report.generatedAt,
+    sections,
+  };
+}
+
+export function buildPlainTextDiagnosticReport(report: StandardDiagnosticReport): string {
+  const lines: string[] = [];
+  const push = (value = "") => lines.push(value);
+
+  push(report.title);
+  push("");
+  push("1. Page d’identification");
+  push(`Entreprise : ${report.identificationPage.companyLabel}`);
+  push(`Dirigeant : ${report.identificationPage.dirigeantLabel}`);
+  push(`Date : ${report.identificationPage.generatedAt}`);
+  push(`Session : ${report.identificationPage.sessionId}`);
+  push(report.identificationPage.note);
+  push("");
+
+  push("2. Synthèse exécutive (Page 0)");
+  push(report.executiveSummaryPage0.synthesis);
+  push(`Score global : ${report.executiveSummaryPage0.globalScore}/5`);
+  push(`Niveau global : ${report.executiveSummaryPage0.globalLevel}`);
+  push(`Enjeu majeur : ${report.executiveSummaryPage0.majorIssue}`);
+  push("Principaux constats structurants :");
+  report.executiveSummaryPage0.keyStrengths.forEach((item) => push(`- ${item}`));
+  push("Zones critiques / vulnérabilités :");
+  report.executiveSummaryPage0.keyVulnerabilities.forEach((item) => push(`- ${item}`));
+  push("Trajectoire de transformation proposée :");
+  report.executiveSummaryPage0.priorityObjectives.forEach((item) => push(`- ${item}`));
+  push("");
+
+  push("3. Historique & données d’entrée");
+  report.inputHistory.inputRules.forEach((item) => push(`- ${item}`));
+  if (report.inputHistory.trameQualityFlags.length > 0) {
+    push("Flags qualité de trame :");
+    report.inputHistory.trameQualityFlags.forEach((item) => push(`- ${item}`));
+  }
+  if (report.inputHistory.missingFieldSignals.length > 0) {
+    push("Champs non suivis / non formalisés :");
+    report.inputHistory.missingFieldSignals.forEach((item) => push(`- ${item}`));
+  }
+  push("");
+
+  push("4. Diagnostic par dimension");
+  for (const dimension of report.dimensionDiagnostics) {
+    push(`${dimension.title} — score ${dimension.score}/5`);
+    push("Constats consolidés :");
+    dimension.consolidatedFindings.forEach((item) => push(`- ${item}`));
+    push(`Cause racine dominante : ${dimension.dominantRootCause}`);
+    push("Zones non pilotées / non formalisées :");
+    for (const table of dimension.unmanagedZoneTables) {
+      push(`${table.title}`);
+      table.rows.forEach((row) => push(`- ${row.label} : ${row.value}`));
+    }
+    push("SWOT :");
+    dimension.swot.forces.forEach((item) => push(`- Force : ${item}`));
+    dimension.swot.faiblesses.forEach((item) => push(`- Faiblesse : ${item}`));
+    dimension.swot.opportunites.forEach((item) => push(`- Opportunité : ${item}`));
+    dimension.swot.risques.forEach((item) => push(`- Risque : ${item}`));
+    push("");
+  }
+
+  push("5. Synthèse transverse des zones non pilotées");
+  for (const table of report.transverseUnmanagedZones.tables) {
+    push(table.title);
+    table.rows.forEach((row) => push(`- ${row.label} : ${row.value}`));
+  }
+  push("");
+
+  push("6. Plan d’actions — objectifs orientés résultats");
+  for (const card of report.actionPlanCards.cards) {
+    push(card.title);
+    card.rows.forEach((row) => push(`- ${row.label} : ${row.value}`));
+    push("");
+  }
+
+  push("7. Conclusion dirigeant — enjeux, impacts, cohérence globale");
+  report.leaderConclusion.alignments.forEach((item) => push(`- Alignement : ${item}`));
+  report.leaderConclusion.misalignments.forEach((item) => push(`- Désalignement : ${item}`));
+  report.leaderConclusion.contradictions.forEach((item) => push(`- Contradiction : ${item}`));
+  report.leaderConclusion.globalImpacts.forEach((item) => push(`- Impact global : ${item}`));
+  push(report.leaderConclusion.closingStatement);
+  push("");
+
+  push("8. Confidentialité & anonymisation");
+  report.confidentiality.rules.forEach((item) => push(`- ${item}`));
+  push("");
+
+  push("9. Checklist de conformité finale");
+  push(`Conforme : ${report.complianceChecklist.isCompliant ? "oui" : "non"}`);
+  report.complianceChecklist.summary.forEach((item) => push(`- ${item}`));
+  report.complianceChecklist.warnings.forEach((item) => push(`- ${item}`));
+
+  return lines.join("\n");
+}
+
+export function buildHtmlDiagnosticReport(report: StandardDiagnosticReport): string {
+  const preview = buildPreviewDiagnosticReport(report);
+
+  const sectionHtml = preview.sections
+    .map((section) => {
+      const paragraphs = nonEmpty(section.paragraphs ?? []).map((item) => `<p>${escapeXml(item)}</p>`).join("");
+      const bullets = nonEmpty(section.bullets ?? []).length > 0
+        ? `<ul>${nonEmpty(section.bullets ?? []).map((item) => `<li>${escapeXml(item)}</li>`).join("")}</ul>`
+        : "";
+      const tables = (section.tables ?? [])
+        .map((table) => `
+          <div class="table-block">
+            ${table.title ? `<div class="table-title">${escapeXml(table.title)}</div>` : ""}
+            <table>
+              <thead>
+                <tr>${table.headers.map((header) => `<th>${escapeXml(header)}</th>`).join("")}</tr>
+              </thead>
+              <tbody>
+                ${table.rows
+                  .map(
+                    (row) => `<tr>${row.map((cell) => `<td>${escapeXml(normalizeText(cell) || "—")}</td>`).join("")}</tr>`
+                  )
+                  .join("")}
+              </tbody>
+            </table>
+          </div>
+        `)
+        .join("");
+
+      return `
+        <section class="report-section" id="${escapeXml(section.id)}">
+          <h2>${escapeXml(section.title)}</h2>
+          ${paragraphs}
+          ${bullets}
+          ${tables}
+        </section>
+      `;
+    })
+    .join("");
+
+  return `<!DOCTYPE html>
+  <html lang="fr">
+    <head>
+      <meta charset="utf-8" />
+      <title>${escapeXml(report.title)}</title>
+      <style>
+        body { font-family: Arial, Helvetica, sans-serif; color: #111827; margin: 0; background: #f8fafc; }
+        .page { max-width: 980px; margin: 0 auto; padding: 32px 24px 48px; }
+        h1 { font-size: 28px; margin: 0 0 8px; }
+        .meta { color: #4b5563; margin-bottom: 24px; }
+        .report-section { background: #fff; border: 1px solid #d1d5db; border-radius: 12px; padding: 18px 18px 12px; margin-bottom: 18px; }
+        .report-section h2 { font-size: 20px; margin: 0 0 12px; }
+        p { line-height: 1.55; margin: 0 0 10px; }
+        ul { margin: 0 0 12px 18px; padding: 0; }
+        li { margin: 0 0 6px; line-height: 1.45; }
+        .table-block { margin: 16px 0 18px; }
+        .table-title { font-weight: 700; margin-bottom: 8px; }
+        table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+        th, td { border: 1px solid #d1d5db; padding: 8px 10px; vertical-align: top; text-align: left; font-size: 13px; line-height: 1.35; }
+        th { background: #f3f4f6; }
+      </style>
+    </head>
+    <body>
+      <div class="page">
+        <h1>${escapeXml(report.title)}</h1>
+        <div class="meta">Généré le ${escapeXml(report.generatedAt)}</div>
+        ${sectionHtml}
+      </div>
+    </body>
+  </html>`;
 }

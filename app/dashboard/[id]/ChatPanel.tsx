@@ -58,6 +58,24 @@ type PersistedTurn = {
   total?: number | null;
 };
 
+type PreviewSection = {
+  id: string;
+  title: string;
+  paragraphs?: string[];
+  bullets?: string[];
+  tables?: Array<{
+    title?: string;
+    headers: string[];
+    rows: string[][];
+  }>;
+};
+
+type PreviewDiagnosticReport = {
+  title: string;
+  generatedAt: string;
+  sections: PreviewSection[];
+};
+
 type DisplayMessage =
   | { role: "assistant" | "user" | "system"; text: string; key: string }
   | {
@@ -116,7 +134,10 @@ type ContextApiResponse = {
 
 type BuildReportApiResponse = {
   ok: boolean;
-  report?: unknown;
+  preview?: PreviewDiagnosticReport;
+  html?: string;
+  docxBase64?: string;
+  docxFileName?: string;
   compliance?: { ok: boolean; warnings?: Array<{ code?: string; message?: string } | string>; summary?: string[] };
   blocking_issues?: Array<{ code?: string; message?: string }>;
   warnings?: Array<{ code?: string; message?: string }>;
@@ -233,14 +254,6 @@ function buildPlaceholder(params: { currentQuestion: StructuredQuestion | null; 
   return "Votre réponse...";
 }
 
-function stringifyReportPreview(report: unknown): string {
-  try {
-    return JSON.stringify(report, null, 2);
-  } catch {
-    return "Rapport généré.";
-  }
-}
-
 function buildMessagesFromHistory(turns: PersistedTurn[]): DisplayMessage[] {
   const out: DisplayMessage[] = [];
   for (const turn of turns) {
@@ -265,6 +278,81 @@ function buildMessagesFromHistory(turns: PersistedTurn[]): DisplayMessage[] {
   return out.length > 0 ? out : [{ role: "assistant", key: "initial-assistant", text: initialAssistantMessage() }];
 }
 
+function triggerDocxDownload(base64: string, fileName: string) {
+  const byteCharacters = atob(base64);
+  const byteNumbers = new Array(byteCharacters.length);
+  for (let i = 0; i < byteCharacters.length; i += 1) {
+    byteNumbers[i] = byteCharacters.charCodeAt(i);
+  }
+  const byteArray = new Uint8Array(byteNumbers);
+  const blob = new Blob([byteArray], { type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = fileName;
+  document.body.appendChild(anchor);
+  anchor.click();
+  document.body.removeChild(anchor);
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
+}
+
+function ReportSectionView({ section }: { section: PreviewSection }) {
+  return (
+    <section className="rounded-lg border bg-white p-4 space-y-3">
+      <h3 className="text-base font-semibold text-gray-900">{section.title}</h3>
+      {Array.isArray(section.paragraphs) && section.paragraphs.length > 0 && (
+        <div className="space-y-2 text-sm text-gray-800">
+          {section.paragraphs.map((paragraph, index) => (
+            <p key={`${section.id}-p-${index}`} className="whitespace-pre-line leading-6">
+              {paragraph}
+            </p>
+          ))}
+        </div>
+      )}
+      {Array.isArray(section.bullets) && section.bullets.length > 0 && (
+        <ul className="list-disc pl-5 space-y-1 text-sm text-gray-800">
+          {section.bullets.map((bullet, index) => (
+            <li key={`${section.id}-b-${index}`}>{bullet}</li>
+          ))}
+        </ul>
+      )}
+      {Array.isArray(section.tables) && section.tables.length > 0 && (
+        <div className="space-y-4">
+          {section.tables.map((table, tableIndex) => (
+            <div key={`${section.id}-t-${tableIndex}`} className="rounded-lg border bg-gray-50 p-3">
+              {table.title && <div className="mb-2 text-sm font-medium text-gray-900">{table.title}</div>}
+              <div className="overflow-x-auto">
+                <table className="min-w-full border-collapse text-sm">
+                  <thead>
+                    <tr>
+                      {table.headers.map((header, headerIndex) => (
+                        <th key={`${section.id}-h-${tableIndex}-${headerIndex}`} className="border bg-gray-100 px-3 py-2 text-left font-semibold text-gray-900">
+                          {header}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {table.rows.map((row, rowIndex) => (
+                      <tr key={`${section.id}-r-${tableIndex}-${rowIndex}`}>
+                        {row.map((cell, cellIndex) => (
+                          <td key={`${section.id}-c-${tableIndex}-${rowIndex}-${cellIndex}`} className="border bg-white px-3 py-2 align-top text-gray-800 whitespace-pre-line">
+                            {cell || "—"}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 export default function ChatPanel({ sessionId }: Props) {
   const [messages, setMessages] = useState<DisplayMessage[]>([{ role: "assistant", key: "initial-assistant", text: initialAssistantMessage() }]);
   const [questions, setQuestions] = useState<StructuredQuestion[]>([]);
@@ -277,7 +365,7 @@ export default function ChatPanel({ sessionId }: Props) {
   const [sessionState, setSessionState] = useState<SessionState | null>(null);
   const [finalObjectives, setFinalObjectives] = useState<FinalObjectiveSet | null>(null);
   const [frozenDimensions, setFrozenDimensions] = useState<FrozenDimension[]>([]);
-  const [reportPreview, setReportPreview] = useState<string | null>(null);
+  const [reportPreview, setReportPreview] = useState<PreviewDiagnosticReport | null>(null);
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const didBootstrapRef = useRef(false);
@@ -408,11 +496,17 @@ export default function ChatPanel({ sessionId }: Props) {
         throw new Error([data.error || "Erreur build-report", issues].filter(Boolean).join("\n"));
       }
 
-      pushMessage("assistant", "Le modèle standardisé du rapport a été construit avec succès.");
+      pushMessage("assistant", "Le rapport dirigeant a été structuré et le fichier Word a été généré.");
       if (data.compliance?.summary?.length) {
         pushMessage("system", "Conformité rapport :\n" + data.compliance.summary.join("\n"));
       }
-      setReportPreview(stringifyReportPreview(data.report));
+      setReportPreview(data.preview ?? null);
+
+      if (data.docxBase64 && data.docxFileName) {
+        triggerDocxDownload(data.docxBase64, data.docxFileName);
+      } else {
+        pushMessage("system", "Aucun fichier Word n’a été renvoyé par l’API de construction du rapport.");
+      }
     } catch (e: any) {
       pushMessage("system", "Erreur lors de la construction du rapport : " + (e?.message || "Erreur inconnue"));
     } finally {
@@ -462,7 +556,7 @@ export default function ChatPanel({ sessionId }: Props) {
   useEffect(() => {
     if (!scrollRef.current) return;
     scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-  }, [messages, currentIndex, questions.length, awaitingValidation, loading, finalObjectives, frozenDimensions]);
+  }, [messages, currentIndex, questions.length, awaitingValidation, loading, finalObjectives, frozenDimensions, reportPreview]);
 
   useEffect(() => {
     if (questions.length === 0) return;
@@ -493,76 +587,6 @@ export default function ChatPanel({ sessionId }: Props) {
           </div>
         )}
       </div>
-
-      {frozenDimensions.length > 0 && (
-        <div className="border rounded p-4 bg-white space-y-3">
-          <div className="font-semibold">Dimensions gelées</div>
-          <div className="grid gap-3">
-            {frozenDimensions.slice().sort((a, b) => a.dimensionId - b.dimensionId).map((dim) => (
-              <div key={dim.dimensionId} className="rounded border p-3 bg-gray-50 space-y-3">
-                <div className="flex items-center justify-between gap-4">
-                  <div className="font-medium">{dimensionLabel(dim.dimensionId)}</div>
-                  <div className="text-sm">Score : <strong>{dim.score}/5</strong></div>
-                </div>
-
-                <div className="text-sm space-y-1">
-                  <div className="font-medium">Constats consolidés</div>
-                  <ul className="list-disc pl-5 space-y-1">
-                    {(dim.consolidatedFindings ?? []).filter(Boolean).map((finding, index) => (
-                      <li key={`${dim.dimensionId}-finding-${index}`}>{finding}</li>
-                    ))}
-                  </ul>
-                </div>
-
-                <div className="text-sm">
-                  <div className="font-medium">Cause racine dominante</div>
-                  <div>{dim.dominantRootCause}</div>
-                </div>
-
-                {Array.isArray(dim.unmanagedZones) && dim.unmanagedZones.length > 0 && (
-                  <div className="text-sm space-y-2">
-                    <div className="font-medium">Zones non pilotées</div>
-                    <div className="grid gap-2">
-                      {dim.unmanagedZones.map((zone, index) => (
-                        <div key={`${dim.dimensionId}-zone-${index}`} className="rounded border bg-white p-3 space-y-1">
-                          <div><span className="font-medium">Constat :</span> {zone.constat}</div>
-                          <div><span className="font-medium">Risque :</span> {zone.risqueManagerial}</div>
-                          <div><span className="font-medium">Conséquence :</span> {zone.consequence}</div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {finalObjectives?.objectives?.length ? (
-        <div className="border rounded p-4 bg-white space-y-3">
-          <div className="font-semibold">{finalObjectives.header || "Objectifs finaux"}</div>
-          <div className="grid gap-3">
-            {finalObjectives.objectives.map((objective, index) => (
-              <div key={objective.id} className="rounded border p-3 bg-gray-50 space-y-2">
-                <div className="font-medium">{index + 1}. {objective.objectiveLabel}</div>
-                <div className="text-sm text-gray-700">
-                  <div><span className="font-medium">Dimension :</span> {dimensionLabel(objective.dimensionId)}</div>
-                  <div><span className="font-medium">Indicateur :</span> {objective.keyIndicator}</div>
-                  <div><span className="font-medium">Échéance :</span> {objective.dueDate}</div>
-                  <div><span className="font-medium">Statut :</span> {objective.validationStatus}</div>
-                </div>
-              </div>
-            ))}
-          </div>
-
-          {sessionState?.phase === "final_objectives_validation" && (
-            <div className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-              Validez les objectifs par chat. Vous pouvez répondre simplement <strong>oui</strong>, ou détailler objectif par objectif.
-            </div>
-          )}
-        </div>
-      ) : null}
 
       <div ref={scrollRef} className="border rounded p-4 max-h-[380px] overflow-y-auto space-y-3 bg-white">
         {messages.map((m) => {
@@ -627,7 +651,7 @@ export default function ChatPanel({ sessionId }: Props) {
       {canBuildReport && (
         <div className="border rounded p-4 bg-white space-y-3">
           <div className="font-semibold">Rapport standardisé</div>
-          <div className="text-sm text-gray-700">Le protocole est terminé. Vous pouvez maintenant construire le modèle standardisé du rapport dirigeant.</div>
+          <div className="text-sm text-gray-700">Le protocole est terminé. La construction du rapport génère un aperçu structuré lisible et déclenche le téléchargement du fichier Word.</div>
           <button
             type="button"
             onClick={buildReport}
@@ -640,9 +664,17 @@ export default function ChatPanel({ sessionId }: Props) {
       )}
 
       {reportPreview && (
-        <div className="border rounded p-4 bg-white space-y-2">
-          <div className="font-semibold">Aperçu JSON du rapport</div>
-          <pre className="text-xs overflow-x-auto whitespace-pre-wrap bg-gray-50 p-3 rounded border">{reportPreview}</pre>
+        <div className="border rounded p-4 bg-white space-y-4">
+          <div>
+            <div className="font-semibold">Aperçu structuré du rapport</div>
+            <div className="text-sm text-gray-600">Titre : {reportPreview.title}</div>
+            <div className="text-sm text-gray-600">Généré le : {reportPreview.generatedAt}</div>
+          </div>
+          <div className="space-y-4">
+            {reportPreview.sections.map((section) => (
+              <ReportSectionView key={section.id} section={section} />
+            ))}
+          </div>
         </div>
       )}
 

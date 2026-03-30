@@ -1,9 +1,12 @@
-// app/api/session/[id]/build-report/route.ts
-
 import { NextResponse } from "next/server";
 import { createSupabaseServerClient, adminSupabase } from "@/lib/supabaseServer";
 import { loadAggregate } from "@/lib/bilan-sante/session-repository";
-import { buildStandardDiagnosticReport } from "@/lib/bilan-sante/report-builder";
+import {
+  buildHtmlDiagnosticReport,
+  buildPreviewDiagnosticReport,
+  buildStandardDiagnosticReport,
+} from "@/lib/bilan-sante/report-builder";
+import { buildDiagnosticDocxBuffer } from "@/lib/bilan-sante/report-docx";
 import { runComplianceChecks } from "@/lib/bilan-sante/compliance-checker";
 
 export const runtime = "nodejs";
@@ -101,9 +104,16 @@ export async function POST(
       dirigeantLabel: "Dirigeant (anonymisé)",
     });
 
+    const preview = buildPreviewDiagnosticReport(report);
+    const html = buildHtmlDiagnosticReport(report);
+    const docxBuffer = await buildDiagnosticDocxBuffer(report);
+
     return NextResponse.json({
       ok: true,
-      report,
+      preview,
+      html,
+      docxBase64: docxBuffer.toString("base64"),
+      docxFileName: `Bilan_de_Sante_Rapport_Dirigeant_${sessionId}.docx`,
       compliance: {
         ok: compliance.isCompliant,
         warnings: compliance.warnings,
