@@ -40,6 +40,8 @@ type FrozenDimension = {
     consequence: string;
   }>;
   frozenAt: string;
+  summary?: string;
+  evidenceSummary?: string[];
 };
 
 type PersistedTurn = {
@@ -157,6 +159,10 @@ function clampIndex(index: number, total: number) {
   return Math.max(0, Math.min(index, total - 1));
 }
 
+function normalizeText(value: unknown) {
+  return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
 function normalizeQuestions(value: unknown): StructuredQuestion[] {
   if (!Array.isArray(value)) return [];
   return value
@@ -242,6 +248,20 @@ function dimensionLabel(dimension?: number | string | null) {
 function iterationLabel(iteration?: number | null) {
   if (!iteration) return "n/a";
   return `${iteration}/3`;
+}
+
+function validationStatusLabel(value: FinalObjective["validationStatus"]) {
+  switch (value) {
+    case "validated":
+      return "Validé";
+    case "adjusted":
+      return "Ajusté";
+    case "refused":
+      return "Refusé";
+    case "proposed":
+    default:
+      return "Proposé";
+  }
 }
 
 function buildPlaceholder(params: { currentQuestion: StructuredQuestion | null; awaitingValidation: boolean; phase?: string | null }) {
@@ -353,6 +373,129 @@ function ReportSectionView({ section }: { section: PreviewSection }) {
   );
 }
 
+function FrozenDimensionCard({ dimension }: { dimension: FrozenDimension }) {
+  return (
+    <div className="rounded-lg border bg-white p-4 space-y-4">
+      <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+        <div>
+          <div className="text-sm font-semibold text-gray-900">{dimensionLabel(dimension.dimensionId)}</div>
+          <div className="mt-1 text-xs text-gray-500">Gelée le {dimension.frozenAt}</div>
+        </div>
+        <div className="inline-flex items-center rounded-full bg-gray-100 px-3 py-1 text-sm font-medium text-gray-800">
+          Score : {dimension.score}/5
+        </div>
+      </div>
+
+      {dimension.summary && (
+        <div className="rounded-md border bg-gray-50 p-3 text-sm text-gray-800 leading-6">
+          {dimension.summary}
+        </div>
+      )}
+
+      <div className="space-y-2">
+        <div className="text-sm font-semibold text-gray-900">Constats consolidés</div>
+        <ol className="list-decimal pl-5 space-y-2 text-sm text-gray-800">
+          {dimension.consolidatedFindings.map((item, index) => (
+            <li key={`finding-${dimension.dimensionId}-${index}`} className="leading-6">
+              {item}
+            </li>
+          ))}
+        </ol>
+      </div>
+
+      <div className="rounded-md border bg-amber-50 p-3">
+        <div className="text-sm font-semibold text-amber-900">Cause racine dominante</div>
+        <div className="mt-1 text-sm text-amber-900 leading-6">{dimension.dominantRootCause}</div>
+      </div>
+
+      {Array.isArray(dimension.evidenceSummary) && dimension.evidenceSummary.length > 0 && (
+        <div className="space-y-2">
+          <div className="text-sm font-semibold text-gray-900">Éléments de matière consolidés</div>
+          <ul className="list-disc pl-5 space-y-1 text-sm text-gray-800">
+            {dimension.evidenceSummary.map((item, index) => (
+              <li key={`evidence-${dimension.dimensionId}-${index}`}>{item}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      <div className="space-y-3">
+        <div className="text-sm font-semibold text-gray-900">Zones non pilotées</div>
+        {dimension.unmanagedZones.map((zone, index) => (
+          <div key={`zone-${dimension.dimensionId}-${index}`} className="rounded-md border bg-gray-50 p-3">
+            <div className="mb-2 text-sm font-medium text-gray-900">Zone {index + 1}</div>
+            <div className="grid gap-3 md:grid-cols-3">
+              <div>
+                <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Constat</div>
+                <div className="mt-1 text-sm text-gray-800 leading-6">{zone.constat}</div>
+              </div>
+              <div>
+                <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Risque managérial</div>
+                <div className="mt-1 text-sm text-gray-800 leading-6">{zone.risqueManagerial}</div>
+              </div>
+              <div>
+                <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Conséquence</div>
+                <div className="mt-1 text-sm text-gray-800 leading-6">{zone.consequence}</div>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ObjectiveCardView({ objective }: { objective: FinalObjective }) {
+  return (
+    <div className="rounded-lg border bg-white p-4 space-y-3">
+      <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+        <div>
+          <div className="text-sm font-semibold text-gray-900">{dimensionLabel(objective.dimensionId)}</div>
+          <div className="mt-1 text-base font-medium text-gray-900 leading-6">{objective.objectiveLabel}</div>
+        </div>
+        <div className="inline-flex items-center rounded-full bg-gray-100 px-3 py-1 text-sm font-medium text-gray-800">
+          {validationStatusLabel(objective.validationStatus)}
+        </div>
+      </div>
+
+      <div className="grid gap-3 md:grid-cols-2">
+        <div className="rounded-md border bg-gray-50 p-3">
+          <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Indicateur clé</div>
+          <div className="mt-1 text-sm text-gray-800 leading-6">{objective.keyIndicator}</div>
+        </div>
+        <div className="rounded-md border bg-gray-50 p-3">
+          <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Échéance</div>
+          <div className="mt-1 text-sm text-gray-800 leading-6">{objective.dueDate}</div>
+        </div>
+        <div className="rounded-md border bg-gray-50 p-3">
+          <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Responsable</div>
+          <div className="mt-1 text-sm text-gray-800 leading-6">{objective.owner}</div>
+        </div>
+        <div className="rounded-md border bg-gray-50 p-3">
+          <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Quick win</div>
+          <div className="mt-1 text-sm text-gray-800 leading-6">{objective.quickWin}</div>
+        </div>
+      </div>
+
+      <div className="rounded-md border bg-emerald-50 p-3">
+        <div className="text-xs font-semibold uppercase tracking-wide text-emerald-700">Gain potentiel</div>
+        <div className="mt-1 text-sm text-emerald-900 leading-6">{objective.potentialGain}</div>
+      </div>
+
+      {Array.isArray(objective.gainHypotheses) && objective.gainHypotheses.length > 0 && (
+        <div>
+          <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Hypothèses de gain</div>
+          <ul className="mt-2 list-disc pl-5 space-y-1 text-sm text-gray-800">
+            {objective.gainHypotheses.map((item, index) => (
+              <li key={`hyp-${objective.id}-${index}`}>{item}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function ChatPanel({ sessionId }: Props) {
   const [messages, setMessages] = useState<DisplayMessage[]>([{ role: "assistant", key: "initial-assistant", text: initialAssistantMessage() }]);
   const [questions, setQuestions] = useState<StructuredQuestion[]>([]);
@@ -375,6 +518,16 @@ export default function ChatPanel({ sessionId }: Props) {
     if (sessionState?.phase !== "dimension_iteration") return null;
     return questions[clampIndex(currentIndex, questions.length)] ?? null;
   }, [questions, currentIndex, sessionState?.phase]);
+
+  const sortedFrozenDimensions = useMemo(
+    () => [...frozenDimensions].sort((a, b) => a.dimensionId - b.dimensionId),
+    [frozenDimensions]
+  );
+
+  const sortedObjectives = useMemo(
+    () => [...(finalObjectives?.objectives ?? [])].sort((a, b) => Number(a.dimensionId) - Number(b.dimensionId)),
+    [finalObjectives]
+  );
 
   function pushMessage(role: "assistant" | "user" | "system", text: string) {
     const content = String(text || "").trim();
@@ -587,6 +740,40 @@ export default function ChatPanel({ sessionId }: Props) {
           </div>
         )}
       </div>
+
+      {sortedFrozenDimensions.length > 0 && (
+        <div className="border rounded p-4 bg-white space-y-4">
+          <div>
+            <div className="font-semibold">Dimensions gelées</div>
+            <div className="text-sm text-gray-600">
+              Les constats consolidés, causes racines dominantes et zones non pilotées restent visibles pendant toute la fin du protocole.
+            </div>
+          </div>
+          <div className="grid gap-4">
+            {sortedFrozenDimensions.map((dimension) => (
+              <FrozenDimensionCard key={`frozen-${dimension.dimensionId}`} dimension={dimension} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {sortedObjectives.length > 0 && (
+        <div className="border rounded p-4 bg-white space-y-4">
+          <div>
+            <div className="font-semibold">Objectifs orientés résultats</div>
+            <div className="text-sm text-gray-600">
+              {sessionState?.phase === "final_objectives_validation"
+                ? "Ces objectifs sont proposés au dirigeant pour validation, ajustement ou refus."
+                : "Ces objectifs sont issus des dimensions gelées et restent visibles jusqu’à la construction du rapport."}
+            </div>
+          </div>
+          <div className="grid gap-4">
+            {sortedObjectives.map((objective) => (
+              <ObjectiveCardView key={objective.id} objective={objective} />
+            ))}
+          </div>
+        </div>
+      )}
 
       <div ref={scrollRef} className="border rounded p-4 max-h-[380px] overflow-y-auto space-y-3 bg-white">
         {messages.map((m) => {

@@ -4,6 +4,7 @@ import {
 } from "@/lib/bilan-sante/answer-analyzer";
 import type {
   DiagnosticSessionAggregate,
+  DiagnosticSignal,
   EntryAngle,
   StructuredQuestion,
 } from "@/lib/bilan-sante/session-model";
@@ -38,6 +39,43 @@ function sameTheme(
   right: string | null | undefined
 ): boolean {
   return normalizeForMatch(left) === normalizeForMatch(right);
+}
+
+function uniqueStrings(values: Array<string | null | undefined>, max?: number): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+
+  for (const value of values) {
+    const text = normalizeText(value);
+    if (!text) continue;
+    const key = normalizeForMatch(text);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(text);
+    if (max != null && out.length >= max) break;
+  }
+
+  return out;
+}
+
+function allSignals(session: DiagnosticSessionAggregate): DiagnosticSignal[] {
+  const registry = session.signalRegistry;
+  if (!registry) return [];
+  if ("all" in registry && Array.isArray(registry.all)) return registry.all;
+  if ("allSignals" in registry && Array.isArray(registry.allSignals)) return registry.allSignals;
+  return [
+    ...registry.byDimension.d1,
+    ...registry.byDimension.d2,
+    ...registry.byDimension.d3,
+    ...registry.byDimension.d4,
+  ];
+}
+
+function findSignal(
+  session: DiagnosticSessionAggregate,
+  question: StructuredQuestion
+): DiagnosticSignal | undefined {
+  return allSignals(session).find((item) => item.id === question.signalId);
 }
 
 function latestFactAnchor(
@@ -75,21 +113,21 @@ function buildAngleQuestion(params: {
   switch (angle) {
     case "causality":
       if (iteration === 1) {
-        return `Restons sur "${theme}", mais repartons du bon angle : qu’est-ce qui produit réellement la difficulté aujourd’hui, et qu’est-ce qui l’explique dans le fonctionnement concret ?${anchor}`;
+        return `Restons sur "${theme}", mais repartons du bon angle : qu'est-ce qui produit réellement la difficulté aujourd'hui, et qu'est-ce qui l'explique dans le fonctionnement concret ?${anchor}`;
       }
-      return `Sur "${theme}", si vous remontez à la cause racine, est-ce surtout un sujet de compétences, d’expérience, de décisions prises ou d’organisation mal posée ?${anchor}`;
+      return `Sur "${theme}", si vous remontez à la cause racine, est-ce surtout un sujet de compétences, d'expérience, de décisions prises, d'arbitrages ou d'organisation mal posée ?${anchor}`;
 
     case "arbitration":
-      return `Sur "${theme}", qui arbitre réellement, qui valide, où la décision se bloque-t-elle, et en quoi cette chaîne d’arbitrage entretient-elle la situation actuelle ?${anchor}`;
+      return `Sur "${theme}", qui arbitre réellement, qui valide, où la décision se bloque-t-elle, et en quoi cette chaîne d'arbitrage entretient-elle la situation actuelle ?${anchor}`;
 
     case "economics":
-      return `Sur "${theme}", quel est l’impact économique réellement subi aujourd’hui : marge, coût réel, cash, rentabilité ou sélectivité d’affaires ? Et comment cet impact se matérialise-t-il ?${anchor}`;
+      return `Sur "${theme}", quel est l'impact économique réellement subi aujourd'hui : marge, coût réel, cash, rentabilité ou sélectivité d'affaires ? Et comment cet impact se matérialise-t-il ?${anchor}`;
 
     case "formalization":
-      return `Sur "${theme}", qu’est-ce qui relève surtout d’un manque de cadre, de rôles clairs, de méthode, de rituel ou de pilotage formalisé ?${anchor}`;
+      return `Sur "${theme}", qu'est-ce qui relève surtout d'un manque de cadre, de rôles clairs, de méthode, de rituel ou de pilotage formalisé ?${anchor}`;
 
     case "dependency":
-      return `Sur "${theme}", où se situe la dépendance la plus pénalisante aujourd’hui : une personne clé, un validateur, une ressource rare, un passage obligé ou une zone sans relais ?${anchor}`;
+      return `Sur "${theme}", où se situe la dépendance la plus pénalisante aujourd'hui : une personne clé, un validateur, une ressource rare, un passage obligé ou une zone sans relais ?${anchor}`;
 
     case "mechanism":
     default:
@@ -120,11 +158,12 @@ export async function rewriteQuestionFromAnalysis(params: {
     dimensionId != null
       ? getThemeCoverage(session, dimensionId, question.theme)
       : null;
+  const linkedSignal = findSignal(session, question);
 
   let fallback = question.questionOuverte;
 
   if (analysis.intent === "clarification_request") {
-    fallback = `Je reformule simplement. Sur "${question.theme}", quel est aujourd’hui le problème concret observé, qui est impliqué, et comment ce sujet est-il réellement piloté ?${anchor}`;
+    fallback = `Je reformule simplement. Sur "${question.theme}", quel est aujourd'hui le problème concret observé, qui est impliqué, comment cela fonctionne réellement, et qu'est-ce que cela fait courir comme risque managérial ?${anchor}`;
   } else if (analysis.shouldPivotAngle && analysis.suggestedAngle) {
     fallback = buildAngleQuestion({
       theme: question.theme,
@@ -142,9 +181,9 @@ export async function rewriteQuestionFromAnalysis(params: {
     })}${anchor}`;
   } else if (analysis.intent === "noise") {
     if (coverage?.confirmedAngles.includes("mechanism")) {
-      fallback = `Restons sur "${question.theme}". Donnez-moi un exemple précis, récent et observable qui montre où le sujet se dérègle réellement aujourd’hui.${anchor}`;
+      fallback = `Restons sur "${question.theme}". Donnez-moi un exemple précis, récent et observable qui montre où le sujet se dérègle réellement aujourd'hui et ce que cela produit concrètement.${anchor}`;
     } else {
-      fallback = `Restons sur "${question.theme}". Décrivez-moi un cas concret, récent, vécu, qui montre comment le sujet fonctionne réellement aujourd’hui.${anchor}`;
+      fallback = `Restons sur "${question.theme}". Décrivez-moi un cas concret, récent, vécu, qui montre comment le sujet fonctionne réellement aujourd'hui, avec quels acteurs et quel point de friction.${anchor}`;
     }
   } else {
     const rewritten = buildRephrasedQuestionFromAnalysis({
@@ -171,14 +210,21 @@ export async function rewriteQuestionFromAnalysis(params: {
     normalizedConstat.includes("insuffisamment etaye") ||
     normalizedConstat.includes("insuffisamment étaye") ||
     normalizedConstat.includes("non documente") ||
-    normalizedConstat.includes("non documente");
+    normalizedConstat.includes("non documenté");
 
-  const extractedFacts = (session.analysisMemory ?? [])
-    .filter(
-      (item) => sameTheme(item.theme, question.theme) && item.isUsableBusinessMatter
-    )
-    .flatMap((item) => item.extractedFacts ?? [])
-    .slice(-3);
+  const extractedFacts = uniqueStrings(
+    [
+      ...(session.analysisMemory ?? [])
+        .filter(
+          (item) =>
+            sameTheme(item.theme, question.theme) &&
+            item.isUsableBusinessMatter
+        )
+        .flatMap((item) => item.extractedFacts ?? []),
+      analysis.summary,
+    ],
+    4
+  );
 
   const llmQuestion = await composeQuestionWithLlm({
     dimensionId,
@@ -187,8 +233,8 @@ export async function rewriteQuestionFromAnalysis(params: {
     theme: question.theme,
     constat: question.constat,
     managerialRisk: question.risqueManagerial,
-    entryAngle: analysis.suggestedAngle ?? currentAngle ?? "mechanism",
-    trameEvidence: question.constat,
+    entryAngle: analysis.suggestedAngle ?? currentAngle ?? linkedSignal?.entryAngle ?? "mechanism",
+    trameEvidence: linkedSignal?.sourceExcerpt ?? linkedSignal?.constat ?? question.constat,
     extractedFacts,
     coveredAngles: coverage?.confirmedAngles ?? [],
     rejectedAngles: coverage?.rejectedAngles ?? [],

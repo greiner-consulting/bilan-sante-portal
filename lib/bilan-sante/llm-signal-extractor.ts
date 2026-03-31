@@ -124,6 +124,9 @@ function buildPrompt(params: { dimensionId: DimensionId; snapshot: BaseTrameSnap
     "Quand la matière est faible mais exploitable, préfère produire un explicitSignal avec evidenceNature='illustrative' ou 'unclear' plutôt que classer trop vite le thème dans uncoveredThemes.",
     "Réserve uncoveredThemes aux cas où la matière est vraiment insuffisante ou trop ambiguë.",
     "",
+    "Si un même thème fait ressortir DEUX mécanismes réellement distincts (par exemple arbitrage + dépendance, ou pratique réelle + risque économique), tu peux retourner jusqu'à 2 explicitSignals pour ce même thème, à condition qu'ils s'appuient sur des extraits ou angles clairement différents.",
+    "N'utilise pas cette possibilité pour paraphraser deux fois la même idée.",
+    "",
     "Définitions obligatoires :",
     '- evidenceNature="structural" : preuve claire d’un fonctionnement durable, d’une faiblesse structurelle, d’une absence de pilotage, d’un arbitrage, d’une dépendance ou d’une pratique récurrente',
     '- evidenceNature="illustrative" : exemple convergent utile, insuffisant seul mais suffisamment relié au thème pour ouvrir une question robuste',
@@ -173,6 +176,7 @@ function buildPrompt(params: { dimensionId: DimensionId; snapshot: BaseTrameSnap
     "- sourceExcerpt doit être extrait du texte, pas inventé",
     "- si un extrait est seulement partiellement convergent, tu peux quand même créer un explicitSignal si whyRelevant explique clairement le lien métier",
     "- ne bascule pas trop vite en uncoveredThemes",
+    "- quand tu déclares uncoveredThemes, explique clairement POURQUOI la matière n'est pas suffisante malgré la recherche indirecte",
     "- répondre STRICTEMENT en JSON, sans aucun texte hors JSON",
     "",
     `DIMENSION : ${params.dimensionId} — ${dimensionTitle(params.dimensionId)}`,
@@ -319,7 +323,7 @@ export async function extractSignalsForDimensionWithLlm(params: {
   try {
     const response = await client.chat.completions.create({
       model: llmModel(),
-      temperature: 0.1,
+      temperature: 0.15,
       response_format: { type: "json_object" },
       messages: [
         {

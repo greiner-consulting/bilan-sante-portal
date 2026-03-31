@@ -89,6 +89,9 @@ const MIN_EXPLICIT_SCORE = 32;
 const STRONG_EXPLICIT_SCORE = 42;
 const SECTION_REUSE_PENALTY = 18;
 const GENERIC_REUSE_EXTRA_PENALTY = 10;
+const MAX_EXPLICIT_SIGNALS_PER_THEME = 2;
+const SECONDARY_DETERMINISTIC_GAP = 14;
+const SECONDARY_LLM_RATIO = 0.72;
 
 const LOG_PREFIX = "[BilanSante][SignalExtraction]";
 
@@ -508,7 +511,7 @@ function makeSignalId(
     .normalize("NFD")
     .replace(/[^\w\s-]/g, "")
     .replace(/\s+/g, "-")
-    .slice(0, 60);
+    .slice(0, 70);
 
   return `sig-d${dimensionId}-${slug}`;
 }
@@ -717,7 +720,7 @@ function buildManagerialRisk(
   entryAngle?: DiagnosticSignal["entryAngle"]
 ): string {
   if (isAbsence) {
-    return `Le thème "${theme}" apparaît non suivi ou non documenté, ce qui expose l’entreprise à un pilotage managérial insuffisamment fondé.`;
+    return `Le thème "${theme}" apparaît insuffisamment objectivé ou non suivi, ce qui expose l’entreprise à un pilotage managérial insuffisamment fondé.`;
   }
 
   switch (entryAngle) {
@@ -939,30 +942,54 @@ function adjustedCandidateScore(
   return candidate.score - penalty;
 }
 
-function selectCandidateForTheme(
+function sameDeterministicIdea(left: ThemeCandidate, right: ThemeCandidate): boolean {
+  return (
+    left.section.id === right.section.id &&
+    left.entryAngle === right.entryAngle &&
+    normalizeText(left.excerpt) === normalizeText(right.excerpt)
+  );
+}
+
+function selectCandidatesForTheme(
   candidates: ThemeCandidate[],
   usageBySection: Map<string, number>
-): ThemeCandidate | null {
-  let selected: ThemeCandidate | null = null;
-  let selectedAdjustedScore = Number.NEGATIVE_INFINITY;
+): ThemeCandidate[] {
+  if (candidates.length === 0) return [];
 
-  for (const candidate of candidates) {
-    const adjusted = adjustedCandidateScore(candidate, usageBySection);
+  const adjusted = candidates
+    .map((candidate) => ({
+      candidate,
+      adjustedScore: adjustedCandidateScore(candidate, usageBySection),
+    }))
+    .sort((a, b) => b.adjustedScore - a.adjustedScore);
 
-    if (adjusted > selectedAdjustedScore) {
-      selected = candidate;
-      selectedAdjustedScore = adjusted;
-    }
+  const primary = adjusted[0];
+  if (!primary) return [];
+
+  const selected: ThemeCandidate[] = [];
+  if (primary.adjustedScore >= MIN_EXPLICIT_SCORE || primary.candidate.score >= STRONG_EXPLICIT_SCORE) {
+    selected.push(primary.candidate);
   }
 
-  if (selected && selectedAdjustedScore >= MIN_EXPLICIT_SCORE) {
-    return selected;
+  if (selected.length === 0) return [];
+
+  const secondary = adjusted.find(({ candidate, adjustedScore }) => {
+    if (selected.length >= MAX_EXPLICIT_SIGNALS_PER_THEME) return false;
+    if (sameDeterministicIdea(selected[0], candidate)) return false;
+    const distinctSection = selected[0].section.id !== candidate.section.id;
+    const distinctAngle = selected[0].entryAngle !== candidate.entryAngle;
+    if (!distinctSection && !distinctAngle) return false;
+    return (
+      adjustedScore >= Math.max(MIN_EXPLICIT_SCORE - 2, primary.adjustedScore - SECONDARY_DETERMINISTIC_GAP) ||
+      candidate.score >= STRONG_EXPLICIT_SCORE + 4
+    );
+  });
+
+  if (secondary) {
+    selected.push(secondary.candidate);
   }
 
-  const strongFallback = candidates.find(
-    (candidate) => candidate.score >= STRONG_EXPLICIT_SCORE
-  );
-  return strongFallback ?? null;
+  return selected;
 }
 
 function buildExplicitSignalsDeterministic(snapshot: BaseTrameSnapshot): DiagnosticSignal[] {
@@ -999,29 +1026,31 @@ function buildExplicitSignalsDeterministic(snapshot: BaseTrameSnapshot): Diagnos
     const usageBySection = new Map<string, number>();
 
     for (const bucket of themeBuckets) {
-      const selected = selectCandidateForTheme(bucket.candidates, usageBySection);
-      if (!selected) continue;
+      const selectedCandidates = selectCandidatesForTheme(bucket.candidates, usageBySection);
+      if (selectedCandidates.length === 0) continue;
 
-      usageBySection.set(
-        selected.section.id,
-        (usageBySection.get(selected.section.id) ?? 0) + 1
-      );
+      for (const selected of selectedCandidates) {
+        usageBySection.set(
+          selected.section.id,
+          (usageBySection.get(selected.section.id) ?? 0) + 1
+        );
 
-      signals.push({
-        id: makeSignalId(dimension.id, bucket.theme, selected.section.id, runningIndex++),
-        dimensionId: dimension.id,
-        theme: bucket.theme,
-        signalKind: "explicit",
-        sourceType: "trame",
-        sourceSection: selected.section.id,
-        sourceExcerpt: selected.excerpt || "",
-        constat: selected.constat,
-        managerialRisk: buildManagerialRisk(bucket.theme, false, selected.entryAngle),
-        probableConsequence: buildProbableConsequence(bucket.theme),
-        entryAngle: selected.entryAngle,
-        confidenceScore: scoreConfidenceFromCandidate(selected),
-        criticalityScore: scoreCriticality(bucket.theme, false, selected.entryAngle),
-      });
+        signals.push({
+          id: makeSignalId(dimension.id, bucket.theme, `${selected.section.id}-${selected.entryAngle}`, runningIndex++),
+          dimensionId: dimension.id,
+          theme: bucket.theme,
+          signalKind: "explicit",
+          sourceType: "trame",
+          sourceSection: selected.section.id,
+          sourceExcerpt: selected.excerpt || "",
+          constat: selected.constat,
+          managerialRisk: buildManagerialRisk(bucket.theme, false, selected.entryAngle),
+          probableConsequence: buildProbableConsequence(bucket.theme),
+          entryAngle: selected.entryAngle,
+          confidenceScore: scoreConfidenceFromCandidate(selected),
+          criticalityScore: scoreCriticality(bucket.theme, false, selected.entryAngle),
+        });
+      }
     }
   }
 
@@ -1064,6 +1093,26 @@ function findBestMissingFieldHit(
   return candidates[0]?.field;
 }
 
+function buildAbsenceConstat(theme: string, llmMissing?: { reason: LlmUncoveredTheme["reason"]; whyMissing: string }, missingFieldHit?: MissingField): string {
+  if (llmMissing?.reason === "only_illustrative" || llmMissing?.reason === "too_weak") {
+    return `Le thème "${theme}" reste insuffisamment consolidé dans la trame : la matière disponible existe mais demeure trop partielle pour établir un pilotage clairement objectivé.`;
+  }
+
+  if (llmMissing?.reason === "not_enough_material") {
+    return `Le thème "${theme}" apparaît encore trop peu documenté dans la trame pour établir un signal managérial suffisamment robuste.`;
+  }
+
+  if (llmMissing) {
+    return `Le thème "${theme}" ressort comme insuffisamment étayé dans la trame (${llmMissing.reason}).`;
+  }
+
+  if (missingFieldHit) {
+    return `Le thème "${theme}" ressort comme absent, incomplet ou insuffisamment documenté dans la trame, notamment via le champ "${missingFieldHit.label}".`;
+  }
+
+  return `Le thème "${theme}" est absent, peu documenté ou insuffisamment suivi dans la trame.`;
+}
+
 function buildAbsenceSignals(
   snapshot: BaseTrameSnapshot,
   explicitSignals: DiagnosticSignal[],
@@ -1099,11 +1148,7 @@ function buildAbsenceSignals(
         normalizeExtractionText(missingFieldHit?.sourceText) ||
         `Aucun signal suffisamment explicite trouvé dans la trame sur le thème "${theme}".`;
 
-      const constat = llmMissing
-        ? `Le thème "${theme}" ressort comme insuffisamment étayé dans la trame (${llmMissing.reason}).`
-        : missingFieldHit
-          ? `Le thème "${theme}" ressort comme absent, incomplet ou insuffisamment documenté dans la trame, notamment via le champ "${missingFieldHit.label}".`
-          : `Le thème "${theme}" est absent, peu documenté ou insuffisamment suivi dans la trame.`;
+      const constat = buildAbsenceConstat(theme, llmMissing, missingFieldHit);
 
       results.push({
         id: makeSignalId(dimension.id, theme, "absence", runningIndex++),
@@ -1140,6 +1185,7 @@ function dedupeSignals(signals: DiagnosticSignal[]): DiagnosticSignal[] {
       normalizeText(signal.theme),
       signal.signalKind,
       String(signal.sourceSection ?? "none").toLowerCase(),
+      signal.entryAngle,
       normalizeText(String(signal.sourceExcerpt ?? "")),
     ].join("|");
 
@@ -1293,19 +1339,44 @@ function adjustedLlmCandidateScore(
   return llmCandidateBaseScore(candidate) - penalty;
 }
 
-function selectLlmCandidateForTheme(
+function sameLlmIdea(left: LlmAcceptedCandidate, right: LlmAcceptedCandidate): boolean {
+  return (
+    left.section.id === right.section.id &&
+    left.entryAngle === right.entryAngle &&
+    normalizeText(left.sourceExcerpt) === normalizeText(right.sourceExcerpt)
+  );
+}
+
+function selectLlmCandidatesForTheme(
   candidates: LlmAcceptedCandidate[],
   usageBySection: Map<string, number>
-): LlmAcceptedCandidate | null {
-  let selected: LlmAcceptedCandidate | null = null;
-  let bestScore = Number.NEGATIVE_INFINITY;
+): LlmAcceptedCandidate[] {
+  if (candidates.length === 0) return [];
 
-  for (const candidate of candidates) {
-    const score = adjustedLlmCandidateScore(candidate, usageBySection);
-    if (score > bestScore) {
-      bestScore = score;
-      selected = candidate;
-    }
+  const ranked = candidates
+    .map((candidate) => ({
+      candidate,
+      score: adjustedLlmCandidateScore(candidate, usageBySection),
+      base: llmCandidateBaseScore(candidate),
+    }))
+    .sort((a, b) => b.score - a.score);
+
+  const primary = ranked[0];
+  if (!primary) return [];
+
+  const selected: LlmAcceptedCandidate[] = [primary.candidate];
+
+  const secondary = ranked.find(({ candidate, score, base }) => {
+    if (selected.length >= MAX_EXPLICIT_SIGNALS_PER_THEME) return false;
+    if (sameLlmIdea(primary.candidate, candidate)) return false;
+    const distinctSection = primary.candidate.section.id !== candidate.section.id;
+    const distinctAngle = primary.candidate.entryAngle !== candidate.entryAngle;
+    if (!distinctSection && !distinctAngle) return false;
+    return score >= primary.score * SECONDARY_LLM_RATIO || base >= primary.base * SECONDARY_LLM_RATIO;
+  });
+
+  if (secondary) {
+    selected.push(secondary.candidate);
   }
 
   return selected;
@@ -1368,40 +1439,42 @@ function buildExplicitSignalsFromLlm(params: {
   let runningIndex = 1;
 
   for (const bucket of orderedBuckets) {
-    const selected = selectLlmCandidateForTheme(bucket.candidates, usageBySection);
-    if (!selected) continue;
+    const selectedCandidates = selectLlmCandidatesForTheme(bucket.candidates, usageBySection);
+    if (selectedCandidates.length === 0) continue;
 
-    usageBySection.set(
-      selected.section.id,
-      (usageBySection.get(selected.section.id) ?? 0) + 1
-    );
-
-    explicitSignals.push({
-      id: makeSignalId(
-        selected.dimensionId,
-        selected.theme,
+    for (const selected of selectedCandidates) {
+      usageBySection.set(
         selected.section.id,
-        runningIndex++
-      ),
-      dimensionId: selected.dimensionId,
-      theme: selected.theme,
-      signalKind: "explicit",
-      sourceType: "trame",
-      sourceSection: selected.section.id,
-      sourceExcerpt: normalizeExtractionText(selected.sourceExcerpt),
-      constat:
-        normalizeExtractionText(selected.constat) ||
-        `La trame fournit un appui exploitable sur le thème "${selected.theme}".`,
-      managerialRisk:
-        normalizeExtractionText(selected.managerialRisk) ||
-        buildManagerialRisk(selected.theme, false, selected.entryAngle),
-      probableConsequence:
-        normalizeExtractionText(selected.probableConsequence) ||
-        buildProbableConsequence(selected.theme),
-      entryAngle: selected.entryAngle,
-      confidenceScore: clamp(Math.max(selected.confidenceScore, 50), 50, 95),
-      criticalityScore: clamp(Math.max(selected.criticalityScore, 60), 60, 95),
-    });
+        (usageBySection.get(selected.section.id) ?? 0) + 1
+      );
+
+      explicitSignals.push({
+        id: makeSignalId(
+          selected.dimensionId,
+          selected.theme,
+          `${selected.section.id}-${selected.entryAngle}`,
+          runningIndex++
+        ),
+        dimensionId: selected.dimensionId,
+        theme: selected.theme,
+        signalKind: "explicit",
+        sourceType: "trame",
+        sourceSection: selected.section.id,
+        sourceExcerpt: normalizeExtractionText(selected.sourceExcerpt),
+        constat:
+          normalizeExtractionText(selected.constat) ||
+          `La trame fournit un appui exploitable sur le thème "${selected.theme}".`,
+        managerialRisk:
+          normalizeExtractionText(selected.managerialRisk) ||
+          buildManagerialRisk(selected.theme, false, selected.entryAngle),
+        probableConsequence:
+          normalizeExtractionText(selected.probableConsequence) ||
+          buildProbableConsequence(selected.theme),
+        entryAngle: selected.entryAngle,
+        confidenceScore: clamp(Math.max(selected.confidenceScore, 50), 50, 95),
+        criticalityScore: clamp(Math.max(selected.criticalityScore, 60), 60, 95),
+      });
+    }
   }
 
   return dedupeSignals(explicitSignals);
@@ -1443,6 +1516,16 @@ function signalThemeKey(signal: DiagnosticSignal): string {
   return `${signal.dimensionId}|${normalizeText(signal.theme)}`;
 }
 
+function signalSignatureKey(signal: DiagnosticSignal): string {
+  return [
+    signal.dimensionId,
+    normalizeText(signal.theme),
+    String(signal.sourceSection ?? "none"),
+    signal.entryAngle,
+    normalizeText(signal.sourceExcerpt),
+  ].join("|");
+}
+
 function mergeExplicitSignalsWithDeterministicRescue(params: {
   llmSignals: DiagnosticSignal[];
   deterministicSignals: DiagnosticSignal[];
@@ -1450,11 +1533,23 @@ function mergeExplicitSignalsWithDeterministicRescue(params: {
   explicitSignals: DiagnosticSignal[];
   rescuedSignals: DiagnosticSignal[];
 } {
-  const llmThemeKeys = new Set(params.llmSignals.map(signalThemeKey));
+  const llmSignatures = new Set(params.llmSignals.map(signalSignatureKey));
+  const themeCounts = new Map<string, number>();
+  for (const signal of params.llmSignals) {
+    const key = signalThemeKey(signal);
+    themeCounts.set(key, (themeCounts.get(key) ?? 0) + 1);
+  }
+
   const rescuedSignals = params.deterministicSignals.filter((signal) => {
     if (signal.signalKind !== "explicit") return false;
     if (signal.confidenceScore < 64) return false;
-    return !llmThemeKeys.has(signalThemeKey(signal));
+    const signature = signalSignatureKey(signal);
+    if (llmSignatures.has(signature)) return false;
+    const themeKey = signalThemeKey(signal);
+    const currentCount = themeCounts.get(themeKey) ?? 0;
+    if (currentCount >= MAX_EXPLICIT_SIGNALS_PER_THEME) return false;
+    themeCounts.set(themeKey, currentCount + 1);
+    return true;
   });
 
   return {

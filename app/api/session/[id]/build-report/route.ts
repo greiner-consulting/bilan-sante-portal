@@ -18,6 +18,14 @@ function isBypass() {
   );
 }
 
+function safeFilePart(value: string): string {
+  return String(value ?? "")
+    .replace(/[^a-zA-Z0-9_-]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 80);
+}
+
 async function getEffectiveUserId(): Promise<string> {
   if (isBypass()) {
     const id = process.env.DEV_BYPASS_USER_ID;
@@ -48,21 +56,21 @@ export async function POST(
 
     const { data: sessionOwner, error: ownerErr } = await admin
       .from("diagnostic_sessions")
-      .select("id, user_id")
+      .select("id, user_id, source_filename")
       .eq("id", sessionId)
       .maybeSingle();
 
     if (ownerErr) {
       return NextResponse.json(
         { ok: false, error: ownerErr.message },
-        { status: 500 }
+        { status: 500, headers: { "Cache-Control": "no-store" } }
       );
     }
 
     if (!sessionOwner) {
       return NextResponse.json(
         { ok: false, error: "Session not found" },
-        { status: 404 }
+        { status: 404, headers: { "Cache-Control": "no-store" } }
       );
     }
 
@@ -72,7 +80,7 @@ export async function POST(
     ) {
       return NextResponse.json(
         { ok: false, error: "Forbidden" },
-        { status: 403 }
+        { status: 403, headers: { "Cache-Control": "no-store" } }
       );
     }
 
@@ -80,7 +88,7 @@ export async function POST(
     if (!loaded.aggregate) {
       return NextResponse.json(
         { ok: false, error: "BILAN_STATE_NOT_FOUND" },
-        { status: 409 }
+        { status: 409, headers: { "Cache-Control": "no-store" } }
       );
     }
 
@@ -95,7 +103,7 @@ export async function POST(
           warnings: compliance.warnings,
           summary: compliance.summary,
         },
-        { status: 422 }
+        { status: 422, headers: { "Cache-Control": "no-store" } }
       );
     }
 
@@ -107,19 +115,23 @@ export async function POST(
     const preview = buildPreviewDiagnosticReport(report);
     const html = buildHtmlDiagnosticReport(report);
     const docxBuffer = await buildDiagnosticDocxBuffer(report);
+    const safeSessionId = safeFilePart(sessionId) || "session";
 
-    return NextResponse.json({
-      ok: true,
-      preview,
-      html,
-      docxBase64: docxBuffer.toString("base64"),
-      docxFileName: `Bilan_de_Sante_Rapport_Dirigeant_${sessionId}.docx`,
-      compliance: {
-        ok: compliance.isCompliant,
-        warnings: compliance.warnings,
-        summary: compliance.summary,
+    return NextResponse.json(
+      {
+        ok: true,
+        preview,
+        html,
+        docxBase64: docxBuffer.toString("base64"),
+        docxFileName: `Bilan_de_Sante_Rapport_Dirigeant_${safeSessionId}.docx`,
+        compliance: {
+          ok: compliance.isCompliant,
+          warnings: compliance.warnings,
+          summary: compliance.summary,
+        },
       },
-    });
+      { headers: { "Cache-Control": "no-store" } }
+    );
   } catch (e: any) {
     const msg = e?.message ?? "Build report error";
     const code = msg === "UNAUTHENTICATED" ? 401 : 500;
@@ -129,7 +141,7 @@ export async function POST(
         ok: false,
         error: msg,
       },
-      { status: code }
+      { status: code, headers: { "Cache-Control": "no-store" } }
     );
   }
 }

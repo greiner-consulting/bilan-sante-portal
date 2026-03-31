@@ -5,6 +5,7 @@ import type {
   FinalObjectiveSet,
   FrozenDimensionDiagnosis,
   ObjectiveSeed,
+  ZoneNonPilotee,
 } from "@/lib/bilan-sante/session-model";
 import { FINAL_OBJECTIVES_HEADER, dimensionTitle } from "@/lib/bilan-sante/protocol";
 
@@ -27,6 +28,13 @@ const DEFAULT_POTENTIAL_GAIN =
 
 function normalizeText(value: unknown): string {
   return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
+function normalizeForMatch(value: unknown): string {
+  return normalizeText(value)
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase();
 }
 
 function normalizeEvidenceSummary(value: unknown): string {
@@ -57,7 +65,60 @@ function uniqueById<T extends { id: string }>(items: T[]): T[] {
 }
 
 function uniqueStrings(items: string[]): string[] {
-  return [...new Set(items.map((item) => normalizeText(item)).filter(Boolean))];
+  const seen = new Set<string>();
+  const out: string[] = [];
+
+  for (const item of items) {
+    const text = normalizeText(item);
+    if (!text) continue;
+    const key = normalizeForMatch(text);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(text);
+  }
+
+  return out;
+}
+
+function extractThemeFromText(value: unknown): string | null {
+  const text = normalizeText(value);
+  if (!text) return null;
+  const match = text.match(/th[èe]me\s*["«]([^"»]+)["»]/i);
+  return match?.[1] ? normalizeText(match[1]) : null;
+}
+
+function firstSentence(value: unknown): string {
+  const text = normalizeText(value);
+  if (!text) return "";
+  const match = text.match(/^(.+?[.!?])(?:\s|$)/);
+  return normalizeText(match?.[1] ?? text);
+}
+
+function dominantZone(frozen: FrozenDimensionDiagnosis): ZoneNonPilotee | null {
+  return frozen.unmanagedZones?.[0] ?? null;
+}
+
+function dominantZoneLabel(frozen: FrozenDimensionDiagnosis): string {
+  const zone = dominantZone(frozen);
+  if (!zone) return "zone non pilotée dominante";
+
+  const theme = extractThemeFromText(zone.constat);
+  if (theme) return theme;
+
+  return truncate(
+    firstSentence(zone.constat)
+      .replace(/^le\s+th[èe]me\s+/i, "")
+      .replace(/^sur\s+le\s+th[èe]me\s+/i, "")
+      .replace(/^la\s+zone\s+/i, "")
+      .trim(),
+    110
+  );
+}
+
+function zoneAnchorText(frozen: FrozenDimensionDiagnosis): string {
+  const zone = dominantZone(frozen);
+  if (!zone) return "";
+  return truncate(firstSentence(zone.constat), 150);
 }
 
 function buildFallbackIndicator(frozen: FrozenDimensionDiagnosis): string {
@@ -115,13 +176,13 @@ function buildFallbackIndicator(frozen: FrozenDimensionDiagnosis): string {
 }
 
 function buildFallbackQuickWin(frozen: FrozenDimensionDiagnosis): string {
-  const mainZone = frozen.unmanagedZones?.[0]?.constat;
-  const mainFinding = frozen.consolidatedFindings?.[0];
+  const zone = dominantZone(frozen);
 
-  if (mainZone && normalizeText(mainZone)) {
-    return `Sécuriser en premier le point : ${truncate(mainZone, 150)}`;
+  if (zone) {
+    return `Dans les 30 jours, nommer un propriétaire et installer un point de revue sur : ${truncate(firstSentence(zone.constat), 150)}`;
   }
 
+  const mainFinding = frozen.consolidatedFindings?.[0];
   if (mainFinding && normalizeText(mainFinding)) {
     return `Sécuriser en premier le point : ${truncate(mainFinding, 150)}`;
   }
@@ -130,7 +191,7 @@ function buildFallbackQuickWin(frozen: FrozenDimensionDiagnosis): string {
 }
 
 function buildFallbackPotentialGain(frozen: FrozenDimensionDiagnosis): string {
-  const mainConsequence = frozen.unmanagedZones?.[0]?.consequence;
+  const mainConsequence = dominantZone(frozen)?.consequence;
 
   if (mainConsequence && normalizeText(mainConsequence)) {
     return `Gain à préciser en validation finale, en lien avec la conséquence prioritaire identifiée : ${truncate(
@@ -142,23 +203,45 @@ function buildFallbackPotentialGain(frozen: FrozenDimensionDiagnosis): string {
   return DEFAULT_POTENTIAL_GAIN;
 }
 
+function seedAnchoringScore(seed: ObjectiveSeed, frozen: FrozenDimensionDiagnosis): number {
+  let score = Number(seed.priorityScore ?? 0);
+  const label = normalizeForMatch(seed.label);
+  const zoneText = normalizeForMatch(zoneAnchorText(frozen));
+  const zoneLabel = normalizeForMatch(dominantZoneLabel(frozen));
+
+  if (zoneLabel && label.includes(zoneLabel)) score += 60;
+  if (zoneText && label && (zoneText.includes(label) || label.includes(zoneText.slice(0, Math.min(zoneText.length, 36))))) {
+    score += 25;
+  }
+
+  if (normalizeText(seed.indicator)) score += 8;
+  if (normalizeText(seed.quickWin)) score += 5;
+
+  return score;
+}
+
 function selectPrimarySeed(frozen: FrozenDimensionDiagnosis): ObjectiveSeed | null {
   const seeds = frozen.objectiveSeeds ?? [];
   if (seeds.length === 0) return null;
 
-  const sorted = [...seeds].sort(
-    (a, b) => (b.priorityScore ?? 0) - (a.priorityScore ?? 0)
-  );
-
+  const sorted = [...seeds].sort((a, b) => seedAnchoringScore(b, frozen) - seedAnchoringScore(a, frozen));
   return sorted[0] ?? null;
 }
 
 function buildObjectiveLabel(frozen: FrozenDimensionDiagnosis): string {
+  const zone = dominantZone(frozen);
   const seed = selectPrimarySeed(frozen);
-  const label = seed?.label ?? "";
+  const label = normalizeText(seed?.label ?? "");
 
-  if (normalizeText(label)) {
+  if (label) {
     return truncate(label, 180);
+  }
+
+  if (zone) {
+    return truncate(
+      `Sous 6 mois, rendre pilotable la zone dominante "${dominantZoneLabel(frozen)}" en traitant le point suivant : ${firstSentence(zone.constat)}`,
+      180
+    );
   }
 
   return `Réduire sous 6 mois l’exposition de la dimension "${dimensionTitle(
@@ -168,9 +251,9 @@ function buildObjectiveLabel(frozen: FrozenDimensionDiagnosis): string {
 
 function buildObjectiveIndicator(frozen: FrozenDimensionDiagnosis): string {
   const seed = selectPrimarySeed(frozen);
-  const indicator = seed?.indicator ?? "";
+  const indicator = normalizeText(seed?.indicator ?? "");
 
-  if (normalizeText(indicator)) {
+  if (indicator) {
     return truncate(indicator, 180);
   }
 
@@ -179,9 +262,9 @@ function buildObjectiveIndicator(frozen: FrozenDimensionDiagnosis): string {
 
 function buildObjectiveDueDate(frozen: FrozenDimensionDiagnosis): string {
   const seed = selectPrimarySeed(frozen);
-  const suggestedDueDate = seed?.suggestedDueDate ?? "";
+  const suggestedDueDate = normalizeText(seed?.suggestedDueDate ?? "");
 
-  if (normalizeText(suggestedDueDate)) {
+  if (suggestedDueDate) {
     return suggestedDueDate;
   }
 
@@ -190,9 +273,9 @@ function buildObjectiveDueDate(frozen: FrozenDimensionDiagnosis): string {
 
 function buildObjectivePotentialGain(frozen: FrozenDimensionDiagnosis): string {
   const seed = selectPrimarySeed(frozen);
-  const potentialGain = seed?.potentialGain ?? "";
+  const potentialGain = normalizeText(seed?.potentialGain ?? "");
 
-  if (normalizeText(potentialGain)) {
+  if (potentialGain) {
     return truncate(potentialGain, 180);
   }
 
@@ -201,9 +284,9 @@ function buildObjectivePotentialGain(frozen: FrozenDimensionDiagnosis): string {
 
 function buildObjectiveQuickWin(frozen: FrozenDimensionDiagnosis): string {
   const seed = selectPrimarySeed(frozen);
-  const quickWin = seed?.quickWin ?? "";
+  const quickWin = normalizeText(seed?.quickWin ?? "");
 
-  if (normalizeText(quickWin)) {
+  if (quickWin) {
     return truncate(quickWin, 180);
   }
 
@@ -212,11 +295,15 @@ function buildObjectiveQuickWin(frozen: FrozenDimensionDiagnosis): string {
 
 function buildGainHypotheses(frozen: FrozenDimensionDiagnosis): string[] {
   const rootCause = normalizeText(frozen.dominantRootCause);
-  const consequence = normalizeText(frozen.unmanagedZones?.[0]?.consequence ?? "");
+  const consequence = normalizeText(dominantZone(frozen)?.consequence ?? "");
+  const zone = normalizeText(dominantZone(frozen)?.constat ?? "");
   const evidence = normalizeEvidenceSummary(frozen.evidenceSummary);
 
   const hypotheses = uniqueStrings([
     "Aucun chiffre précis n’est inventé.",
+    zone
+      ? `Le gain devra d’abord être relié à la zone non pilotée dominante : ${truncate(zone, 160)}`
+      : "",
     consequence
       ? `La fourchette devra être reliée à la conséquence économique probable identifiée : ${truncate(
           consequence,

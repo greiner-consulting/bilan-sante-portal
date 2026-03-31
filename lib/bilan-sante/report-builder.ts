@@ -7,6 +7,7 @@ import type {
   DiagnosticSessionAggregate,
   FinalObjective,
   FrozenDimensionDiagnosis,
+  SwotItem,
   ZoneNonPilotee,
 } from "@/lib/bilan-sante/session-model";
 
@@ -26,8 +27,11 @@ export type DimensionReportSection = {
   dimensionId: number;
   title: string;
   score: number;
+  summary?: string;
   consolidatedFindings: [string, string, string];
   dominantRootCause: string;
+  dominantZoneLabel?: string;
+  evidenceSummary?: string[];
   unmanagedZoneTables: Array<{
     title: string;
     rows: VisibleTableRow[];
@@ -138,8 +142,32 @@ function normalizeText(value: string | null | undefined): string {
   return String(value ?? "").replace(/\s+/g, " ").trim();
 }
 
+function normalizeForMatch(value: string | null | undefined): string {
+  return normalizeText(value)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+}
+
 function nonEmpty(values: Array<string | null | undefined>): string[] {
   return values.map((value) => normalizeText(value)).filter(Boolean);
+}
+
+function uniqueStrings(values: Array<string | null | undefined>, max?: number): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+
+  for (const value of values) {
+    const text = normalizeText(value);
+    if (!text) continue;
+    const key = normalizeForMatch(text);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(text);
+    if (max && out.length >= max) break;
+  }
+
+  return out;
 }
 
 function truncate(value: string, max = 240): string {
@@ -157,24 +185,32 @@ function escapeXml(value: string): string {
     .replace(/'/g, "&apos;");
 }
 
-function sentenceList(values: string[]): string {
-  const cleaned = nonEmpty(values);
-  if (cleaned.length === 0) return "Aucun élément consolidé disponible à ce stade.";
-  return cleaned.map((item) => item.endsWith(".") ? item : `${item}.`).join(" ");
+function validationStatusLabel(value: FinalObjective["validationStatus"]): string {
+  switch (value) {
+    case "validated":
+      return "Validé";
+    case "adjusted":
+      return "Ajusté";
+    case "refused":
+      return "Refusé";
+    case "proposed":
+    default:
+      return "Proposé";
+  }
 }
 
-function getFrozenDimensions(
-  session: Pick<DiagnosticSessionAggregate, "frozenDimensions">
-): FrozenDimensionDiagnosis[] {
-  return Array.isArray(session.frozenDimensions) ? session.frozenDimensions : [];
+function weakestDimension(
+  frozenDimensions: ReadonlyArray<FrozenDimensionDiagnosis>
+): FrozenDimensionDiagnosis | null {
+  if (frozenDimensions.length === 0) return null;
+  return [...frozenDimensions].sort((a, b) => a.score - b.score)[0] ?? null;
 }
 
-function getFinalObjectives(
-  session: Pick<DiagnosticSessionAggregate, "finalObjectives">
-): FinalObjective[] {
-  return Array.isArray(session.finalObjectives?.objectives)
-    ? session.finalObjectives.objectives
-    : [];
+function strongestDimension(
+  frozenDimensions: ReadonlyArray<FrozenDimensionDiagnosis>
+): FrozenDimensionDiagnosis | null {
+  if (frozenDimensions.length === 0) return null;
+  return [...frozenDimensions].sort((a, b) => b.score - a.score)[0] ?? null;
 }
 
 function averageScore(frozenDimensions: ReadonlyArray<FrozenDimensionDiagnosis>): number {
@@ -193,11 +229,100 @@ function globalLevelFromAverage(score: number): string {
   return "Solide";
 }
 
-function weakestDimension(
-  frozenDimensions: ReadonlyArray<FrozenDimensionDiagnosis>
-): FrozenDimensionDiagnosis | null {
-  if (frozenDimensions.length === 0) return null;
-  return [...frozenDimensions].sort((a, b) => a.score - b.score)[0] ?? null;
+function getFrozenDimensions(
+  session: Pick<DiagnosticSessionAggregate, "frozenDimensions">
+): FrozenDimensionDiagnosis[] {
+  return Array.isArray(session.frozenDimensions) ? session.frozenDimensions : [];
+}
+
+function getFinalObjectives(
+  session: Pick<DiagnosticSessionAggregate, "finalObjectives">
+): FinalObjective[] {
+  return Array.isArray(session.finalObjectives?.objectives)
+    ? session.finalObjectives.objectives
+    : [];
+}
+
+function isWeaknessLike(text: string): boolean {
+  const normalized = normalizeForMatch(text);
+  if (!normalized) return false;
+
+  return [
+    "fragil",
+    "insuff",
+    "absence",
+    "non pilote",
+    "non pilot",
+    "non suivi",
+    "non document",
+    "manque",
+    "derive",
+    "deterior",
+    "degradation",
+    "ecart",
+    "risque",
+    "depend",
+    "blocage",
+    "tension",
+    "faible",
+    "defaut",
+  ].some((token) => normalized.includes(token));
+}
+
+function swotLabels(items: SwotItem[] | undefined, max = 3): string[] {
+  if (!Array.isArray(items)) return [];
+  return uniqueStrings(
+    items.flatMap((item) => [item.label, item.detail, item.rationale]),
+    max
+  );
+}
+
+function dominantZone(frozen: FrozenDimensionDiagnosis): ZoneNonPilotee | null {
+  return frozen.unmanagedZones?.[0] ?? frozen.nonPilotedAreas?.[0] ?? null;
+}
+
+function dominantZoneLabel(frozen: FrozenDimensionDiagnosis): string {
+  const zone = dominantZone(frozen);
+  if (!zone) return "Zone dominante non renseignée";
+
+  const first = truncate(zone.constat, 110);
+  return first || "Zone dominante non renseignée";
+}
+
+function supportStatementsForDimension(frozen: FrozenDimensionDiagnosis): string[] {
+  const fromSnapshot = swotLabels(frozen.swot?.strengths, 3);
+  if (fromSnapshot.length > 0) return fromSnapshot;
+
+  const fromEvidence = uniqueStrings(
+    (frozen.evidenceSummary ?? []).filter((item) => !isWeaknessLike(item)),
+    3
+  );
+  if (fromEvidence.length > 0) return fromEvidence;
+
+  if (frozen.score >= 4) {
+    const safeFindings = uniqueStrings(
+      frozen.consolidatedFindings.filter((item) => !isWeaknessLike(item)),
+      2
+    );
+    if (safeFindings.length > 0) {
+      return safeFindings.map((item) => `Point d’appui déjà en place : ${item}`);
+    }
+  }
+
+  return [];
+}
+
+function vulnerabilityStatementsForDimension(frozen: FrozenDimensionDiagnosis): string[] {
+  const zone = dominantZone(frozen);
+
+  return uniqueStrings(
+    [
+      zone?.risqueManagerial,
+      zone?.constat,
+      frozen.dominantRootCause,
+    ],
+    3
+  );
 }
 
 function buildExecutiveSynthesis(session: DiagnosticSessionAggregate) {
@@ -205,23 +330,26 @@ function buildExecutiveSynthesis(session: DiagnosticSessionAggregate) {
   const avg = averageScore(frozenDimensions);
   const weakest = weakestDimension(frozenDimensions);
 
-  const strengths = [...frozenDimensions]
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 2)
-    .map(
-      (frozen) =>
-        `${dimensionTitle(frozen.dimensionId)} — ${frozen.consolidatedFindings[0]}`
-    );
+  const strengths = uniqueStrings(
+    frozenDimensions.flatMap((frozen) =>
+      supportStatementsForDimension(frozen).map(
+        (item) => `${dimensionTitle(frozen.dimensionId)} — ${item}`
+      )
+    ),
+    3
+  );
 
-  const vulnerabilities = [...frozenDimensions]
-    .sort((a, b) => a.score - b.score)
-    .slice(0, 3)
-    .map(
-      (frozen) =>
-        `${dimensionTitle(frozen.dimensionId)} — ${
-          frozen.unmanagedZones[0]?.risqueManagerial ?? frozen.dominantRootCause
-        }`
-    );
+  const vulnerabilities = uniqueStrings(
+    frozenDimensions
+      .slice()
+      .sort((a, b) => a.score - b.score)
+      .flatMap((frozen) =>
+        vulnerabilityStatementsForDimension(frozen).map(
+          (item) => `${dimensionTitle(frozen.dimensionId)} — ${item}`
+        )
+      ),
+    4
+  );
 
   const objectiveLabels = getFinalObjectives(session)
     .slice(0, 5)
@@ -240,7 +368,7 @@ function buildExecutiveSynthesis(session: DiagnosticSessionAggregate) {
     keyStrengths:
       strengths.length > 0
         ? strengths
-        : ["Aucune force suffisamment consolidée à ce stade."],
+        : ["Aucun point d’appui suffisamment consolidé à ce stade."],
     keyVulnerabilities:
       vulnerabilities.length > 0
         ? vulnerabilities
@@ -267,30 +395,53 @@ function toZoneTable(zone: ZoneNonPilotee, title: string) {
 }
 
 function buildSwot(frozen: FrozenDimensionDiagnosis): SwotTable {
-  const forces = frozen.consolidatedFindings
-    .map(
-      (finding) =>
-        `Capacité identifiée ou partiellement démontrée à partir du constat : ${finding}`
-    )
-    .slice(0, 3);
+  const forces = uniqueStrings(
+    [
+      ...supportStatementsForDimension(frozen),
+      ...(frozen.swot?.strengths ?? []).map((item) => item.label),
+    ],
+    4
+  );
 
-  const faiblesses = frozen.unmanagedZones.map((zone) => zone.constat).slice(0, 4);
+  const faiblesses = uniqueStrings(
+    [
+      ...(frozen.unmanagedZones ?? []).map((zone) => zone.constat),
+      ...(frozen.swot?.weaknesses ?? []).map((item) => item.label),
+      frozen.dominantRootCause,
+    ],
+    4
+  );
 
-  const opportunites = [
-    `Réduction directe de l’exposition liée à la cause racine : ${frozen.dominantRootCause}`,
-    `Amélioration de la robustesse de pilotage sur la dimension "${dimensionTitle(
-      frozen.dimensionId
-    )}"`,
-    `Transformation plus régulière de la performance attendue en résultats observables`,
-  ].slice(0, 4);
+  const opportunites = uniqueStrings(
+    [
+      ...(frozen.objectiveSeeds ?? []).map((seed) => seed.label),
+      ...(frozen.objectiveSeeds ?? []).map((seed) => seed.quickWin),
+      `Réduction directe de l’exposition liée à la cause racine : ${frozen.dominantRootCause}`,
+      `Amélioration de la robustesse de pilotage sur la dimension "${dimensionTitle(
+        frozen.dimensionId
+      )}"`,
+    ],
+    4
+  );
 
-  const risques = frozen.unmanagedZones.map((zone) => zone.consequence).slice(0, 4);
+  const risques = uniqueStrings(
+    [
+      ...(frozen.unmanagedZones ?? []).map((zone) => zone.consequence),
+      ...(frozen.swot?.threats ?? []).map((item) => item.label),
+      ...(frozen.unmanagedZones ?? []).map((zone) => zone.risqueManagerial),
+    ],
+    4
+  );
 
   return {
-    forces,
-    faiblesses,
-    opportunites,
-    risques,
+    forces:
+      forces.length > 0 ? forces : ["Aucun point d’appui assez robuste pour être classé en force à ce stade."],
+    faiblesses: faiblesses.length > 0 ? faiblesses : ["Aucune faiblesse consolidée non renseignée."],
+    opportunites:
+      opportunites.length > 0
+        ? opportunites
+        : ["Aucune opportunité structurée n’a encore été formalisée."],
+    risques: risques.length > 0 ? risques : ["Aucun risque consolidé non renseigné."],
   };
 }
 
@@ -301,9 +452,12 @@ function buildDimensionSection(
     dimensionId: frozen.dimensionId,
     title: dimensionTitle(frozen.dimensionId),
     score: frozen.score,
+    summary: normalizeText(frozen.summary),
     consolidatedFindings: frozen.consolidatedFindings,
     dominantRootCause: frozen.dominantRootCause,
-    unmanagedZoneTables: frozen.unmanagedZones.map((zone, index) =>
+    dominantZoneLabel: dominantZoneLabel(frozen),
+    evidenceSummary: uniqueStrings(frozen.evidenceSummary ?? [], 4),
+    unmanagedZoneTables: (frozen.unmanagedZones ?? []).map((zone, index) =>
       toZoneTable(zone, `Zone non pilotée ${index + 1}`)
     ),
     swot: buildSwot(frozen),
@@ -314,7 +468,7 @@ function buildTransverseZones(session: DiagnosticSessionAggregate) {
   const frozenDimensions = getFrozenDimensions(session);
 
   const tables = frozenDimensions.flatMap((frozen) =>
-    frozen.unmanagedZones.slice(0, 1).map((zone) =>
+    (frozen.unmanagedZones ?? []).slice(0, 1).map((zone) =>
       toZoneTable(zone, `${dimensionTitle(frozen.dimensionId)} — zone dominante`)
     )
   );
@@ -330,16 +484,18 @@ function objectiveCard(objective: FinalObjective): ObjectiveCard {
     title: `Carte objectif — ${dimensionTitle(objective.dimensionId)}`,
     rows: [
       { label: "Objectif de résultat", value: objective.objectiveLabel },
-      { label: "Owner", value: objective.owner },
+      { label: "Responsable", value: objective.owner },
       { label: "Indicateur clé", value: objective.keyIndicator },
       { label: "Échéance", value: objective.dueDate },
       {
         label: "Gain potentiel",
-        value: `${objective.potentialGain} Hypothèses : ${objective.gainHypotheses.join(
-          " | "
-        )}`,
+        value: objective.potentialGain,
       },
-      { label: "Statut validation dirigeant", value: objective.validationStatus },
+      {
+        label: "Hypothèses de gain",
+        value: uniqueStrings(objective.gainHypotheses, 4).join(" | "),
+      },
+      { label: "Statut validation dirigeant", value: validationStatusLabel(objective.validationStatus) },
       { label: "Quick win", value: objective.quickWin },
     ],
   };
@@ -355,8 +511,7 @@ function buildActionPlanCards(session: DiagnosticSessionAggregate) {
 function buildLeaderConclusion(session: DiagnosticSessionAggregate) {
   const frozenDimensions = getFrozenDimensions(session);
   const weakest = weakestDimension(frozenDimensions);
-  const strongest =
-    [...frozenDimensions].sort((a, b) => b.score - a.score)[0] ?? null;
+  const strongest = strongestDimension(frozenDimensions);
 
   const alignments: string[] = [];
   const misalignments: string[] = [];
@@ -377,6 +532,12 @@ function buildLeaderConclusion(session: DiagnosticSessionAggregate) {
         weakest.dimensionId
       )}" concentre l’écart principal entre fonctionnement attendu et fonctionnement observé.`
     );
+    const zone = dominantZone(weakest);
+    if (zone) {
+      misalignments.push(
+        `La zone dominante sur cette dimension peut se résumer ainsi : ${truncate(zone.constat, 220)}`
+      );
+    }
   }
 
   if (
@@ -421,7 +582,7 @@ function buildConfidentialitySection() {
     rules: [
       "Aucun nom d’entreprise, de personne ou de localisation issue du corpus interne n’est reproduit.",
       "Toute référence au corpus interne reste générique et anonymisée.",
-      "Le document doit être généré en Word (.docx) comme version de référence.",
+      "Le document Word constitue la version de référence remise au dirigeant.",
     ],
   };
 }
@@ -435,8 +596,7 @@ function buildInputHistory(session: DiagnosticSessionAggregate) {
       "Aucun chiffre précis n’est inventé ; les gains sont exprimés en fourchettes prudentes avec hypothèses.",
     ],
     trameQualityFlags:
-      session.trame?.qualityFlags.map((flag) => `[${flag.severity}] ${flag.message}`) ??
-      [],
+      session.trame?.qualityFlags.map((flag) => `[${flag.severity}] ${flag.message}`) ?? [],
     missingFieldSignals:
       session.trame?.missingFields.map(
         (field) =>
@@ -529,13 +689,40 @@ function zoneRowsToPreviewTable(zoneTables: Array<{ title: string; rows: Visible
 
 function swotToPreviewTable(swot: SwotTable) {
   return {
-    headers: ["Forces", "Faiblesses", "Opportunités", "Risques"],
-    rows: Array.from({ length: Math.max(swot.forces.length, swot.faiblesses.length, swot.opportunites.length, swot.risques.length) }).map((_, index) => [
+    headers: ["Points d’appui", "Faiblesses", "Opportunités", "Risques"],
+    rows: Array.from({
+      length: Math.max(swot.forces.length, swot.faiblesses.length, swot.opportunites.length, swot.risques.length),
+    }).map((_, index) => [
       swot.forces[index] ?? "",
       swot.faiblesses[index] ?? "",
       swot.opportunites[index] ?? "",
       swot.risques[index] ?? "",
     ]),
+  };
+}
+
+function constatsToPreviewTable(items: [string, string, string]) {
+  return {
+    title: "Constats consolidés",
+    headers: ["#", "Constat"],
+    rows: items.map((item, index) => [`${index + 1}`, item]),
+  };
+}
+
+function objectiveSummaryTable(cards: ObjectiveCard[]) {
+  return {
+    title: "Synthèse des objectifs de résultat",
+    headers: ["Dimension", "Objectif de résultat", "Indicateur", "Échéance", "Statut"],
+    rows: cards.map((card) => {
+      const byLabel = new Map(card.rows.map((row) => [row.label, row.value]));
+      return [
+        card.title.replace(/^Carte objectif\s+—\s+/, ""),
+        byLabel.get("Objectif de résultat") ?? "",
+        byLabel.get("Indicateur clé") ?? "",
+        byLabel.get("Échéance") ?? "",
+        byLabel.get("Statut validation dirigeant") ?? "",
+      ];
+    }),
   };
 }
 
@@ -545,13 +732,18 @@ export function buildPreviewDiagnosticReport(report: StandardDiagnosticReport): 
   sections.push({
     id: "identification",
     title: "1. Page d’identification",
-    bullets: [
-      `Entreprise : ${report.identificationPage.companyLabel}`,
-      `Dirigeant : ${report.identificationPage.dirigeantLabel}`,
-      `Date de génération : ${report.identificationPage.generatedAt}`,
-      `Session : ${report.identificationPage.sessionId}`,
-    ],
     paragraphs: [report.identificationPage.note],
+    tables: [
+      {
+        headers: ["Champ", "Valeur"],
+        rows: [
+          ["Entreprise", report.identificationPage.companyLabel],
+          ["Dirigeant", report.identificationPage.dirigeantLabel],
+          ["Date de génération", report.identificationPage.generatedAt],
+          ["Session", report.identificationPage.sessionId],
+        ],
+      },
+    ],
   });
 
   sections.push({
@@ -565,8 +757,8 @@ export function buildPreviewDiagnosticReport(report: StandardDiagnosticReport): 
     ],
     tables: [
       {
-        title: "Constats structurants et vulnérabilités",
-        headers: ["Forces / constats structurants", "Vulnérabilités / expositions"],
+        title: "Lecture dirigeant",
+        headers: ["Points d’appui consolidés", "Vulnérabilités prioritaires"],
         rows: Array.from({
           length: Math.max(
             report.executiveSummaryPage0.keyStrengths.length,
@@ -610,12 +802,23 @@ export function buildPreviewDiagnosticReport(report: StandardDiagnosticReport): 
     sections.push({
       id: `dimension-${dimension.dimensionId}`,
       title: `4.${dimension.dimensionId} ${dimension.title}`,
-      bullets: [`Score : ${dimension.score}/5`, `Cause racine dominante : ${dimension.dominantRootCause}`],
-      paragraphs: [
-        "Constats consolidés",
-        ...dimension.consolidatedFindings.map((finding, index) => `${index + 1}. ${finding}`),
+      paragraphs: nonEmpty([
+        dimension.summary,
+        dimension.dominantZoneLabel ? `Zone dominante : ${dimension.dominantZoneLabel}` : "",
+      ]),
+      bullets: [
+        `Score : ${dimension.score}/5`,
+        `Cause racine dominante : ${dimension.dominantRootCause}`,
       ],
       tables: [
+        constatsToPreviewTable(dimension.consolidatedFindings),
+        ...(dimension.evidenceSummary && dimension.evidenceSummary.length > 0
+          ? [{
+              title: "Éléments de matière consolidés",
+              headers: ["Élément"],
+              rows: dimension.evidenceSummary.map((item) => [item]),
+            }]
+          : []),
         ...zoneRowsToPreviewTable(dimension.unmanagedZoneTables),
         {
           title: "SWOT",
@@ -639,11 +842,14 @@ export function buildPreviewDiagnosticReport(report: StandardDiagnosticReport): 
   sections.push({
     id: "action-plan",
     title: "6. Plan d’actions — objectifs orientés résultats",
-    tables: report.actionPlanCards.cards.map((card) => ({
-      title: card.title,
-      headers: ["Champ", "Contenu"],
-      rows: card.rows.map((row) => [row.label, row.value]),
-    })),
+    tables: [
+      objectiveSummaryTable(report.actionPlanCards.cards),
+      ...report.actionPlanCards.cards.map((card) => ({
+        title: card.title,
+        headers: ["Champ", "Contenu"],
+        rows: card.rows.map((row) => [row.label, row.value]),
+      })),
+    ],
   });
 
   sections.push({
@@ -713,11 +919,11 @@ export function buildPlainTextDiagnosticReport(report: StandardDiagnosticReport)
   push(`Score global : ${report.executiveSummaryPage0.globalScore}/5`);
   push(`Niveau global : ${report.executiveSummaryPage0.globalLevel}`);
   push(`Enjeu majeur : ${report.executiveSummaryPage0.majorIssue}`);
-  push("Principaux constats structurants :");
+  push("Points d’appui consolidés :");
   report.executiveSummaryPage0.keyStrengths.forEach((item) => push(`- ${item}`));
-  push("Zones critiques / vulnérabilités :");
+  push("Vulnérabilités / expositions :");
   report.executiveSummaryPage0.keyVulnerabilities.forEach((item) => push(`- ${item}`));
-  push("Trajectoire de transformation proposée :");
+  push("Objectifs structurants :");
   report.executiveSummaryPage0.priorityObjectives.forEach((item) => push(`- ${item}`));
   push("");
 
@@ -736,16 +942,21 @@ export function buildPlainTextDiagnosticReport(report: StandardDiagnosticReport)
   push("4. Diagnostic par dimension");
   for (const dimension of report.dimensionDiagnostics) {
     push(`${dimension.title} — score ${dimension.score}/5`);
+    if (dimension.summary) push(dimension.summary);
     push("Constats consolidés :");
     dimension.consolidatedFindings.forEach((item) => push(`- ${item}`));
     push(`Cause racine dominante : ${dimension.dominantRootCause}`);
+    if (dimension.evidenceSummary?.length) {
+      push("Éléments de matière consolidés :");
+      dimension.evidenceSummary.forEach((item) => push(`- ${item}`));
+    }
     push("Zones non pilotées / non formalisées :");
     for (const table of dimension.unmanagedZoneTables) {
       push(`${table.title}`);
       table.rows.forEach((row) => push(`- ${row.label} : ${row.value}`));
     }
     push("SWOT :");
-    dimension.swot.forces.forEach((item) => push(`- Force : ${item}`));
+    dimension.swot.forces.forEach((item) => push(`- Point d’appui : ${item}`));
     dimension.swot.faiblesses.forEach((item) => push(`- Faiblesse : ${item}`));
     dimension.swot.opportunites.forEach((item) => push(`- Opportunité : ${item}`));
     dimension.swot.risques.forEach((item) => push(`- Risque : ${item}`));
