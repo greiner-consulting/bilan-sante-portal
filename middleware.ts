@@ -1,5 +1,3 @@
-
-// middleware.ts
 import { NextResponse, type NextRequest } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 
@@ -14,8 +12,8 @@ function isPublicPath(pathname: string): boolean {
   return (
     pathname === "/" ||
     pathname === "/login" ||
-    pathname.startsWith("/reset-password") ||
     pathname.startsWith("/auth") ||
+    pathname.startsWith("/reset-password") ||
     pathname.startsWith("/_next") ||
     pathname.startsWith("/favicon.ico") ||
     pathname.startsWith("/images") ||
@@ -24,7 +22,18 @@ function isPublicPath(pathname: string): boolean {
 }
 
 function isProtectedPath(pathname: string): boolean {
-  return pathname.startsWith("/dashboard") || pathname.startsWith("/api");
+  return (
+    pathname.startsWith("/dashboard") ||
+    pathname.startsWith("/admin") ||
+    pathname.startsWith("/api")
+  );
+}
+
+function redirectToLogin(req: NextRequest) {
+  const loginUrl = req.nextUrl.clone();
+  loginUrl.pathname = "/login";
+  loginUrl.searchParams.set("next", req.nextUrl.pathname);
+  return NextResponse.redirect(loginUrl);
 }
 
 export async function middleware(req: NextRequest) {
@@ -34,11 +43,7 @@ export async function middleware(req: NextRequest) {
     return NextResponse.next();
   }
 
-  if (isPublicPath(pathname)) {
-    return NextResponse.next();
-  }
-
-  if (!isProtectedPath(pathname)) {
+  if (isPublicPath(pathname) || !isProtectedPath(pathname)) {
     return NextResponse.next();
   }
 
@@ -66,17 +71,13 @@ export async function middleware(req: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser();
 
-  if (user) {
-    return res;
+  if (!user) {
+    return redirectToLogin(req);
   }
 
-  const loginUrl = req.nextUrl.clone();
-  loginUrl.pathname = "/login";
-  loginUrl.searchParams.set("next", pathname);
-
-  return NextResponse.redirect(loginUrl);
+  return res;
 }
 
 export const config = {
-  matcher: ["/dashboard/:path*", "/api/:path*"],
+  matcher: ["/dashboard/:path*", "/admin/:path*", "/api/:path*"],
 };

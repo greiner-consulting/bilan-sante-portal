@@ -18,6 +18,18 @@ type StartDiagnosticResponse = {
   error?: string;
 };
 
+function truncateFileName(value: string, max = 48): string {
+  const text = String(value ?? "").trim();
+  if (!text) return "Aucun fichier sélectionné";
+  if (text.length <= max) return text;
+
+  const dotIndex = text.lastIndexOf(".");
+  const ext = dotIndex > 0 ? text.slice(dotIndex) : "";
+  const base = dotIndex > 0 ? text.slice(0, dotIndex) : text;
+  const head = Math.max(16, max - ext.length - 3);
+  return `${base.slice(0, head)}...${ext}`;
+}
+
 export default function TrameUploadForm({ sessionId }: Props) {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [file, setFile] = useState<File | null>(null);
@@ -103,6 +115,7 @@ export default function TrameUploadForm({ sessionId }: Props) {
         ref={inputRef}
         type="file"
         accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        className="hidden"
         onChange={(e) => {
           const selected = e.target.files?.[0] ?? null;
           setFile(selected);
@@ -111,22 +124,39 @@ export default function TrameUploadForm({ sessionId }: Props) {
         disabled={loading}
       />
 
+      <div className="space-y-2">
+        <button
+          type="button"
+          onClick={() => inputRef.current?.click()}
+          disabled={loading}
+          className="inline-flex items-center justify-center rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-900 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {file ? "Changer de trame" : "Choisir une trame"}
+        </button>
+
+        <div className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-600">
+          <span className="block truncate" title={file?.name ?? "Aucun fichier sélectionné"}>
+            {truncateFileName(file?.name ?? "")}
+          </span>
+        </div>
+      </div>
+
       <div>
         <button
           type="submit"
           disabled={loading}
-          className="bg-black text-white px-4 py-2 rounded disabled:opacity-50"
+          className="inline-flex items-center justify-center rounded-lg bg-slate-950 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
         >
           {loading ? "Upload et ingestion..." : "Charger la trame"}
         </button>
       </div>
 
       {state.type === "success" && (
-        <div className="text-sm text-green-700">{state.message}</div>
+        <div className="text-sm leading-6 text-emerald-700">{state.message}</div>
       )}
 
       {state.type === "error" && (
-        <div className="text-sm text-red-700">{state.message}</div>
+        <div className="text-sm leading-6 text-red-700">{state.message}</div>
       )}
     </form>
   );

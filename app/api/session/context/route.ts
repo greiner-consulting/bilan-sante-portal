@@ -119,6 +119,9 @@ export async function GET(req: Request) {
           aggregate?.currentWorkset?.answers.length ??
           row.question_index ??
           0,
+        source_filename: row.source_filename ?? null,
+        created_at: row.created_at ?? null,
+        updated_at: row.updated_at ?? null,
         trame_pdf_path: row.source_doc_path ?? null,
         has_trame_index: Boolean(aggregate?.trame),
         has_extracted_text: Boolean(row.extracted_text),

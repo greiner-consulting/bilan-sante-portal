@@ -30,6 +30,15 @@ type SessionRow = {
   updated_at?: string | null;
 };
 
+export type DiagnosticEventRow = {
+  id?: string;
+  session_id: string;
+  user_id?: string | null;
+  kind: string;
+  payload: Record<string, unknown> | null;
+  created_at?: string | null;
+};
+
 type LegacyQuestionMirror = {
   fact_id: string;
   theme: string;
@@ -184,6 +193,31 @@ export async function loadAggregate(
     row,
     aggregate: deepClone(raw),
   };
+}
+
+export async function loadDiagnosticEvents(
+  sessionId: string
+): Promise<DiagnosticEventRow[]> {
+  const admin = adminSupabase();
+
+  const { data, error } = await admin
+    .from("diagnostic_events")
+    .select("id, session_id, user_id, kind, payload, created_at")
+    .eq("session_id", sessionId)
+    .order("created_at", { ascending: true });
+
+  if (error) {
+    throw new Error(`SESSION_EVENTS_LOAD_FAILED: ${error.message}`);
+  }
+
+  return (Array.isArray(data) ? data : []).map((item) => ({
+    id: typeof item.id === "string" ? item.id : undefined,
+    session_id: String(item.session_id ?? sessionId),
+    user_id: item.user_id == null ? null : String(item.user_id),
+    kind: String(item.kind ?? "UNKNOWN"),
+    payload: isObject(item.payload) ? deepClone(item.payload) : null,
+    created_at: item.created_at == null ? null : String(item.created_at),
+  }));
 }
 
 export async function saveAggregate(
