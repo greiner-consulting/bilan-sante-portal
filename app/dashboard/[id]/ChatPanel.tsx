@@ -141,6 +141,8 @@ type BuildReportApiResponse = {
   ok: boolean;
   preview?: PreviewDiagnosticReport;
   html?: string;
+  pdfBase64?: string;
+  pdfFileName?: string;
   docxBase64?: string;
   docxFileName?: string;
   compliance?: {
@@ -202,7 +204,12 @@ function normalizeQuestions(value: unknown): StructuredQuestion[] {
         question: String(row.question ?? "").trim(),
       };
     })
-    .filter((item) => Boolean(item.constat) && Boolean(item.risque_managerial) && Boolean(item.question));
+    .filter(
+      (item) =>
+        Boolean(item.constat) &&
+        Boolean(item.risque_managerial) &&
+        Boolean(item.question)
+    );
 }
 
 function mergeSessionState(
@@ -307,7 +314,8 @@ function buildPlaceholder(params: {
   }
   if (params.currentQuestion) return "Votre réponse à la question affichée...";
   if (params.awaitingValidation) return 'Répondez "oui" ou "non"...';
-  if (params.phase === "report_ready") return "Le protocole est terminé. Vous pouvez construire le rapport.";
+  if (params.phase === "report_ready")
+    return "Le protocole est terminé. Vous pouvez construire le rapport PDF.";
   return "Votre réponse...";
 }
 
@@ -337,16 +345,14 @@ function buildMessagesFromHistory(turns: PersistedTurn[]): DisplayMessage[] {
     : [{ role: "assistant", key: "initial-assistant", text: initialAssistantMessage() }];
 }
 
-function triggerDocxDownload(base64: string, fileName: string) {
+function triggerBinaryDownload(base64: string, fileName: string, mimeType: string) {
   const byteCharacters = atob(base64);
   const byteNumbers = new Array(byteCharacters.length);
   for (let i = 0; i < byteCharacters.length; i += 1) {
     byteNumbers[i] = byteCharacters.charCodeAt(i);
   }
   const byteArray = new Uint8Array(byteNumbers);
-  const blob = new Blob([byteArray], {
-    type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  });
+  const blob = new Blob([byteArray], { type: mimeType });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
@@ -798,7 +804,7 @@ export default function ChatPanel({ sessionId }: Props) {
 
       pushMessage(
         "assistant",
-        "Le rapport dirigeant a été structuré et le fichier Word a été généré."
+        "Le rapport dirigeant a été structuré et le PDF client a été généré."
       );
       if (data.compliance?.summary?.length) {
         pushMessage(
@@ -808,12 +814,12 @@ export default function ChatPanel({ sessionId }: Props) {
       }
       setReportPreview(data.preview ?? null);
 
-      if (data.docxBase64 && data.docxFileName) {
-        triggerDocxDownload(data.docxBase64, data.docxFileName);
+      if (data.pdfBase64 && data.pdfFileName) {
+        triggerBinaryDownload(data.pdfBase64, data.pdfFileName, "application/pdf");
       } else {
         pushMessage(
           "system",
-          "Aucun fichier Word n’a été renvoyé par l’API de construction du rapport."
+          "Aucun PDF n’a été renvoyé par l’API de construction du rapport."
         );
       }
     } catch (e: any) {
@@ -905,7 +911,7 @@ export default function ChatPanel({ sessionId }: Props) {
         <div className="text-sm leading-6 text-slate-700">
           {bootstrapping
             ? "Chargement du contexte de diagnostic..."
-            : "Le chat suit désormais le protocole 4D : trame, exploration par dimension, validations, gel, objectifs, puis rapport."}
+            : "Le chat suit désormais le protocole 4D : trame, exploration par dimension, validations, gel, objectifs, puis rapport PDF."}
         </div>
 
         {sessionState && (
@@ -970,8 +976,7 @@ export default function ChatPanel({ sessionId }: Props) {
           <div>
             <div className="font-semibold text-slate-900">Dimensions gelées</div>
             <div className="text-sm leading-6 text-slate-600">
-              Les constats consolidés, causes racines dominantes et zones non pilotées
-              restent visibles pendant toute la fin du protocole.
+              Les constats consolidés, causes racines dominantes et zones non pilotées restent visibles pendant toute la fin du protocole.
             </div>
           </div>
           <div className="grid gap-4">
@@ -1015,8 +1020,7 @@ export default function ChatPanel({ sessionId }: Props) {
                 className="mr-8 rounded-xl border border-slate-200 bg-slate-50 p-3"
               >
                 <div className="mb-2 text-xs uppercase tracking-wide text-slate-500">
-                  Dimension {m.dimension ?? "?"} — Itération {m.iteration ?? "?"}/3 —
-                  Question {m.ordinal ?? "?"} / {m.total ?? "?"}
+                  Dimension {m.dimension ?? "?"} — Itération {m.iteration ?? "?"}/3 — Question {m.ordinal ?? "?"} / {m.total ?? "?"}
                 </div>
                 {m.theme && (
                   <div className="mb-2 text-xs text-slate-500">Thème : {m.theme}</div>
@@ -1052,8 +1056,7 @@ export default function ChatPanel({ sessionId }: Props) {
         <div className="space-y-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
           <div className="flex items-center justify-between text-sm text-slate-700">
             <div className="font-semibold text-slate-900">
-              Dimension {sessionState?.dimension ?? "?"} — Itération
-              {" "}
+              Dimension {sessionState?.dimension ?? "?"} — Itération {" "}
               {sessionState?.iteration ?? "?"}/3
             </div>
             <div>
@@ -1090,8 +1093,7 @@ export default function ChatPanel({ sessionId }: Props) {
           <div className="text-sm leading-6 text-slate-700">
             {sessionState?.phase === "final_objectives_validation" ? (
               <>
-                Répondez par <strong>oui</strong> pour tout valider, ou détaillez
-                objectif par objectif.
+                Répondez par <strong>oui</strong> pour tout valider, ou détaillez objectif par objectif.
               </>
             ) : (
               <>
@@ -1106,8 +1108,7 @@ export default function ChatPanel({ sessionId }: Props) {
         <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
           <div className="font-semibold text-slate-900">Rapport standardisé</div>
           <div className="text-sm leading-6 text-slate-700">
-            Le protocole est terminé. La construction du rapport génère un aperçu
-            structuré lisible et déclenche le téléchargement du fichier Word.
+            Le protocole est terminé. La construction du rapport génère un aperçu structuré lisible et déclenche le téléchargement du PDF client.
           </div>
           <button
             type="button"
@@ -1115,7 +1116,7 @@ export default function ChatPanel({ sessionId }: Props) {
             disabled={buildingReport}
             className="inline-flex items-center justify-center rounded-lg bg-slate-950 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            {buildingReport ? "Construction..." : "Construire le rapport"}
+            {buildingReport ? "Construction..." : "Construire le rapport PDF"}
           </button>
         </div>
       )}
@@ -1147,9 +1148,7 @@ export default function ChatPanel({ sessionId }: Props) {
         />
         <button
           type="submit"
-          disabled={
-            loading || bootstrapping || canBuildReport || input.trim().length === 0
-          }
+          disabled={loading || bootstrapping || canBuildReport || input.trim().length === 0}
           className="inline-flex items-center justify-center rounded-lg bg-slate-950 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
         >
           {loading ? "Envoi..." : bootstrapping ? "Chargement..." : "Envoyer"}

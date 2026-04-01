@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { join } from "node:path";
 import { createSupabaseServerClient, adminSupabase } from "@/lib/supabaseServer";
 import { loadAggregate } from "@/lib/bilan-sante/session-repository";
 import {
@@ -6,8 +7,8 @@ import {
   buildPreviewDiagnosticReport,
   buildStandardDiagnosticReport,
 } from "@/lib/bilan-sante/report-builder";
-import { buildDiagnosticDocxBuffer } from "@/lib/bilan-sante/report-docx";
 import { runComplianceChecks } from "@/lib/bilan-sante/compliance-checker";
+import { buildDiagnosticPdfBuffer } from "@/lib/bilan-sante/report-pdf";
 
 export const runtime = "nodejs";
 
@@ -74,10 +75,7 @@ export async function POST(
       );
     }
 
-    if (
-      !isBypass() &&
-      String(sessionOwner.user_id ?? "") !== effectiveUserId
-    ) {
+    if (!isBypass() && String(sessionOwner.user_id ?? "") !== effectiveUserId) {
       return NextResponse.json(
         { ok: false, error: "Forbidden" },
         { status: 403, headers: { "Cache-Control": "no-store" } }
@@ -108,22 +106,24 @@ export async function POST(
     }
 
     const report = buildStandardDiagnosticReport(loaded.aggregate, {
-      companyLabel: loaded.row.source_filename ?? "Entreprise analysée (anonymisée)",
+      companyLabel:
+        loaded.row.source_filename ?? "Entreprise analysée (anonymisée)",
       dirigeantLabel: "Dirigeant (anonymisé)",
     });
 
     const preview = buildPreviewDiagnosticReport(report);
     const html = buildHtmlDiagnosticReport(report);
-    const docxBuffer = await buildDiagnosticDocxBuffer(report);
     const safeSessionId = safeFilePart(sessionId) || "session";
+    const logoPath = join(process.cwd(), "public", "greiner-consulting-logo.png");
+    const pdfBuffer = await buildDiagnosticPdfBuffer(report, { logoPath });
 
     return NextResponse.json(
       {
         ok: true,
         preview,
         html,
-        docxBase64: docxBuffer.toString("base64"),
-        docxFileName: `Bilan_de_Sante_Rapport_Dirigeant_${safeSessionId}.docx`,
+        pdfBase64: pdfBuffer.toString("base64"),
+        pdfFileName: `Bilan_de_Sante_Rapport_Dirigeant_${safeSessionId}.pdf`,
         compliance: {
           ok: compliance.isCompliant,
           warnings: compliance.warnings,
