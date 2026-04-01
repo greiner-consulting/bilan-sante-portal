@@ -7,6 +7,11 @@ import { uploadDiagnosticSourceDocx } from "@/lib/diagnostic/storage";
 import { extractTextFromDocx } from "@/lib/diagnostic/docx";
 import { bootstrapSessionFromTrameWithLlm } from "@/lib/bilan-sante/protocol-engine";
 import { saveAggregate } from "@/lib/bilan-sante/session-repository";
+import {
+  entitlementIsUsable,
+  getActiveEntitlementForUser,
+  isAdminUser,
+} from "@/lib/auth/access-control";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -50,22 +55,14 @@ export async function POST(req: Request) {
 
   const admin = adminSupabase();
 
-  const { data: ent, error: entErr } = await admin
-    .from("entitlements")
-    .select("is_active, expires_at")
-    .eq("user_id", user.id)
-    .maybeSingle();
+  const adminFlag = await isAdminUser(user.id);
 
-  if (entErr) {
-    return json({ ok: false, error: entErr.message }, 500);
-  }
+  if (!adminFlag) {
+    const ent = await getActiveEntitlementForUser(user.id);
 
-  if (!ent?.is_active) {
-    return json({ ok: false, error: "No entitlement" }, 403);
-  }
-
-  if (ent.expires_at && new Date(ent.expires_at).getTime() < Date.now()) {
-    return json({ ok: false, error: "Access expired" }, 403);
+    if (!entitlementIsUsable(ent)) {
+      return json({ ok: false, error: "No entitlement" }, 403);
+    }
   }
 
   const form = await req.formData();

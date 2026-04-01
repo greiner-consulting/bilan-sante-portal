@@ -32,7 +32,7 @@ export async function loginAction(formData: FormData) {
     );
   }
 
-  const redirectTo = `${await appBaseUrl()}/auth/finish?next=${encodeURIComponent(next)}`;
+  const redirectTo = `${await appBaseUrl()}/auth/callback?next=${encodeURIComponent(next)}`;
 
   const supabase = await createSupabaseServerClient();
   const { error } = await supabase.auth.signInWithOtp({
