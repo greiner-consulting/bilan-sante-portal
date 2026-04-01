@@ -3,6 +3,11 @@ import { redirect } from "next/navigation";
 import { createSupabaseServerClient } from "@/lib/supabaseServer";
 import BrandMark from "@/app/dashboard/[id]/BrandMark";
 import LoginForm from "./LoginForm";
+import {
+  entitlementIsUsable,
+  getActiveEntitlementForUser,
+  isAdminUser,
+} from "@/lib/auth/access-control";
 
 type PageProps = {
   searchParams?: Promise<{ error?: string; success?: string; next?: string }>;
@@ -19,7 +24,6 @@ function decodeMaybe(v?: string) {
 
 export default async function LoginPage(props: PageProps) {
   const sp = (await props.searchParams) ?? {};
-  const errorMsg = decodeMaybe(sp.error);
   const successMsg = decodeMaybe(sp.success);
   const next = decodeMaybe(sp.next) ?? "/dashboard";
 
@@ -28,7 +32,23 @@ export default async function LoginPage(props: PageProps) {
     data: { user },
   } = await supabase.auth.getUser();
 
-  if (user) redirect(next);
+  let resolvedErrorMsg = decodeMaybe(sp.error);
+
+  if (user?.id) {
+    const [admin, entitlement] = await Promise.all([
+      isAdminUser(user.id),
+      getActiveEntitlementForUser(user.id),
+    ]);
+
+    if (admin || entitlementIsUsable(entitlement)) {
+      redirect(next);
+    }
+
+    if (!resolvedErrorMsg) {
+      resolvedErrorMsg =
+        "Votre session existe, mais votre accès client n'est pas actif.";
+    }
+  }
 
   return (
     <main className="min-h-screen bg-slate-50 px-6 py-10">
@@ -58,9 +78,9 @@ export default async function LoginPage(props: PageProps) {
           </div>
 
           <div className="mt-8">
-            {errorMsg ? (
+            {resolvedErrorMsg ? (
               <div className="mb-4 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">
-                {errorMsg}
+                {resolvedErrorMsg}
               </div>
             ) : null}
 
