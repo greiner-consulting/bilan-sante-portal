@@ -7,6 +7,7 @@ import { createSupabaseServerClient } from "@/lib/supabaseServer";
 function safeNext(value: string): string {
   if (!value.startsWith("/")) return "/dashboard";
   if (value.startsWith("//")) return "/dashboard";
+  if (value.startsWith("/admin")) return "/dashboard";
   return value;
 }
 
@@ -31,9 +32,7 @@ export async function loginAction(formData: FormData) {
     );
   }
 
-  const redirectTo = `${await appBaseUrl()}/auth/callback?next=${encodeURIComponent(
-    next
-  )}`;
+  const redirectTo = `${await appBaseUrl()}/auth/finish?next=${encodeURIComponent(next)}`;
 
   const supabase = await createSupabaseServerClient();
   const { error } = await supabase.auth.signInWithOtp({

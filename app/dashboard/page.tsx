@@ -88,6 +88,7 @@ export default async function DashboardPage() {
   const { user, isAdmin, sessions } = await loadDashboardContext();
   const existingSession = sessions[0] ?? null;
   const canCreateNew = isAdmin || !existingSession;
+  const logoutHref = isAdmin ? "/auth/logout?next=/admin/login" : "/auth/logout?next=/login";
 
   async function createSession() {
     "use server";
@@ -147,7 +148,7 @@ export default async function DashboardPage() {
               </h1>
               <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-700">
                 {isAdmin
-                  ? "Vous pouvez créer un nouveau diagnostic, reprendre vos sessions et accéder à l’administration des diagnostics réalisés."
+                  ? "Vous pouvez gérer les accès invités, créer un nouveau diagnostic et accéder aux diagnostics réalisés depuis une interface unique."
                   : existingSession
                     ? "Votre diagnostic reste conservé en mémoire. Vous pouvez l’interrompre puis le reprendre sur la même session."
                     : "Vous pouvez créer votre diagnostic. Une fois démarré, il sera conservé et repris sur cette même session."}
@@ -159,14 +160,22 @@ export default async function DashboardPage() {
                 Connecté : <span className="font-medium">{user.email ?? user.id}</span>
               </div>
 
-              <div className="flex flex-wrap gap-3">
+              <div className="flex flex-wrap gap-3 md:justify-end">
                 {isAdmin && (
-                  <Link
-                    href="/admin/diagnostics"
-                    className="inline-flex items-center justify-center rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium text-slate-800 transition hover:bg-slate-50"
-                  >
-                    Administration diagnostics
-                  </Link>
+                  <>
+                    <Link
+                      href="/admin/access"
+                      className="inline-flex items-center justify-center rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium text-slate-800 transition hover:bg-slate-50"
+                    >
+                      Gestion des accès invités
+                    </Link>
+                    <Link
+                      href="/admin/diagnostics"
+                      className="inline-flex items-center justify-center rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium text-slate-800 transition hover:bg-slate-50"
+                    >
+                      Diagnostics réalisés
+                    </Link>
+                  </>
                 )}
 
                 {canCreateNew && (
@@ -176,6 +185,13 @@ export default async function DashboardPage() {
                     </button>
                   </form>
                 )}
+
+                <Link
+                  href={logoutHref}
+                  className="inline-flex items-center justify-center rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium text-slate-800 transition hover:bg-slate-50"
+                >
+                  Déconnexion
+                </Link>
               </div>
             </div>
           </div>

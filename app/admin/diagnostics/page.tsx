@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { requireAdminUser } from "@/lib/auth/access-control";
 import DiagnosticsAdminClient from "./DiagnosticsAdminClient";
 
@@ -19,9 +20,25 @@ export default async function AdminDiagnosticsPage() {
                 supprimer un dossier si nécessaire.
               </p>
             </div>
-            <div className="rounded-xl border bg-slate-50 px-4 py-3 text-sm text-slate-700">
-              Admin connecté :{" "}
-              <span className="font-medium">{adminUser.email ?? adminUser.id}</span>
+            <div className="flex flex-col gap-3 md:items-end">
+              <div className="rounded-xl border bg-slate-50 px-4 py-3 text-sm text-slate-700">
+                Admin connecté :{" "}
+                <span className="font-medium">{adminUser.email ?? adminUser.id}</span>
+              </div>
+              <div className="flex flex-wrap gap-3 md:justify-end">
+                <Link
+                  href="/dashboard"
+                  className="inline-flex items-center justify-center rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium text-slate-800 transition hover:bg-slate-50"
+                >
+                  Retour au dashboard
+                </Link>
+                <Link
+                  href="/auth/logout?next=/admin/login"
+                  className="inline-flex items-center justify-center rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium text-slate-800 transition hover:bg-slate-50"
+                >
+                  Déconnexion
+                </Link>
+              </div>
             </div>
           </div>
         </section>

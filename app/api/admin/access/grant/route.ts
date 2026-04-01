@@ -114,7 +114,7 @@ export async function POST(req: Request) {
       throw new Error(invitationError.message);
     }
 
-    const inviteRedirectTo = `${await appBaseUrl()}/auth/callback?next=${encodeURIComponent(
+    const inviteRedirectTo = `${await appBaseUrl()}/auth/finish?next=${encodeURIComponent(
       "/dashboard"
     )}`;
 

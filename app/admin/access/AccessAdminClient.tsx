@@ -55,14 +55,20 @@ export default function AccessAdminClient() {
   async function loadData() {
     setRefreshing(true);
     setError(null);
+
     try {
       const res = await fetch("/api/admin/access/list", {
         method: "GET",
         credentials: "include",
         cache: "no-store",
       });
+
       const data: AccessListResponse = await res.json();
-      if (!data.ok) throw new Error(data.error || "Impossible de charger les accès.");
+
+      if (!data.ok) {
+        throw new Error(data.error || "Impossible de charger les accès.");
+      }
+
       setEntitlements(Array.isArray(data.entitlements) ? data.entitlements : []);
       setInvitations(Array.isArray(data.invitations) ? data.invitations : []);
     } catch (e: any) {
@@ -96,13 +102,17 @@ export default function AccessAdminClient() {
       });
 
       const data = await res.json();
-      if (!data.ok) throw new Error(data.error || "Impossible de créer l’accès.");
+
+      if (!data.ok) {
+        throw new Error(data.error || "Impossible de créer l’accès.");
+      }
 
       setMessage(data.message || "Accès créé avec succès.");
       setEmail("");
       setExpiresAt("");
       setNotes("");
       setGrantAdmin(false);
+
       await loadData();
     } catch (e: any) {
       setError(e?.message || "Erreur inconnue.");
@@ -112,9 +122,18 @@ export default function AccessAdminClient() {
   }
 
   async function handleRevoke(payload: { userId?: string; invitationId?: string }) {
+    const confirmed = window.confirm(
+      payload.userId
+        ? "Confirmez-vous la suppression définitive de cet accès ?"
+        : "Confirmez-vous la suppression définitive de cette invitation ?"
+    );
+
+    if (!confirmed) return;
+
     setLoading(true);
     setError(null);
     setMessage(null);
+
     try {
       const res = await fetch("/api/admin/access/revoke", {
         method: "POST",
@@ -122,9 +141,14 @@ export default function AccessAdminClient() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
+
       const data = await res.json();
-      if (!data.ok) throw new Error(data.error || "Impossible de révoquer l’accès.");
-      setMessage(data.message || "Accès révoqué.");
+
+      if (!data.ok) {
+        throw new Error(data.error || "Impossible de supprimer l’accès.");
+      }
+
+      setMessage(data.message || "Suppression effectuée.");
       await loadData();
     } catch (e: any) {
       setError(e?.message || "Erreur inconnue.");
@@ -146,7 +170,9 @@ export default function AccessAdminClient() {
   return (
     <div className="space-y-6">
       <section className="rounded-2xl border bg-white p-6 shadow-sm">
-        <h2 className="text-lg font-semibold text-slate-900">Créer ou prolonger un accès</h2>
+        <h2 className="text-lg font-semibold text-slate-900">
+          Créer ou prolonger un accès
+        </h2>
         <p className="mt-1 text-sm text-slate-600">
           Si le client n’a pas encore de compte, une invitation e-mail sera envoyée.
           S’il a déjà un compte, son accès sera activé ou prolongé.
@@ -166,7 +192,9 @@ export default function AccessAdminClient() {
           </div>
 
           <div className="space-y-1">
-            <label className="text-sm font-medium text-slate-900">Date d’expiration</label>
+            <label className="text-sm font-medium text-slate-900">
+              Date d’expiration
+            </label>
             <input
               value={expiresAt}
               onChange={(e) => setExpiresAt(e.target.value)}
@@ -251,9 +279,15 @@ export default function AccessAdminClient() {
               ) : (
                 activeEntitlements.map((item) => (
                   <tr key={item.user_id}>
-                    <td className="border px-3 py-2">{item.email_snapshot || item.user_id}</td>
-                    <td className="border px-3 py-2">{formatDateTime(item.expires_at)}</td>
-                    <td className="border px-3 py-2">{formatDateTime(item.granted_at)}</td>
+                    <td className="border px-3 py-2">
+                      {item.email_snapshot || item.user_id}
+                    </td>
+                    <td className="border px-3 py-2">
+                      {formatDateTime(item.expires_at)}
+                    </td>
+                    <td className="border px-3 py-2">
+                      {formatDateTime(item.granted_at)}
+                    </td>
                     <td className="border px-3 py-2">{item.notes || "—"}</td>
                     <td className="border px-3 py-2">
                       <button
@@ -261,7 +295,7 @@ export default function AccessAdminClient() {
                         onClick={() => handleRevoke({ userId: item.user_id })}
                         className="rounded-lg border px-3 py-1.5 text-xs font-medium text-slate-700"
                       >
-                        Révoquer
+                        Supprimer
                       </button>
                     </td>
                   </tr>
@@ -273,7 +307,9 @@ export default function AccessAdminClient() {
       </section>
 
       <section className="rounded-2xl border bg-white p-6 shadow-sm">
-        <h2 className="text-lg font-semibold text-slate-900">Invitations en attente</h2>
+        <h2 className="text-lg font-semibold text-slate-900">
+          Invitations en attente
+        </h2>
         <div className="mt-4 overflow-x-auto">
           <table className="min-w-full border-collapse text-sm">
             <thead>
@@ -296,16 +332,22 @@ export default function AccessAdminClient() {
                 activeInvitations.map((item) => (
                   <tr key={item.id}>
                     <td className="border px-3 py-2">{item.email}</td>
-                    <td className="border px-3 py-2">{formatDateTime(item.access_expires_at)}</td>
-                    <td className="border px-3 py-2">{formatDateTime(item.invited_at)}</td>
-                    <td className="border px-3 py-2">{item.is_admin ? "Admin" : "Client"}</td>
+                    <td className="border px-3 py-2">
+                      {formatDateTime(item.access_expires_at)}
+                    </td>
+                    <td className="border px-3 py-2">
+                      {formatDateTime(item.invited_at)}
+                    </td>
+                    <td className="border px-3 py-2">
+                      {item.is_admin ? "Admin" : "Client"}
+                    </td>
                     <td className="border px-3 py-2">
                       <button
                         type="button"
                         onClick={() => handleRevoke({ invitationId: item.id })}
                         className="rounded-lg border px-3 py-1.5 text-xs font-medium text-slate-700"
                       >
-                        Annuler
+                        Supprimer
                       </button>
                     </td>
                   </tr>

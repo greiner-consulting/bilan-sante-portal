@@ -22,31 +22,40 @@ function decodeMaybe(v?: string) {
   }
 }
 
+function safeNext(value: string | null): string {
+  const next = String(value ?? "").trim();
+  if (!next.startsWith("/")) return "/dashboard";
+  if (next.startsWith("//")) return "/dashboard";
+  return next;
+}
+
 export default async function LoginPage(props: PageProps) {
   const sp = (await props.searchParams) ?? {};
+  const errorMsg = decodeMaybe(sp.error);
   const successMsg = decodeMaybe(sp.success);
-  const next = decodeMaybe(sp.next) ?? "/dashboard";
+  const next = safeNext(decodeMaybe(sp.next) ?? "/dashboard");
 
   const supabase = await createSupabaseServerClient();
   const {
     data: { user },
   } = await supabase.auth.getUser();
 
-  let resolvedErrorMsg = decodeMaybe(sp.error);
+  let currentUserState:
+    | { kind: "admin"; email: string | null }
+    | { kind: "guest"; email: string | null }
+    | { kind: "inactive"; email: string | null }
+    | null = null;
 
-  if (user?.id) {
-    const [admin, entitlement] = await Promise.all([
-      isAdminUser(user.id),
-      getActiveEntitlementForUser(user.id),
-    ]);
-
-    if (admin || entitlementIsUsable(entitlement)) {
-      redirect(next);
-    }
-
-    if (!resolvedErrorMsg) {
-      resolvedErrorMsg =
-        "Votre session existe, mais votre accès client n'est pas actif.";
+  if (user) {
+    const admin = await isAdminUser(user.id);
+    if (admin) {
+      currentUserState = { kind: "admin", email: user.email ?? null };
+    } else {
+      const entitlement = await getActiveEntitlementForUser(user.id);
+      if (entitlementIsUsable(entitlement)) {
+        redirect(next);
+      }
+      currentUserState = { kind: "inactive", email: user.email ?? null };
     }
   }
 
@@ -78,9 +87,47 @@ export default async function LoginPage(props: PageProps) {
           </div>
 
           <div className="mt-8">
-            {resolvedErrorMsg ? (
+            {currentUserState?.kind === "admin" ? (
+              <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+                <div className="font-medium">Vous êtes déjà connecté en administrateur.</div>
+                <div className="mt-1">
+                  Compte actif : {currentUserState.email ?? "administrateur"}.
+                </div>
+                <div className="mt-4 flex flex-wrap gap-3">
+                  <Link
+                    href="/dashboard"
+                    className="inline-flex items-center justify-center rounded-xl bg-slate-950 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-slate-800"
+                  >
+                    Aller au dashboard administrateur
+                  </Link>
+                  <Link
+                    href="/auth/logout?next=/login"
+                    className="inline-flex items-center justify-center rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium text-slate-800 transition hover:bg-slate-50"
+                  >
+                    Se déconnecter
+                  </Link>
+                </div>
+              </div>
+            ) : currentUserState?.kind === "inactive" ? (
               <div className="mb-4 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">
-                {resolvedErrorMsg}
+                <div className="font-medium">Votre session existe, mais votre accès invité n’est pas actif.</div>
+                <div className="mt-1">
+                  Compte actif : {currentUserState.email ?? "utilisateur"}.
+                </div>
+                <div className="mt-4 flex flex-wrap gap-3">
+                  <Link
+                    href="/auth/logout?next=/login"
+                    className="inline-flex items-center justify-center rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium text-slate-800 transition hover:bg-slate-50"
+                  >
+                    Se déconnecter
+                  </Link>
+                </div>
+              </div>
+            ) : null}
+
+            {errorMsg ? (
+              <div className="mb-4 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+                {errorMsg}
               </div>
             ) : null}
 
@@ -90,7 +137,7 @@ export default async function LoginPage(props: PageProps) {
               </div>
             ) : null}
 
-            <LoginForm next={next} />
+            {!currentUserState && <LoginForm next={next} />}
           </div>
 
           <div className="mt-8 text-xs text-slate-500">
@@ -110,10 +157,17 @@ export default async function LoginPage(props: PageProps) {
             <li>Historique et traçabilité des actions</li>
           </ul>
 
-          <div className="mt-8 text-xs text-slate-500">
-            <Link className="underline" href="/">
-              Retour à l’accueil
-            </Link>
+          <div className="mt-8 space-y-3 text-xs text-slate-500">
+            <div>
+              <Link className="underline" href="/">
+                Retour à l’accueil
+              </Link>
+            </div>
+            <div>
+              <Link className="underline" href="/admin/login?next=/dashboard">
+                Accès administrateur
+              </Link>
+            </div>
           </div>
         </aside>
       </div>

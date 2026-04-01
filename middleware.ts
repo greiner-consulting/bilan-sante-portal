@@ -12,6 +12,7 @@ function isPublicPath(pathname: string): boolean {
   return (
     pathname === "/" ||
     pathname === "/login" ||
+    pathname === "/admin/login" ||
     pathname.startsWith("/auth") ||
     pathname.startsWith("/reset-password") ||
     pathname.startsWith("/_next") ||
@@ -21,18 +22,19 @@ function isPublicPath(pathname: string): boolean {
   );
 }
 
-function isProtectedPath(pathname: string): boolean {
-  return (
-    pathname.startsWith("/dashboard") ||
-    pathname.startsWith("/admin") ||
-    pathname.startsWith("/api")
-  );
+function isAdminProtectedPath(pathname: string): boolean {
+  return pathname.startsWith("/admin");
 }
 
-function redirectToLogin(req: NextRequest) {
+function isGuestProtectedPath(pathname: string): boolean {
+  return pathname.startsWith("/dashboard");
+}
+
+function buildLoginRedirect(req: NextRequest, pathname: string) {
   const loginUrl = req.nextUrl.clone();
-  loginUrl.pathname = "/login";
-  loginUrl.searchParams.set("next", req.nextUrl.pathname);
+  loginUrl.pathname = pathname;
+  const next = `${req.nextUrl.pathname}${req.nextUrl.search || ""}`;
+  loginUrl.searchParams.set("next", next);
   return NextResponse.redirect(loginUrl);
 }
 
@@ -43,7 +45,11 @@ export async function middleware(req: NextRequest) {
     return NextResponse.next();
   }
 
-  if (isPublicPath(pathname) || !isProtectedPath(pathname)) {
+  if (isPublicPath(pathname)) {
+    return NextResponse.next();
+  }
+
+  if (!isAdminProtectedPath(pathname) && !isGuestProtectedPath(pathname)) {
     return NextResponse.next();
   }
 
@@ -72,12 +78,15 @@ export async function middleware(req: NextRequest) {
   } = await supabase.auth.getUser();
 
   if (!user) {
-    return redirectToLogin(req);
+    if (isAdminProtectedPath(pathname)) {
+      return buildLoginRedirect(req, "/admin/login");
+    }
+    return buildLoginRedirect(req, "/login");
   }
 
   return res;
 }
 
 export const config = {
-  matcher: ["/dashboard/:path*", "/admin/:path*", "/api/:path*"],
+  matcher: ["/dashboard/:path*", "/admin/:path*"],
 };
