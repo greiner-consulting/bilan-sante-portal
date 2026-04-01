@@ -88,7 +88,7 @@ export default async function DashboardPage() {
   const { user, isAdmin, sessions } = await loadDashboardContext();
   const existingSession = sessions[0] ?? null;
   const canCreateNew = isAdmin || !existingSession;
-  const logoutHref = isAdmin ? "/auth/logout?next=/admin/login" : "/auth/logout?next=/login";
+  const logoutHref = isAdmin ? "/logout?next=/admin/login" : "/logout?next=/login";
 
   async function createSession() {
     "use server";
@@ -160,7 +160,7 @@ export default async function DashboardPage() {
                 Connecté : <span className="font-medium">{user.email ?? user.id}</span>
               </div>
 
-              <div className="flex flex-wrap gap-3 md:justify-end">
+              <div className="flex flex-wrap gap-3">
                 {isAdmin && (
                   <>
                     <Link
