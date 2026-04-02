@@ -5,10 +5,18 @@ import { redirect } from "next/navigation";
 import { createSupabaseServerClient } from "@/lib/supabaseServer";
 
 function safeNext(value: string): string {
-  if (!value.startsWith("/")) return "/dashboard";
-  if (value.startsWith("//")) return "/dashboard";
-  if (value.startsWith("/admin")) return "/dashboard";
-  return value;
+  const next = String(value || "").trim();
+
+  if (!next) return "/dashboard";
+  if (!next.startsWith("/")) return "/dashboard";
+  if (next.startsWith("//")) return "/dashboard";
+  if (next.startsWith("/admin")) return "/dashboard";
+  if (next.startsWith("/auth")) return "/dashboard";
+  if (next.startsWith("/logout")) return "/dashboard";
+  if (next === "/login" || next.startsWith("/login?")) return "/dashboard";
+  if (next === "/admin/login" || next.startsWith("/admin/login?")) return "/dashboard";
+
+  return next;
 }
 
 async function appBaseUrl(): Promise<string> {
@@ -19,6 +27,7 @@ async function appBaseUrl(): Promise<string> {
   const h = await headers();
   const proto = h.get("x-forwarded-proto") ?? "http";
   const host = h.get("x-forwarded-host") ?? h.get("host") ?? "localhost:3000";
+
   return `${proto}://${host}`.replace(/\/+$/g, "");
 }
 
@@ -28,11 +37,15 @@ export async function loginAction(formData: FormData) {
 
   if (!email) {
     redirect(
-      `/login?error=${encodeURIComponent("Adresse e-mail requise.")}&next=${encodeURIComponent(next)}`
+      `/login?error=${encodeURIComponent(
+        "Adresse e-mail requise."
+      )}&next=${encodeURIComponent(next)}`
     );
   }
 
-  const redirectTo = `${await appBaseUrl()}/auth/callback?next=${encodeURIComponent(next)}`;
+  const redirectTo = `${await appBaseUrl()}/auth/callback?next=${encodeURIComponent(
+    next
+  )}`;
 
   const supabase = await createSupabaseServerClient();
   const { error } = await supabase.auth.signInWithOtp({
