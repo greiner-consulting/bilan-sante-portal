@@ -361,7 +361,9 @@ function uniqueStrings(values: string[]): string[] {
 function splitIntoSections(rawText: string): TrameSection[] {
   const normalized = String(rawText ?? "").replace(/\r/g, "");
   const parts = normalized
-    .split(/\n{2,}|(?=SECTION\s+\d+)|(?=CHAPITRE\s+\d+)|(?=DOMAINE\s+\d+)|(?=DIMENSION\s+\d+)|(?=\d+\s*[). -]\s+)/i)
+    .split(
+      /\n{2,}|(?=SECTION\s+\d+)|(?=CHAPITRE\s+\d+)|(?=DOMAINE\s+\d+)|(?=DIMENSION\s+\d+)|(?=\d+\s*[). -]\s+)/i
+    )
     .map((part) => part.trim())
     .filter((part) => part.length > 0);
 
@@ -382,13 +384,13 @@ function splitIntoSections(rawText: string): TrameSection[] {
 }
 
 function scoreAliasHits(text: string, aliases: string[]): number {
-  const normalizedText = normalizeText(text);
+  const normalized = normalizeText(text);
   let score = 0;
 
   for (const alias of aliases) {
     const normalizedAlias = normalizeText(alias);
     if (!normalizedAlias) continue;
-    if (normalizedText.includes(normalizedAlias)) {
+    if (normalized.includes(normalizedAlias)) {
       score += normalizedAlias.length >= 12 ? 8 : 5;
     }
   }
@@ -478,22 +480,33 @@ function buildDimensionBlueprint(
     .map(([theme, keywords]) => scoreThemeEvidence(detectedSections, theme, keywords))
     .sort((a, b) => b.score - a.score);
 
-  const strongExpressed = evidences.filter((item) => item.score >= 12).map((item) => item.theme);
+  const strongExpressed = evidences
+    .filter((item) => item.score >= 12)
+    .map((item) => item.theme);
+
   const weakExpressed = evidences
     .filter((item) => item.score >= 5 && item.score < 12)
     .map((item) => item.theme);
 
+  // Correctif clé :
+  // on ne coupe plus artificiellement à 1 seul thème faible
+  // dès qu’un thème fort existe. On garde jusqu’à 3 thèmes
+  // réellement détectés (forts + faibles).
   const expressedThemes = uniqueStrings([
     ...strongExpressed,
-    ...weakExpressed.slice(0, strongExpressed.length === 0 ? 2 : 1),
+    ...weakExpressed,
   ]).slice(0, 3);
 
   const selectedThemes = [...expressedThemes];
   const inferredThemes: string[] = [];
 
-  if (selectedThemes.length < 3 && expressedThemes.length >= 1) {
+  // Règle conservée : on peut introduire au maximum 1 thème non exprimé
+  if (selectedThemes.length < 3) {
     const remainingThemes = definition.requiredThemes.filter(
-      (theme) => !selectedThemes.some((item) => normalizeText(item) === normalizeText(theme))
+      (theme) =>
+        !selectedThemes.some(
+          (item) => normalizeText(item) === normalizeText(theme)
+        )
     );
 
     if (remainingThemes.length > 0) {
@@ -513,7 +526,9 @@ function buildDimensionBlueprint(
     selectedThemes: uniqueStrings(selectedThemes).slice(0, 3),
     weakSignalThemes: weakExpressed.filter(
       (theme) =>
-        !expressedThemes.some((item) => normalizeText(item) === normalizeText(theme))
+        !expressedThemes.some(
+          (item) => normalizeText(item) === normalizeText(theme)
+        )
     ),
   };
 }
@@ -533,11 +548,14 @@ function buildStructureValidation(
   }
 
   const labels = missing.map((item) => item.label);
+
   return {
     isValid: false,
     missingDimensionIds: missing.map((item) => item.dimensionId),
     missingDimensionLabels: labels,
-    message: `La trame ne respecte pas l’architecture minimale attendue. Domaine(s) manquant(s) ou non reconnaissable(s) : ${labels.join(", ")}.`,
+    message: `La trame ne respecte pas l’architecture minimale attendue. Domaine(s) manquant(s) ou non reconnaissable(s) : ${labels.join(
+      ", "
+    )}.`,
   };
 }
 
@@ -623,9 +641,11 @@ function deriveMissingFields(
 
 export function readBaseTrame(rawText: string): BaseTrame {
   const sections = splitIntoSections(rawText);
+
   const dimensionBlueprints = DIAGNOSTIC_DIMENSIONS.map((dimension) =>
     buildDimensionBlueprint(dimension.id, sections)
   );
+
   const structureValidation = buildStructureValidation(dimensionBlueprints);
 
   if (!structureValidation.isValid) {
