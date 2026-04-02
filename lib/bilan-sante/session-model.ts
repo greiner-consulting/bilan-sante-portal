@@ -287,6 +287,21 @@ export interface FrozenDimensionDiagnosis {
   keyFactIds?: string[];
 }
 
+export type FinalObjectiveProposalSource =
+  | "initial_seed"
+  | "alternative_seed"
+  | "adjusted_feedback"
+  | "fallback";
+
+export interface FinalObjectiveDecisionTrace {
+  at: string;
+  status: "validated" | "adjusted" | "refused";
+  previousLabel: string;
+  nextLabel: string;
+  previousSourceSeedId?: string | null;
+  nextSourceSeedId?: string | null;
+}
+
 export interface FinalObjective {
   id: string;
   dimensionId: DimensionId;
@@ -298,6 +313,11 @@ export interface FinalObjective {
   gainHypotheses: string[];
   validationStatus: "proposed" | "validated" | "adjusted" | "refused";
   quickWin: string;
+
+  proposalRevision?: number;
+  sourceSeedId?: string | null;
+  proposalSource?: FinalObjectiveProposalSource;
+  decisionHistory?: FinalObjectiveDecisionTrace[];
 }
 
 export interface FinalObjectiveSet {

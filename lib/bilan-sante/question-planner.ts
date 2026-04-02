@@ -1,5 +1,9 @@
 import type { DimensionId, IterationNumber } from "@/lib/bilan-sante/protocol";
-import { maxQuestionsForIteration } from "@/lib/bilan-sante/protocol";
+import {
+  DIAGNOSTIC_DIMENSIONS,
+  dimensionTitle,
+  maxQuestionsForIteration,
+} from "@/lib/bilan-sante/protocol";
 import type {
   DiagnosticSessionAggregate,
   SignalRegistry,
@@ -16,7 +20,6 @@ import {
 } from "@/lib/bilan-sante/coverage-tracker";
 import { mandatoryAnglesForIteration } from "@/lib/bilan-sante/iteration-closer";
 import { composeQuestionWithLlm } from "@/lib/bilan-sante/llm-diagnostic-writer";
-import { dimensionTitle } from "@/lib/bilan-sante/protocol";
 
 type PlanParams = {
   registry: SignalRegistry;
@@ -48,6 +51,12 @@ type ScoredSignal = {
   rationale: string[];
 };
 
+type TrameDimensionBlueprintLite = {
+  dimensionId: DimensionId;
+  selectedThemes?: string[];
+  inferredThemes?: string[];
+};
+
 const CANDIDATE_POOL_SIZE: Record<IterationNumber, number> = {
   1: 18,
   2: 18,
@@ -55,6 +64,7 @@ const CANDIDATE_POOL_SIZE: Record<IterationNumber, number> = {
 };
 
 const MIN_CORE_QUESTIONS = 3;
+
 const ABSOLUTE_MIN_SCORE: Record<IterationNumber, number> = {
   1: 40,
   2: 38,
@@ -78,27 +88,18 @@ function normalizeForMatch(value: string | null | undefined): string {
     .toLowerCase();
 }
 
-function shorten(value: string | null | undefined, max = 240): string {
-  const text = normalizeText(value);
-  if (!text) return "";
-  if (text.length <= max) return text;
-  return `${text.slice(0, max - 1).trim()}…`;
-}
-
 function uniqueStrings(values: string[]): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
+
   for (const value of values) {
     const key = normalizeForMatch(value);
     if (!key || seen.has(key)) continue;
     seen.add(key);
-    out.push(value);
+    out.push(normalizeText(value));
   }
-  return out;
-}
 
-function uniqueAngles(values: EntryAngle[]): EntryAngle[] {
-  return [...new Set(values)];
+  return out;
 }
 
 function buildQuestionId(
@@ -141,10 +142,11 @@ function getThemeMemorySummary(
 
   let dominantSuggestedAngle: EntryAngle | null = null;
   let bestAngleScore = -1;
+
   for (const [angle, count] of angleCounts.entries()) {
     if (count > bestAngleScore) {
-      bestAngleScore = count;
       dominantSuggestedAngle = angle;
+      bestAngleScore = count;
     }
   }
 
@@ -160,15 +162,17 @@ function getThemeMemorySummary(
     .map(([category]) => category)
     .slice(0, 3);
 
-  const extractedFacts = uniqueStrings(usable.flatMap((item) => item.extractedFacts ?? [])).slice(0, 4);
+  const extractedFacts = uniqueStrings(usable.flatMap((item) => item.extractedFacts ?? [])).slice(
+    0,
+    4
+  );
+
   const coverage = getThemeCoverage(session, dimensionId, theme);
   const askedAngles = coverage?.askedAngles ?? [];
   const confirmedAngles = coverage?.confirmedAngles ?? [];
   const rejectedAngles = coverage?.rejectedAngles ?? [];
   const saturationScore =
-    confirmedAngles.length * 22 +
-    extractedFacts.length * 14 +
-    (coverage?.factDensity ?? 0) * 10;
+    confirmedAngles.length * 22 + extractedFacts.length * 14 + (coverage?.factDensity ?? 0) * 10;
 
   return {
     theme,
@@ -189,7 +193,11 @@ function getThemeMemorySummary(
 
 function getAlreadyUsedSignalIds(session: DiagnosticSessionAggregate): Set<string> {
   const ids = new Set<string>();
-  for (const question of session.currentWorkset?.questions ?? []) ids.add(question.signalId);
+
+  for (const question of session.currentWorkset?.questions ?? []) {
+    ids.add(question.signalId);
+  }
+
   for (const insight of session.analysisMemory ?? []) {
     if (
       insight.signalId &&
@@ -200,14 +208,69 @@ function getAlreadyUsedSignalIds(session: DiagnosticSessionAggregate): Set<strin
       ids.add(insight.signalId);
     }
   }
+
   return ids;
+}
+
+function getDimensionBlueprint(
+  session: DiagnosticSessionAggregate,
+  dimensionId: DimensionId
+): TrameDimensionBlueprintLite | null {
+  const trame = session.trame as
+    | (DiagnosticSessionAggregate["trame"] & {
+        dimensionBlueprints?: TrameDimensionBlueprintLite[];
+      })
+    | null;
+
+  const blueprints = trame?.dimensionBlueprints;
+  if (!Array.isArray(blueprints)) return null;
+
+  return (
+    blueprints.find((item) => Number(item.dimensionId) === Number(dimensionId)) ?? null
+  );
+}
+
+function getRequiredThemesForDimension(dimensionId: DimensionId): string[] {
+  return (
+    DIAGNOSTIC_DIMENSIONS.find((item) => item.id === dimensionId)?.requiredThemes ?? []
+  );
+}
+
+function getSelectedThemesForDimension(
+  session: DiagnosticSessionAggregate,
+  dimensionId: DimensionId
+): string[] {
+  const blueprint = getDimensionBlueprint(session, dimensionId);
+  const selected = Array.isArray(blueprint?.selectedThemes)
+    ? blueprint!.selectedThemes!.map((item) => normalizeText(item)).filter(Boolean)
+    : [];
+
+  if (selected.length > 0) {
+    return uniqueStrings(selected).slice(0, 3);
+  }
+
+  return getRequiredThemesForDimension(dimensionId).slice(0, 3);
+}
+
+function getInferredThemesForDimension(
+  session: DiagnosticSessionAggregate,
+  dimensionId: DimensionId
+): Set<string> {
+  const blueprint = getDimensionBlueprint(session, dimensionId);
+  const inferred = Array.isArray(blueprint?.inferredThemes)
+    ? blueprint!.inferredThemes!.map((item) => normalizeForMatch(item)).filter(Boolean)
+    : [];
+
+  return new Set<string>(inferred);
 }
 
 function countCoveredAngle(themeMemory: ThemeMemorySummary, angle: EntryAngle): number {
   let count = 0;
   if (themeMemory.askedAngles.includes(angle)) count += 1;
   if (themeMemory.confirmedAngles.includes(angle)) count += 2;
-  for (const item of themeMemory.all) if (item.suggestedAngle === angle) count += 1;
+  for (const item of themeMemory.all) {
+    if (item.suggestedAngle === angle) count += 1;
+  }
   return count;
 }
 
@@ -220,6 +283,7 @@ function scoreAngleNovelty(
 ): number {
   const sameAngleCount = countCoveredAngle(themeMemory, signal.entryAngle);
   if (sameAngleCount === 0) return iteration === 1 ? 6 : 16;
+
   if (
     wasAngleMarkedInPriorIterations({
       session,
@@ -231,23 +295,28 @@ function scoreAngleNovelty(
   ) {
     return iteration === 3 ? -20 : -14;
   }
+
   return sameAngleCount === 1 ? -4 : -10;
 }
 
 function scoreThemeContinuation(themeMemory: ThemeMemorySummary, iteration: IterationNumber): number {
   if (themeMemory.usable.length === 0 && themeMemory.confirmedAngles.length === 0) return 8;
   if (themeMemory.saturationScore >= 78) return -18;
+
   if (themeMemory.usable.length === 1 || themeMemory.confirmedAngles.length === 1) {
     return iteration === 1 ? -2 : 12;
   }
+
   if (themeMemory.usable.length >= 2 || themeMemory.confirmedAngles.length >= 2) {
     return iteration === 3 ? 8 : -4;
   }
+
   return 0;
 }
 
 function scoreRootCauseAlignment(signal: DiagnosticSignal, themeMemory: ThemeMemorySummary): number {
   let score = 0;
+
   if (
     (themeMemory.dominantRootCauses.includes("skills") ||
       themeMemory.dominantRootCauses.includes("experience") ||
@@ -256,9 +325,14 @@ function scoreRootCauseAlignment(signal: DiagnosticSignal, themeMemory: ThemeMem
   ) {
     score += 12;
   }
-  if (themeMemory.dominantRootCauses.includes("arbitration") && signal.entryAngle === "arbitration") {
+
+  if (
+    themeMemory.dominantRootCauses.includes("arbitration") &&
+    signal.entryAngle === "arbitration"
+  ) {
     score += 12;
   }
+
   if (
     (themeMemory.dominantRootCauses.includes("pricing") ||
       themeMemory.dominantRootCauses.includes("cash")) &&
@@ -266,35 +340,48 @@ function scoreRootCauseAlignment(signal: DiagnosticSignal, themeMemory: ThemeMem
   ) {
     score += 10;
   }
-  if (themeMemory.dominantRootCauses.includes("organization") && signal.entryAngle === "formalization") {
+
+  if (
+    themeMemory.dominantRootCauses.includes("organization") &&
+    signal.entryAngle === "formalization"
+  ) {
     score += 10;
   }
-  if (themeMemory.dominantRootCauses.includes("resources") && signal.entryAngle === "dependency") {
+
+  if (
+    themeMemory.dominantRootCauses.includes("resources") &&
+    signal.entryAngle === "dependency"
+  ) {
     score += 8;
   }
+
   return score;
 }
 
 function scoreIterationIntentFit(signal: DiagnosticSignal, iteration: IterationNumber): number {
   let score = 0;
+
   if (iteration === 1) {
     if (signal.signalKind === "explicit") score += 14;
     if (signal.entryAngle === "mechanism") score += 10;
     if (signal.entryAngle === "formalization") score += 6;
     if (signal.signalKind === "absence") score -= 6;
   }
+
   if (iteration === 2) {
     if (signal.entryAngle === "causality") score += 18;
     if (signal.entryAngle === "arbitration") score += 14;
     if (signal.entryAngle === "dependency") score += 10;
     if (signal.entryAngle === "economics") score += 8;
   }
+
   if (iteration === 3) {
     if (signal.entryAngle === "formalization") score += 12;
     if (signal.entryAngle === "dependency") score += 12;
     if (signal.entryAngle === "arbitration") score += 10;
     if (signal.entryAngle === "economics") score += 6;
   }
+
   return score;
 }
 
@@ -303,17 +390,19 @@ function isLowEvidenceSignal(signal: DiagnosticSignal): boolean {
 
   const excerpt = normalizeForMatch(signal.sourceExcerpt);
   const constat = normalizeForMatch(signal.constat);
+
   const genericExcerpt =
     excerpt.length < 110 ||
     excerpt.includes("aucun signal suffisamment explicite") ||
     excerpt.includes("aucun signal") ||
     excerpt.includes("no_evidence") ||
     excerpt.includes("not_enough_material");
+
   const genericConstat =
     constat.includes("no_evidence") ||
     constat.includes("no evidence") ||
     constat.includes("insuffisamment etaye") ||
-    constat.includes("insuffisamment étayé") ||
+    constat.includes("insuffisamment etaye") ||
     constat.includes("non documente") ||
     constat.includes("non documenté");
 
@@ -410,13 +499,31 @@ function scoreQuestionSpecificity(
   if (/(arbitrage|validation|decide|décide|comite|comité)/.test(text)) score += 8;
   if (/(depend|dépend|personne cle|personne clé|relais|goulot)/.test(text)) score += 8;
   if (/(marge|cash|cout|coût|rentabilite|rentabilité)/.test(text)) score += 8;
-  if (/(rituel|indicateur|tableau de bord|cadre|role|rôle|procedure|procédure)/.test(text)) score += 6;
-  if (iteration === 3 && /(moins pilote|moins piloté|hors pilotage|non suivi)/.test(text)) score += 6;
-  if (themeMemory.lastQuestionText && normalizeForMatch(themeMemory.lastQuestionText) === normalizeForMatch(signal.constat)) {
+  if (/(rituel|indicateur|tableau de bord|cadre|role|rôle|procedure|procédure)/.test(text)) {
+    score += 6;
+  }
+  if (iteration === 3 && /(moins pilote|moins piloté|hors pilotage|non suivi)/.test(text)) {
+    score += 6;
+  }
+  if (
+    themeMemory.lastQuestionText &&
+    normalizeForMatch(themeMemory.lastQuestionText) === normalizeForMatch(signal.constat)
+  ) {
     score -= 6;
   }
 
   return score;
+}
+
+function scoreThemePlanAlignment(
+  signal: DiagnosticSignal,
+  inferredThemes: Set<string>
+): number {
+  const themeKey = normalizeForMatch(signal.theme);
+  if (inferredThemes.has(themeKey)) {
+    return -6;
+  }
+  return 10;
 }
 
 function scoreSignalForIteration(
@@ -426,9 +533,11 @@ function scoreSignalForIteration(
   alreadyUsedSignalIds: Set<string>,
   session: DiagnosticSessionAggregate,
   dimensionId: DimensionId,
+  inferredThemes: Set<string>,
   rationale: string[]
 ): number {
   let score = signal.criticalityScore + signal.confidenceScore;
+
   if (signal.signalKind === "explicit") score += 8;
   if (signal.signalKind === "absence") score -= 2;
 
@@ -453,7 +562,12 @@ function scoreSignalForIteration(
   score += rootCauseAlignment;
   if (rootCauseAlignment > 0) rationale.push("alignement causes racines");
 
-  const lowEvidencePenalty = scoreLowEvidencePenalty(signal, themeMemory, iteration, dimensionId);
+  const lowEvidencePenalty = scoreLowEvidencePenalty(
+    signal,
+    themeMemory,
+    iteration,
+    dimensionId
+  );
   score += lowEvidencePenalty;
   if (lowEvidencePenalty < 0) rationale.push("signal d'absence faible");
 
@@ -472,6 +586,11 @@ function scoreSignalForIteration(
   const specificity = scoreQuestionSpecificity(signal, themeMemory, iteration);
   score += specificity;
   if (specificity >= 10) rationale.push("mécanisme managérial spécifique");
+
+  const themePlanAlignment = scoreThemePlanAlignment(signal, inferredThemes);
+  score += themePlanAlignment;
+  if (themePlanAlignment > 0) rationale.push("thème retenu par le plan de lecture");
+  if (themePlanAlignment < 0) rationale.push("thème inféré, à utiliser avec retenue");
 
   return score;
 }
@@ -512,8 +631,20 @@ function hasStrongReasonToKeep(item: ScoredSignal, iteration: IterationNumber): 
   if (item.signal.criticalityScore >= 85) return true;
   if (item.themeMemory.usableFactCount >= 2) return true;
   if (item.themeMemory.confirmedAngles.length >= 2 && iteration >= 2) return true;
-  if (normalizeText(item.signal.sourceExcerpt).length >= 180 && item.signal.signalKind === "explicit") return true;
+  if (
+    normalizeText(item.signal.sourceExcerpt).length >= 180 &&
+    item.signal.signalKind === "explicit"
+  ) {
+    return true;
+  }
   return false;
+}
+
+function sameThemeCount(selected: ScoredSignal[], candidate: ScoredSignal): number {
+  const candidateKey = normalizeForMatch(candidate.signal.theme);
+  return selected.filter(
+    (item) => normalizeForMatch(item.signal.theme) === candidateKey
+  ).length;
 }
 
 function canReuseThemeInSameIteration(
@@ -524,6 +655,7 @@ function canReuseThemeInSameIteration(
   const sameTheme = selected.filter(
     (item) => normalizeForMatch(item.signal.theme) === normalizeForMatch(candidate.signal.theme)
   );
+
   if (sameTheme.length === 0) return true;
   if (sameTheme.length >= 2) return false;
   if (iteration === 1) return false;
@@ -539,15 +671,56 @@ function canReuseThemeInSameIteration(
 
 function selectHighQualitySignals(
   scoredSignals: ScoredSignal[],
-  iteration: IterationNumber
+  iteration: IterationNumber,
+  targetThemes: string[]
 ): ScoredSignal[] {
   if (scoredSignals.length === 0) return [];
 
-  const selected: ScoredSignal[] = [];
   const maxQuestions = maxQuestionsForIteration(iteration);
+  const selected: ScoredSignal[] = [];
+  const coveredThemes = new Set<string>();
+  const targetThemeKeys = targetThemes.map((item) => normalizeForMatch(item));
+
+  for (const themeKey of targetThemeKeys) {
+    const themeCandidate = scoredSignals.find((item) => {
+      if (normalizeForMatch(item.signal.theme) !== themeKey) return false;
+      if (!canReuseThemeInSameIteration(selected, item, iteration)) return false;
+      return (
+        item.score >= ABSOLUTE_MIN_SCORE[iteration] - 6 || hasStrongReasonToKeep(item, iteration)
+      );
+    });
+
+    if (themeCandidate) {
+      selected.push(themeCandidate);
+      coveredThemes.add(themeKey);
+      if (selected.length >= maxQuestions) {
+        return selected.slice(0, maxQuestions);
+      }
+    }
+  }
 
   for (const item of scoredSignals) {
+    if (selected.length >= maxQuestions) break;
+    if (selected.some((existing) => existing.signal.id === item.signal.id)) continue;
     if (!canReuseThemeInSameIteration(selected, item, iteration)) continue;
+
+    const themeKey = normalizeForMatch(item.signal.theme);
+    const themeUses = sameThemeCount(selected, item);
+
+    if (!coveredThemes.has(themeKey) && targetThemeKeys.includes(themeKey)) {
+      if (
+        item.score >= ABSOLUTE_MIN_SCORE[iteration] - 8 ||
+        hasStrongReasonToKeep(item, iteration)
+      ) {
+        selected.push(item);
+        coveredThemes.add(themeKey);
+      }
+      continue;
+    }
+
+    if (themeUses >= 2) {
+      continue;
+    }
 
     if (selected.length < MIN_CORE_QUESTIONS) {
       if (item.score >= ABSOLUTE_MIN_SCORE[iteration]) {
@@ -561,11 +734,9 @@ function selectHighQualitySignals(
     }
 
     selected.push(item);
-    if (selected.length >= maxQuestions) break;
   }
 
-  if (selected.length >= MIN_CORE_QUESTIONS) return selected.slice(0, maxQuestions);
-  return scoredSignals.slice(0, Math.min(MIN_CORE_QUESTIONS, scoredSignals.length));
+  return selected.slice(0, maxQuestions);
 }
 
 export async function planIterationQuestionsWithDiagnostics(
@@ -577,12 +748,20 @@ export async function planIterationQuestionsWithDiagnostics(
 }> {
   const { registry, dimensionId, iteration, session } = params;
   const alreadyUsedSignalIds = getAlreadyUsedSignalIds(session);
+  const selectedThemes = getSelectedThemesForDimension(session, dimensionId);
+  const inferredThemes = getInferredThemesForDimension(session, dimensionId);
+  const allowedThemeKeys = new Set(selectedThemes.map((item) => normalizeForMatch(item)));
 
   const candidates: ScoredSignal[] = getAllSignals(registry)
     .filter((signal) => signal.dimensionId === dimensionId)
+    .filter((signal) => {
+      if (allowedThemeKeys.size === 0) return true;
+      return allowedThemeKeys.has(normalizeForMatch(signal.theme));
+    })
     .map((signal) => {
       const themeMemory = getThemeMemorySummary(session, dimensionId, signal.theme);
       const rationale: string[] = [];
+
       return {
         signal,
         themeMemory,
@@ -594,6 +773,7 @@ export async function planIterationQuestionsWithDiagnostics(
           alreadyUsedSignalIds,
           session,
           dimensionId,
+          inferredThemes,
           rationale
         ),
       };
@@ -601,7 +781,7 @@ export async function planIterationQuestionsWithDiagnostics(
     .sort((a, b) => b.score - a.score)
     .slice(0, CANDIDATE_POOL_SIZE[iteration]);
 
-  const selected = selectHighQualitySignals(candidates, iteration);
+  const selected = selectHighQualitySignals(candidates, iteration, selectedThemes);
   const questions = await Promise.all(
     selected.map((item, index) =>
       buildStructuredQuestion(item.signal, iteration, index + 1, item.themeMemory, dimensionId)
@@ -617,19 +797,23 @@ export async function planIterationQuestionsWithDiagnostics(
   }));
 
   const notes = [
+    `Plan de dimension retenu : ${selectedThemes.join(" | ") || "aucun thème retenu"}.`,
+    inferredThemes.size > 0
+      ? `Thème inféré utilisé avec retenue : ${selectedThemes
+          .filter((item) => inferredThemes.has(normalizeForMatch(item)))
+          .join(" | ")}.`
+      : "Aucun thème inféré utilisé sur cette dimension.",
     `Sélection ${questions.length} question(s) sur ${candidates.length} candidat(s).`,
-    `Itération ${iteration}/3 — angles prioritaires : ${mandatoryAnglesForIteration(iteration).join(", ")}.`,
+    `Itération ${iteration}/3 — angles prioritaires : ${mandatoryAnglesForIteration(iteration).join(
+      ", "
+    )}.`,
     `Cap cible itération : ${maxQuestionsForIteration(iteration)} question(s).`,
-    iteration > 1
-      ? "Les doublons de thème ne sont autorisés que s'ils apportent un angle réellement distinct et plus riche."
-      : "Priorité aux thèmes les plus denses et les plus exploitables dès le cadrage.",
+    "Le planner couvre d’abord les thèmes du plan de lecture avant d’autoriser un approfondissement sur un même thème.",
   ];
 
   return { questions, diagnostics, notes };
 }
 
-export async function planIterationQuestions(
-  params: PlanParams
-): Promise<StructuredQuestion[]> {
+export async function planIterationQuestions(params: PlanParams): Promise<StructuredQuestion[]> {
   return (await planIterationQuestionsWithDiagnostics(params)).questions;
 }

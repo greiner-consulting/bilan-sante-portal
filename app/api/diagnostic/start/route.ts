@@ -43,6 +43,16 @@ function summarizeError(error: unknown): string {
   return String(error ?? "unknown_error");
 }
 
+function isTrameStructureError(message: string): boolean {
+  return String(message ?? "").startsWith("TRAME_STRUCTURE_INVALID:");
+}
+
+function humanizeTrameStructureError(message: string): string {
+  return String(message ?? "")
+    .replace(/^TRAME_STRUCTURE_INVALID:\s*/i, "")
+    .trim();
+}
+
 export async function POST(req: Request) {
   const supabaseSSR = await createSupabaseServerClient();
   const {
@@ -54,12 +64,10 @@ export async function POST(req: Request) {
   }
 
   const admin = adminSupabase();
-
   const adminFlag = await isAdminUser(user.id);
 
   if (!adminFlag) {
     const ent = await getActiveEntitlementForUser(user.id);
-
     if (!entitlementIsUsable(ent)) {
       return json({ ok: false, error: "No entitlement" }, 403);
     }
@@ -177,6 +185,34 @@ export async function POST(req: Request) {
       200
     );
   } catch (error) {
+    const errorMessage = summarizeError(error);
+
+    if (isTrameStructureError(errorMessage)) {
+      await admin
+        .from("diagnostic_sessions")
+        .update({
+          status: "collected",
+          phase: "awaiting_trame",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", sessionId);
+
+      logError("trame_structure_invalid", {
+        sessionId,
+        error: errorMessage,
+      });
+
+      return json(
+        {
+          ok: false,
+          code: "TRAME_STRUCTURE_INVALID",
+          error: humanizeTrameStructureError(errorMessage),
+          session_id: sessionId,
+        },
+        422
+      );
+    }
+
     await admin
       .from("diagnostic_sessions")
       .update({
@@ -187,14 +223,14 @@ export async function POST(req: Request) {
 
     logError("bootstrap_failed", {
       sessionId,
-      error: summarizeError(error),
+      error: errorMessage,
       hasOpenAiKey: Boolean(process.env.OPENAI_API_KEY),
     });
 
     return json(
       {
         ok: false,
-        error: summarizeError(error) || "Ingestion failed",
+        error: errorMessage || "Ingestion failed",
         session_id: sessionId,
       },
       500

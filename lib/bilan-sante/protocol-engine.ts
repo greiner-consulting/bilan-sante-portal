@@ -172,11 +172,12 @@ function buildLegacyQuestion(
   let questionOuverte = `Pouvez-vous préciser ce point sur le thème "${signal.theme}" ?`;
 
   if (iteration === 1) {
-    questionOuverte = signal.signalKind === "absence"
-      ? `Sur le thème "${signal.theme}", la trame ne permet pas de voir clairement comment le sujet est piloté. Comment ce sujet fonctionne-t-il réellement aujourd’hui, qui intervient, et où se situent les principaux points de fragilité ?`
-      : excerpt
-      ? `Sur le thème "${signal.theme}", la trame mentionne : "${excerpt}". Concrètement, comment ce sujet est-il géré aujourd’hui dans le fonctionnement réel de l’entreprise ?`
-      : `Sur le thème "${signal.theme}", comment ce sujet est-il géré aujourd’hui dans le fonctionnement réel de l’entreprise ?`;
+    questionOuverte =
+      signal.signalKind === "absence"
+        ? `Sur le thème "${signal.theme}", la trame ne permet pas de voir clairement comment le sujet est piloté. Comment ce sujet fonctionne-t-il réellement aujourd’hui, qui intervient, et où se situent les principaux points de fragilité ?`
+        : excerpt
+          ? `Sur le thème "${signal.theme}", la trame mentionne : "${excerpt}". Concrètement, comment ce sujet est-il géré aujourd’hui dans le fonctionnement réel de l’entreprise ?`
+          : `Sur le thème "${signal.theme}", comment ce sujet est-il géré aujourd’hui dans le fonctionnement réel de l’entreprise ?`;
   }
 
   if (iteration === 2) {
@@ -374,7 +375,10 @@ function deriveRootCause(
   signals: DiagnosticSignal[]
 ): string {
   const themeMemory = (session.analysisMemory ?? []).filter(
-    (item) => item.dimensionId === dimensionId && item.isUsableBusinessMatter && (item.detectedRootCauses?.length ?? 0) > 0
+    (item) =>
+      item.dimensionId === dimensionId &&
+      item.isUsableBusinessMatter &&
+      (item.detectedRootCauses?.length ?? 0) > 0
   );
 
   const causeCounts = new Map<string, number>();
@@ -386,18 +390,47 @@ function deriveRootCause(
 
   const topCause = [...causeCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
 
-  if (topCause === "skills" || topCause === "experience") return "Le diagnostic converge vers un problème de compétences disponibles, d’expérience ou de maturité sur les sujets critiques.";
-  if (topCause === "decision") return "Le diagnostic converge vers des décisions inadaptées, tardives ou insuffisamment sécurisées dans les points clés.";
-  if (topCause === "arbitration") return "Le diagnostic converge vers une chaîne d’arbitrage insuffisamment clarifiée ou trop centralisée.";
-  if (topCause === "organization") return "Le diagnostic converge vers un problème de cadre, de rôles ou d’organisation du pilotage.";
-  if (topCause === "resources") return "Le diagnostic converge vers une tension structurelle de ressources, de capacité ou de dépendance opérationnelle.";
-  if (topCause === "pricing" || topCause === "cash") return "Le diagnostic converge vers un désalignement entre pilotage opérationnel et impact économique réel.";
+  if (topCause === "skills" || topCause === "experience") {
+    return "Le diagnostic converge vers un problème de compétences disponibles, d’expérience ou de maturité sur les sujets critiques.";
+  }
+  if (topCause === "decision") {
+    return "Le diagnostic converge vers des décisions inadaptées, tardives ou insuffisamment sécurisées dans les points clés.";
+  }
+  if (topCause === "arbitration") {
+    return "Le diagnostic converge vers une chaîne d’arbitrage insuffisamment clarifiée ou trop centralisée.";
+  }
+  if (topCause === "organization") {
+    return "Le diagnostic converge vers un problème de cadre, de rôles ou d’organisation du pilotage.";
+  }
+  if (topCause === "resources") {
+    return "Le diagnostic converge vers une tension structurelle de ressources, de capacité ou de dépendance opérationnelle.";
+  }
+  if (topCause === "pricing" || topCause === "cash") {
+    return "Le diagnostic converge vers un désalignement entre pilotage opérationnel et impact économique réel.";
+  }
 
-  const text = signals.map((s) => `${s.theme} ${s.managerialRisk} ${s.probableConsequence}`).join(" ").toLowerCase();
-  if (text.includes("non document") || text.includes("non suivi") || text.includes("formalis")) return "Pilotage insuffisamment formalisé sur des sujets structurants.";
-  if (text.includes("arbitrage") || text.includes("decide") || text.includes("décide") || text.includes("validation")) return "Chaîne d’arbitrage insuffisamment clarifiée ou trop centralisée.";
-  if (text.includes("depend") || text.includes("dépend") || text.includes("clé")) return "Dépendance excessive à des personnes ou relais clés.";
-  if (text.includes("marge") || text.includes("cash") || text.includes("rentabilité")) return "Pilotage économique insuffisamment relié aux décisions opérationnelles ou commerciales.";
+  const text = signals
+    .map((s) => `${s.theme} ${s.managerialRisk} ${s.probableConsequence}`)
+    .join(" ")
+    .toLowerCase();
+
+  if (text.includes("non document") || text.includes("non suivi") || text.includes("formalis")) {
+    return "Pilotage insuffisamment formalisé sur des sujets structurants.";
+  }
+  if (
+    text.includes("arbitrage") ||
+    text.includes("decide") ||
+    text.includes("décide") ||
+    text.includes("validation")
+  ) {
+    return "Chaîne d’arbitrage insuffisamment clarifiée ou trop centralisée.";
+  }
+  if (text.includes("depend") || text.includes("dépend") || text.includes("clé")) {
+    return "Dépendance excessive à des personnes ou relais clés.";
+  }
+  if (text.includes("marge") || text.includes("cash") || text.includes("rentabilité")) {
+    return "Pilotage économique insuffisamment relié aux décisions opérationnelles ou commerciales.";
+  }
   return "Écarts entre fonctionnement réel, responsabilités tenues et cadre de pilotage attendu.";
 }
 
@@ -450,7 +483,9 @@ function buildConsolidatedFindings(
   });
 
   while (findings.length < 3) {
-    findings.push("Un ensemble de sujets reste partiellement documenté, ce qui limite la robustesse du diagnostic et révèle une zone de pilotage à sécuriser.");
+    findings.push(
+      "Un ensemble de sujets reste partiellement documenté, ce qui limite la robustesse du diagnostic et révèle une zone de pilotage à sécuriser."
+    );
   }
 
   return [findings[0], findings[1], findings[2]];
@@ -472,9 +507,12 @@ function buildUnmanagedZones(
   if (selected.length === 0) {
     return [
       {
-        constat: "Peu de zones non pilotées massives ressortent, mais plusieurs sujets restent dépendants d’usages plus que d’un cadre structuré.",
-        risqueManagerial: "Risque de dérive progressive sans signal faible suffisamment remonté.",
-        consequence: "Dégradation lente de la tenue des engagements, de la coordination ou de la visibilité économique.",
+        constat:
+          "Peu de zones non pilotées massives ressortent, mais plusieurs sujets restent dépendants d’usages plus que d’un cadre structuré.",
+        risqueManagerial:
+          "Risque de dérive progressive sans signal faible suffisamment remonté.",
+        consequence:
+          "Dégradation lente de la tenue des engagements, de la coordination ou de la visibilité économique.",
       },
     ];
   }
@@ -507,7 +545,9 @@ function getExploredSignalsForDimension(
   }
 
   for (const turn of session.conversationHistory ?? []) {
-    if (turn.role === "question" && turn.dimensionId === dimensionId && turn.signalId) exploredSignalIds.add(turn.signalId);
+    if (turn.role === "question" && turn.dimensionId === dimensionId && turn.signalId) {
+      exploredSignalIds.add(turn.signalId);
+    }
   }
 
   const exploredThemes = new Set(
@@ -517,7 +557,8 @@ function getExploredSignalsForDimension(
   );
 
   const filtered = registrySignals.filter(
-    (signal) => exploredSignalIds.has(signal.id) || exploredThemes.has(normalizeForMatch(signal.theme))
+    (signal) =>
+      exploredSignalIds.has(signal.id) || exploredThemes.has(normalizeForMatch(signal.theme))
   );
 
   if (filtered.length >= 4) {
@@ -533,7 +574,6 @@ function getExploredSignalsForDimension(
     ? uniqueById([...filtered, ...supplements])
     : registrySignals;
 }
-
 
 function extractQuotedTheme(value: string | null | undefined): string | null {
   const text = normalizeText(value);
@@ -601,7 +641,7 @@ function buildEvidenceSummary(
   for (const signal of prioritizeSignalsForFreeze(session, dimensionId, signals).slice(0, 4)) {
     const facts = factsByTheme.get(normalizeForMatch(signal.theme)) ?? [];
     if (facts.length > 0) {
-      evidence.push(`${signal.theme} — ${facts.map((fact) => shortenText(fact, 120)).join(' | ')}`);
+      evidence.push(`${signal.theme} — ${facts.map((fact) => shortenText(fact, 120)).join(" | ")}`);
       continue;
     }
 
@@ -613,7 +653,10 @@ function buildEvidenceSummary(
     evidence.push(`${signal.theme} — ${shortenText(signal.constat, 150)}`);
   }
 
-  return uniqueStrings([...evidence, ...consolidatedFindings.map((item) => shortenText(item, 160))], 5);
+  return uniqueStrings(
+    [...evidence, ...consolidatedFindings.map((item) => shortenText(item, 160))],
+    5
+  );
 }
 
 function buildObjectiveLabelFromZone(
@@ -626,18 +669,39 @@ function buildObjectiveLabelFromZone(
   }
 
   const focus = thematicFocusLabel(zone.constat);
-  const text = normalizeForMatch(`${zone.constat} ${zone.risqueManagerial} ${zone.consequence}`);
+  const text = normalizeForMatch(
+    `${zone.constat} ${zone.risqueManagerial} ${zone.consequence}`
+  );
 
-  if (text.includes('arbitr')) {
+  if (text.includes("arbitr")) {
     return `Sous 6 mois, rendre pilotable la zone dominante "${focus}" en clarifiant les arbitrages qui la bloquent`;
   }
-  if (text.includes('depend') || text.includes('dépend') || text.includes('relais') || text.includes('personne cle')) {
+  if (
+    text.includes("depend") ||
+    text.includes("dépend") ||
+    text.includes("relais") ||
+    text.includes("personne cle")
+  ) {
     return `Sous 6 mois, rendre pilotable la zone dominante "${focus}" en réduisant la dépendance critique qui la fragilise`;
   }
-  if (text.includes('marge') || text.includes('cash') || text.includes('prix') || text.includes('cout') || text.includes('coût') || text.includes('rentabil')) {
+  if (
+    text.includes("marge") ||
+    text.includes("cash") ||
+    text.includes("prix") ||
+    text.includes("cout") ||
+    text.includes("coût") ||
+    text.includes("rentabil")
+  ) {
     return `Sous 6 mois, rendre pilotable la zone dominante "${focus}" en reconnectant le pilotage opérationnel à son impact économique réel`;
   }
-  if (text.includes('role') || text.includes('rôle') || text.includes('organisation') || text.includes('recrut') || text.includes('equipe') || text.includes('équipe')) {
+  if (
+    text.includes("role") ||
+    text.includes("rôle") ||
+    text.includes("organisation") ||
+    text.includes("recrut") ||
+    text.includes("equipe") ||
+    text.includes("équipe")
+  ) {
     return `Sous 6 mois, rendre pilotable la zone dominante "${focus}" en sécurisant les rôles, relais et responsabilités associés`;
   }
 
@@ -648,27 +712,48 @@ function buildObjectiveIndicatorFromZone(
   zone: ZoneNonPilotee | undefined,
   dominantRootCause: string
 ): string {
-  const text = normalizeForMatch(`${zone?.constat ?? ''} ${zone?.risqueManagerial ?? ''} ${zone?.consequence ?? ''} ${dominantRootCause}`);
+  const text = normalizeForMatch(
+    `${zone?.constat ?? ""} ${zone?.risqueManagerial ?? ""} ${zone?.consequence ?? ""} ${dominantRootCause}`
+  );
 
-  if (text.includes('arbitr')) {
-    return 'Délai d’arbitrage, taux de décisions escaladées, part des décisions prises au bon niveau';
+  if (text.includes("arbitr")) {
+    return "Délai d’arbitrage, taux de décisions escaladées, part des décisions prises au bon niveau";
   }
-  if (text.includes('depend') || text.includes('dépend') || text.includes('relais') || text.includes('personne cle')) {
-    return 'Taux de couverture des relais, nombre de points tenus sans personne clé, niveau de dépendance critique';
+  if (
+    text.includes("depend") ||
+    text.includes("dépend") ||
+    text.includes("relais") ||
+    text.includes("personne cle")
+  ) {
+    return "Taux de couverture des relais, nombre de points tenus sans personne clé, niveau de dépendance critique";
   }
-  if (text.includes('marge') || text.includes('cash') || text.includes('prix') || text.includes('cout') || text.includes('coût') || text.includes('rentabil')) {
-    return 'Écart prix vendu / coût réel, marge tenue, visibilité cash sur le point dominant';
+  if (
+    text.includes("marge") ||
+    text.includes("cash") ||
+    text.includes("prix") ||
+    text.includes("cout") ||
+    text.includes("coût") ||
+    text.includes("rentabil")
+  ) {
+    return "Écart prix vendu / coût réel, marge tenue, visibilité cash sur le point dominant";
   }
-  if (text.includes('role') || text.includes('rôle') || text.includes('organisation') || text.includes('recrut') || text.includes('equipe') || text.includes('équipe')) {
-    return 'Couverture des rôles clés, stabilité des relais, tenue du pilotage sur la zone dominante';
+  if (
+    text.includes("role") ||
+    text.includes("rôle") ||
+    text.includes("organisation") ||
+    text.includes("recrut") ||
+    text.includes("equipe") ||
+    text.includes("équipe")
+  ) {
+    return "Couverture des rôles clés, stabilité des relais, tenue du pilotage sur la zone dominante";
   }
 
-  return 'Indicateur de maîtrise de la zone dominante, fréquence de revue et taux de traitement des écarts';
+  return "Indicateur de maîtrise de la zone dominante, fréquence de revue et taux de traitement des écarts";
 }
 
 function buildObjectiveQuickWinFromZone(zone: ZoneNonPilotee | undefined): string {
   if (!zone) {
-    return 'Nommer un propriétaire et formaliser un premier point de revue sur la zone dominante dans le mois.';
+    return "Nommer un propriétaire et formaliser un premier point de revue sur la zone dominante dans le mois.";
   }
 
   const focus = thematicFocusLabel(zone.constat);
@@ -677,10 +762,13 @@ function buildObjectiveQuickWinFromZone(zone: ZoneNonPilotee | undefined): strin
 
 function buildObjectivePotentialGainFromZone(zone: ZoneNonPilotee | undefined): string {
   if (!zone) {
-    return 'Gain à préciser en validation finale sur la réduction de l’exposition managériale dominante.';
+    return "Gain à préciser en validation finale sur la réduction de l’exposition managériale dominante.";
   }
 
-  return `Gain à préciser en validation finale, en lien direct avec la conséquence prioritaire identifiée : ${shortenText(zone.consequence, 150)}`;
+  return `Gain à préciser en validation finale, en lien direct avec la conséquence prioritaire identifiée : ${shortenText(
+    zone.consequence,
+    150
+  )}`;
 }
 
 function buildObjectiveSeedsForFrozenDimension(params: {
@@ -695,13 +783,20 @@ function buildObjectiveSeedsForFrozenDimension(params: {
   zones.forEach((zone, index) => {
     seeds.push({
       id: `seed-d${params.dimensionId}-${index + 1}`,
-      label: buildObjectiveLabelFromZone(params.dimensionId, zone, params.dominantRootCause),
+      label: buildObjectiveLabelFromZone(
+        params.dimensionId,
+        zone,
+        params.dominantRootCause
+      ),
       rationale: `${shortenText(zone.constat, 150)} Risque : ${shortenText(zone.risqueManagerial, 130)}`,
       indicator: buildObjectiveIndicatorFromZone(zone, params.dominantRootCause),
-      suggestedDueDate: index === 0 ? '90 jours pour sécuriser le cadre / 6 mois pour tenir le résultat' : 'À séquencer après traitement de la zone dominante',
+      suggestedDueDate:
+        index === 0
+          ? "90 jours pour sécuriser le cadre / 6 mois pour tenir le résultat"
+          : "À séquencer après traitement de la zone dominante",
       potentialGain: buildObjectivePotentialGainFromZone(zone),
       quickWin: buildObjectiveQuickWinFromZone(zone),
-      priority: index === 0 ? 'high' : index === 1 ? 'medium' : 'low',
+      priority: index === 0 ? "high" : index === 1 ? "medium" : "low",
       priorityScore: index === 0 ? 100 : index === 1 ? 74 : 58,
     });
   });
@@ -712,10 +807,12 @@ function buildObjectiveSeedsForFrozenDimension(params: {
       label: `Sous 6 mois, réduire l’exposition de la dimension "${dimensionTitle(params.dimensionId)}" à la cause racine dominante`,
       rationale: params.dominantRootCause,
       indicator: buildObjectiveIndicatorFromZone(undefined, params.dominantRootCause),
-      suggestedDueDate: 'À définir avec le dirigeant',
-      potentialGain: 'Gain à préciser en validation finale sur la réduction de l’exposition dominante.',
-      quickWin: 'Nommer un propriétaire, formaliser une cible et installer un premier rituel de revue.',
-      priority: 'high',
+      suggestedDueDate: "À définir avec le dirigeant",
+      potentialGain:
+        "Gain à préciser en validation finale sur la réduction de l’exposition dominante.",
+      quickWin:
+        "Nommer un propriétaire, formaliser une cible et installer un premier rituel de revue.",
+      priority: "high",
       priorityScore: 60,
     });
   }
@@ -867,11 +964,40 @@ export function getEngineView(session: DiagnosticSessionAggregate): EngineView {
 
   if (session.phase === "final_objectives_validation") {
     const objectives = session.finalObjectives?.objectives ?? [];
-    const lines = objectives.map(
-      (objective, index) => `${index + 1}. ${objective.objectiveLabel} — ${objective.keyIndicator}`
-    );
+
+    const statusLabel = (value: string) => {
+      switch (value) {
+        case "validated":
+          return "Validé";
+        case "adjusted":
+          return "Ajusté";
+        case "refused":
+          return "Refusé";
+        case "proposed":
+        default:
+          return "Proposé";
+      }
+    };
+
+    const lines = objectives.map((objective, index) => {
+      const revision = Number(objective.proposalRevision ?? 1);
+      return `${index + 1}. [${statusLabel(objective.validationStatus)} | V${revision}] ${objective.objectiveLabel} — ${objective.keyIndicator}`;
+    });
+
+    const pendingCount = objectives.filter(
+      (objective) => objective.validationStatus !== "validated"
+    ).length;
+
+    const intro =
+      pendingCount > 0
+        ? `Objectifs à confirmer : ${pendingCount} dimension(s) restent à valider avant clôture du protocole.`
+        : "Tous les objectifs sont validés.";
+
     return {
-      assistantMessage: `${FINAL_OBJECTIVES_HEADER}\n\nObjectifs proposés :\n${lines.join("\n")}\n\nMerci d’indiquer pour chaque objectif : Validé / Ajusté / Refusé.`,
+      assistantMessage:
+        `${FINAL_OBJECTIVES_HEADER}\n\n${intro}\n\nObjectifs proposés :\n${lines.join(
+          "\n"
+        )}\n\nMerci d’indiquer pour chaque objectif encore non validé : Validé / Ajusté / Refusé.`,
       questions: [],
       needsValidation: true,
       phase: session.phase,
@@ -882,7 +1008,8 @@ export function getEngineView(session: DiagnosticSessionAggregate): EngineView {
 
   if (session.phase === "report_ready") {
     return {
-      assistantMessage: "Le diagnostic est séquencé, les 4 dimensions sont gelées et l’itération finale objectifs est capturée. La session est prête pour le report builder standardisé.",
+      assistantMessage:
+        "Le diagnostic est séquencé, les 4 dimensions sont gelées et les objectifs finaux sont validés. La session est prête pour le report builder standardisé.",
       questions: [],
       needsValidation: false,
       phase: session.phase,
@@ -930,7 +1057,9 @@ export function registerAnswer(params: {
   answerText: string;
 }): DiagnosticSessionAggregate {
   const { session, questionId, answerText } = params;
-  if (session.phase !== "dimension_iteration") throw new Error("La session n’est pas en phase de questions.");
+  if (session.phase !== "dimension_iteration") {
+    throw new Error("La session n’est pas en phase de questions.");
+  }
   const workset = requireCurrentWorkset(session);
   const question = workset.questions.find((q) => q.id === questionId);
   if (!question) throw new Error(`Question introuvable: ${questionId}`);
@@ -944,7 +1073,10 @@ export function registerAnswer(params: {
   };
 
   const nextWorkset: IterationWorkset = { ...workset, answers: [...workset.answers, nextAnswer] };
-  let nextSession: DiagnosticSessionAggregate = withSafeMemory({ ...session, currentWorkset: nextWorkset });
+  let nextSession: DiagnosticSessionAggregate = withSafeMemory({
+    ...session,
+    currentWorkset: nextWorkset,
+  });
 
   const closure = decideIterationClosure(nextSession);
   if (closure.shouldAskValidation) {
@@ -975,11 +1107,18 @@ export async function submitIterationClosure(params: {
   decision: ValidationDecision;
 }): Promise<DiagnosticSessionAggregate> {
   let session = withSafeMemory(params.session);
-  if (session.phase !== "iteration_validation") throw new Error("La session n’attend pas de validation d’itération.");
+  if (session.phase !== "iteration_validation") {
+    throw new Error("La session n’attend pas de validation d’itération.");
+  }
   const currentWorkset = requireCurrentWorkset(session);
 
   if (params.decision === "no") {
-    const workset = await buildWorkset(session, currentWorkset.dimensionId, currentWorkset.iteration, true);
+    const workset = await buildWorkset(
+      session,
+      currentWorkset.dimensionId,
+      currentWorkset.iteration,
+      true
+    );
     session = attachWorkset({ ...session, phase: "dimension_iteration" }, workset);
     session = applyEmptyWorksetAutoValidation(session);
     return touchSession(withSafeMemory(session));
@@ -993,18 +1132,27 @@ export async function submitIterationClosure(params: {
     closedAt: new Date().toISOString(),
   });
 
-  session = closeCoverageForIteration(session, currentWorkset.dimensionId, currentWorkset.iteration);
+  session = closeCoverageForIteration(
+    session,
+    currentWorkset.dimensionId,
+    currentWorkset.iteration
+  );
 
   if (!isLastIteration(currentWorkset.iteration)) {
     const nextIteration = nextIterationNumber(currentWorkset.iteration)!;
     const workset = await buildWorkset(session, currentWorkset.dimensionId, nextIteration, false);
-    session = attachWorkset({ ...session, phase: "dimension_iteration", currentIteration: nextIteration }, workset);
+    session = attachWorkset(
+      { ...session, phase: "dimension_iteration", currentIteration: nextIteration },
+      workset
+    );
     session = applyEmptyWorksetAutoValidation(session);
     return touchSession(withSafeMemory(session));
   }
 
   const frozen = await freezeDimension(session, currentWorkset.dimensionId);
-  const existing = session.frozenDimensions.filter((item) => item.dimensionId !== currentWorkset.dimensionId);
+  const existing = session.frozenDimensions.filter(
+    (item) => item.dimensionId !== currentWorkset.dimensionId
+  );
   session = {
     ...session,
     frozenDimensions: [...existing, frozen].sort((a, b) => a.dimensionId - b.dimensionId),
@@ -1013,7 +1161,15 @@ export async function submitIterationClosure(params: {
   if (!isLastDimension(currentWorkset.dimensionId)) {
     const nextDimension = nextDimensionId(currentWorkset.dimensionId)!;
     const workset = await buildWorkset(session, nextDimension, 1, false);
-    session = attachWorkset({ ...session, phase: "dimension_iteration", currentDimensionId: nextDimension, currentIteration: 1 }, workset);
+    session = attachWorkset(
+      {
+        ...session,
+        phase: "dimension_iteration",
+        currentDimensionId: nextDimension,
+        currentIteration: 1,
+      },
+      workset
+    );
     session = applyEmptyWorksetAutoValidation(session);
     return touchSession(withSafeMemory(session));
   }
@@ -1044,6 +1200,7 @@ export function captureObjectivesValidation(params: {
 }): DiagnosticSessionAggregate {
   const { session: rawSession, decisions } = params;
   const session = withSafeMemory(rawSession);
+
   if (session.phase !== "final_objectives_validation" || !session.finalObjectives) {
     throw new Error("La session n’est pas en phase finale de validation des objectifs.");
   }
@@ -1051,11 +1208,19 @@ export function captureObjectivesValidation(params: {
   const nextObjectives = applyObjectiveDecisions({
     objectives: session.finalObjectives.objectives,
     decisions,
+    frozenDimensions: session.frozenDimensions,
   });
+
+  const allValidated =
+    nextObjectives.length > 0 &&
+    nextObjectives.every((objective) => objective.validationStatus === "validated");
 
   const nextSession: DiagnosticSessionAggregate = {
     ...session,
-    phase: "report_ready",
+    phase: allValidated ? "report_ready" : "final_objectives_validation",
+    currentDimensionId: null,
+    currentIteration: null,
+    currentWorkset: null,
     finalObjectives: {
       ...session.finalObjectives,
       objectives: nextObjectives,
@@ -1072,7 +1237,9 @@ export function cloneSession(session: DiagnosticSessionAggregate): DiagnosticSes
     signalRegistry: session.signalRegistry ? cloneRegistry(session.signalRegistry) : null,
     currentWorkset: session.currentWorkset ? cloneWorkset(session.currentWorkset) : null,
     frozenDimensions: [...session.frozenDimensions],
-    finalObjectives: session.finalObjectives ? { ...session.finalObjectives, objectives: [...session.finalObjectives.objectives] } : null,
+    finalObjectives: session.finalObjectives
+      ? { ...session.finalObjectives, objectives: [...session.finalObjectives.objectives] }
+      : null,
     analysisMemory: [...(session.analysisMemory ?? [])],
     iterationHistory: [...(session.iterationHistory ?? [])],
     themeCoverage: [...(session.themeCoverage ?? [])],
@@ -1087,6 +1254,7 @@ export function answeredCount(session: DiagnosticSessionAggregate): number {
 export function answeredQuestionIdSet(session: DiagnosticSessionAggregate): Set<string> {
   return answeredQuestionIds(session.currentWorkset);
 }
+
 export function challengeCurrentQuestion(
   session: DiagnosticSessionAggregate,
   message?: string

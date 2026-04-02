@@ -1,7 +1,6 @@
-// lib/bilan-sante/objectives-builder.ts
-
 import type {
   FinalObjective,
+  FinalObjectiveDecisionTrace,
   FinalObjectiveSet,
   FrozenDimensionDiagnosis,
   ObjectiveSeed,
@@ -98,6 +97,10 @@ function dominantZone(frozen: FrozenDimensionDiagnosis): ZoneNonPilotee | null {
   return frozen.unmanagedZones?.[0] ?? null;
 }
 
+function secondaryZone(frozen: FrozenDimensionDiagnosis): ZoneNonPilotee | null {
+  return frozen.unmanagedZones?.[1] ?? frozen.unmanagedZones?.[0] ?? null;
+}
+
 function dominantZoneLabel(frozen: FrozenDimensionDiagnosis): string {
   const zone = dominantZone(frozen);
   if (!zone) return "zone non pilotée dominante";
@@ -113,6 +116,16 @@ function dominantZoneLabel(frozen: FrozenDimensionDiagnosis): string {
       .trim(),
     110
   );
+}
+
+function secondaryZoneLabel(frozen: FrozenDimensionDiagnosis): string {
+  const zone = secondaryZone(frozen);
+  if (!zone) return dominantZoneLabel(frozen);
+
+  const theme = extractThemeFromText(zone.constat);
+  if (theme) return theme;
+
+  return truncate(firstSentence(zone.constat), 110);
 }
 
 function zoneAnchorText(frozen: FrozenDimensionDiagnosis): string {
@@ -210,7 +223,11 @@ function seedAnchoringScore(seed: ObjectiveSeed, frozen: FrozenDimensionDiagnosi
   const zoneLabel = normalizeForMatch(dominantZoneLabel(frozen));
 
   if (zoneLabel && label.includes(zoneLabel)) score += 60;
-  if (zoneText && label && (zoneText.includes(label) || label.includes(zoneText.slice(0, Math.min(zoneText.length, 36))))) {
+  if (
+    zoneText &&
+    label &&
+    (zoneText.includes(label) || label.includes(zoneText.slice(0, Math.min(zoneText.length, 36))))
+  ) {
     score += 25;
   }
 
@@ -220,12 +237,14 @@ function seedAnchoringScore(seed: ObjectiveSeed, frozen: FrozenDimensionDiagnosi
   return score;
 }
 
-function selectPrimarySeed(frozen: FrozenDimensionDiagnosis): ObjectiveSeed | null {
-  const seeds = frozen.objectiveSeeds ?? [];
-  if (seeds.length === 0) return null;
+function rankSeeds(frozen: FrozenDimensionDiagnosis): ObjectiveSeed[] {
+  return [...(frozen.objectiveSeeds ?? [])].sort(
+    (a, b) => seedAnchoringScore(b, frozen) - seedAnchoringScore(a, frozen)
+  );
+}
 
-  const sorted = [...seeds].sort((a, b) => seedAnchoringScore(b, frozen) - seedAnchoringScore(a, frozen));
-  return sorted[0] ?? null;
+function selectPrimarySeed(frozen: FrozenDimensionDiagnosis): ObjectiveSeed | null {
+  return rankSeeds(frozen)[0] ?? null;
 }
 
 function buildObjectiveLabel(frozen: FrozenDimensionDiagnosis): string {
@@ -239,7 +258,9 @@ function buildObjectiveLabel(frozen: FrozenDimensionDiagnosis): string {
 
   if (zone) {
     return truncate(
-      `Sous 6 mois, rendre pilotable la zone dominante "${dominantZoneLabel(frozen)}" en traitant le point suivant : ${firstSentence(zone.constat)}`,
+      `Sous 6 mois, rendre pilotable la zone dominante "${dominantZoneLabel(
+        frozen
+      )}" en traitant le point suivant : ${firstSentence(zone.constat)}`,
       180
     );
   }
@@ -324,22 +345,272 @@ function buildGainHypotheses(frozen: FrozenDimensionDiagnosis): string[] {
   return hypotheses.length > 0 ? hypotheses : ["Aucun chiffre précis n’est inventé."];
 }
 
-export function buildObjectiveFromFrozenDimension(
+function nextRevision(objective: FinalObjective): number {
+  const current = Number(objective.proposalRevision ?? 1);
+  if (!Number.isFinite(current) || current < 1) return 2;
+  return current + 1;
+}
+
+function appendDecisionHistory(params: {
+  objective: FinalObjective;
+  status: ObjectiveDecisionStatus;
+  nextLabel: string;
+  nextSourceSeedId?: string | null;
+}): FinalObjectiveDecisionTrace[] {
+  const existing = Array.isArray(params.objective.decisionHistory)
+    ? params.objective.decisionHistory
+    : [];
+
+  return [
+    ...existing,
+    {
+      at: new Date().toISOString(),
+      status: params.status,
+      previousLabel: params.objective.objectiveLabel,
+      nextLabel: params.nextLabel,
+      previousSourceSeedId: params.objective.sourceSeedId ?? null,
+      nextSourceSeedId: params.nextSourceSeedId ?? null,
+    },
+  ];
+}
+
+function resolveSeedLabel(seed: ObjectiveSeed | null, frozen: FrozenDimensionDiagnosis): string {
+  const label = normalizeText(seed?.label ?? "");
+  if (label) return truncate(label, 180);
+  return buildObjectiveLabel(frozen);
+}
+
+function resolveSeedIndicator(seed: ObjectiveSeed | null, frozen: FrozenDimensionDiagnosis): string {
+  const indicator = normalizeText(seed?.indicator ?? "");
+  if (indicator) return truncate(indicator, 180);
+  return buildFallbackIndicator(frozen);
+}
+
+function resolveSeedDueDate(seed: ObjectiveSeed | null): string {
+  const dueDate = normalizeText(seed?.suggestedDueDate ?? "");
+  return dueDate || DEFAULT_DUE_DATE;
+}
+
+function resolveSeedPotentialGain(seed: ObjectiveSeed | null, frozen: FrozenDimensionDiagnosis): string {
+  const gain = normalizeText(seed?.potentialGain ?? "");
+  if (gain) return truncate(gain, 180);
+  return buildFallbackPotentialGain(frozen);
+}
+
+function resolveSeedQuickWin(seed: ObjectiveSeed | null, frozen: FrozenDimensionDiagnosis): string {
+  const quickWin = normalizeText(seed?.quickWin ?? "");
+  if (quickWin) return truncate(quickWin, 180);
+  return buildFallbackQuickWin(frozen);
+}
+
+function findFrozenDimension(
+  frozenDimensions: FrozenDimensionDiagnosis[],
+  dimensionId: number
+): FrozenDimensionDiagnosis | null {
+  return frozenDimensions.find((item) => Number(item.dimensionId) === Number(dimensionId)) ?? null;
+}
+
+function buildInitialObjectiveFromSeed(
   frozen: FrozenDimensionDiagnosis,
-  index: number
+  index: number,
+  seed: ObjectiveSeed | null
 ): FinalObjective {
   return {
     id: `obj-d${frozen.dimensionId}-${index}`,
     dimensionId: frozen.dimensionId,
-    objectiveLabel: buildObjectiveLabel(frozen),
+    objectiveLabel: resolveSeedLabel(seed, frozen),
     owner: DEFAULT_OBJECTIVE_OWNER,
-    keyIndicator: buildObjectiveIndicator(frozen),
-    dueDate: buildObjectiveDueDate(frozen),
-    potentialGain: buildObjectivePotentialGain(frozen),
+    keyIndicator: resolveSeedIndicator(seed, frozen),
+    dueDate: resolveSeedDueDate(seed),
+    potentialGain: resolveSeedPotentialGain(seed, frozen),
     gainHypotheses: buildGainHypotheses(frozen),
     validationStatus: "proposed",
-    quickWin: buildObjectiveQuickWin(frozen),
+    quickWin: resolveSeedQuickWin(seed, frozen),
+    proposalRevision: 1,
+    sourceSeedId: seed?.id ?? null,
+    proposalSource: seed ? "initial_seed" : "fallback",
+    decisionHistory: [],
   };
+}
+
+function collectUsedSeedIds(objective: FinalObjective): Set<string> {
+  const out = new Set<string>();
+
+  if (objective.sourceSeedId) {
+    out.add(objective.sourceSeedId);
+  }
+
+  for (const trace of objective.decisionHistory ?? []) {
+    if (trace.previousSourceSeedId) out.add(trace.previousSourceSeedId);
+    if (trace.nextSourceSeedId) out.add(trace.nextSourceSeedId);
+  }
+
+  return out;
+}
+
+function collectUsedLabels(objective: FinalObjective): Set<string> {
+  const out = new Set<string>();
+
+  out.add(normalizeForMatch(objective.objectiveLabel));
+
+  for (const trace of objective.decisionHistory ?? []) {
+    out.add(normalizeForMatch(trace.previousLabel));
+    out.add(normalizeForMatch(trace.nextLabel));
+  }
+
+  return out;
+}
+
+function selectAlternativeSeed(
+  frozen: FrozenDimensionDiagnosis,
+  objective: FinalObjective
+): ObjectiveSeed | null {
+  const ranked = rankSeeds(frozen);
+  if (ranked.length === 0) return null;
+
+  const usedSeedIds = collectUsedSeedIds(objective);
+  const usedLabels = collectUsedLabels(objective);
+
+  const firstUnusedById = ranked.find((seed) => {
+    if (!seed.id) return false;
+    return !usedSeedIds.has(seed.id);
+  });
+
+  if (firstUnusedById) return firstUnusedById;
+
+  const firstUnusedByLabel = ranked.find(
+    (seed) => !usedLabels.has(normalizeForMatch(seed.label))
+  );
+
+  return firstUnusedByLabel ?? null;
+}
+
+function buildAlternativeFallbackFromFrozen(
+  objective: FinalObjective,
+  frozen: FrozenDimensionDiagnosis,
+  reason: "refused" | "adjusted"
+): FinalObjective {
+  const focus =
+    reason === "refused" ? secondaryZoneLabel(frozen) : dominantZoneLabel(frozen);
+
+  const nextLabel =
+    reason === "refused"
+      ? `Sous 6 mois, sécuriser prioritairement "${focus}" en réduisant le risque managérial dominant sans élargir le périmètre trop vite`
+      : `Sous 6 mois, ajuster l’objectif sur "${focus}" en installant un cadre de pilotage plus progressif, mesurable et tenu dans le temps`;
+
+  return {
+    ...objective,
+    objectiveLabel: truncate(nextLabel, 180),
+    keyIndicator: buildFallbackIndicator(frozen),
+    dueDate: DEFAULT_DUE_DATE,
+    potentialGain: buildFallbackPotentialGain(frozen),
+    quickWin: buildFallbackQuickWin(frozen),
+    gainHypotheses: buildGainHypotheses(frozen),
+    validationStatus: "proposed",
+    proposalRevision: nextRevision(objective),
+    sourceSeedId: null,
+    proposalSource: "fallback",
+    decisionHistory: appendDecisionHistory({
+      objective,
+      status: reason,
+      nextLabel,
+      nextSourceSeedId: null,
+    }),
+  };
+}
+
+function buildAlternativeProposalFromSeed(
+  objective: FinalObjective,
+  frozen: FrozenDimensionDiagnosis,
+  seed: ObjectiveSeed
+): FinalObjective {
+  const nextLabel = resolveSeedLabel(seed, frozen);
+
+  return {
+    ...objective,
+    objectiveLabel: nextLabel,
+    keyIndicator: resolveSeedIndicator(seed, frozen),
+    dueDate: resolveSeedDueDate(seed),
+    potentialGain: resolveSeedPotentialGain(seed, frozen),
+    quickWin: resolveSeedQuickWin(seed, frozen),
+    gainHypotheses: buildGainHypotheses(frozen),
+    validationStatus: "proposed",
+    proposalRevision: nextRevision(objective),
+    sourceSeedId: seed.id ?? null,
+    proposalSource: "alternative_seed",
+    decisionHistory: appendDecisionHistory({
+      objective,
+      status: "refused",
+      nextLabel,
+      nextSourceSeedId: seed.id ?? null,
+    }),
+  };
+}
+
+function buildAdjustedProposal(
+  objective: FinalObjective,
+  frozen: FrozenDimensionDiagnosis,
+  decision: ObjectiveDecisionInput
+): FinalObjective {
+  const hasExplicitFeedback =
+    normalizeText(decision.adjustedLabel) ||
+    normalizeText(decision.adjustedIndicator) ||
+    normalizeText(decision.adjustedDueDate) ||
+    normalizeText(decision.adjustedPotentialGain) ||
+    normalizeText(decision.adjustedQuickWin);
+
+  const nextLabel =
+    normalizeText(decision.adjustedLabel) ||
+    `Sous 6 mois, ajuster et rendre pilotable "${dominantZoneLabel(
+      frozen
+    )}" avec un cadre de revue plus simple, plus concret et plus mesurable`;
+
+  const nextIndicator =
+    normalizeText(decision.adjustedIndicator) ||
+    objective.keyIndicator ||
+    buildFallbackIndicator(frozen);
+
+  const nextDueDate =
+    normalizeText(decision.adjustedDueDate) ||
+    objective.dueDate ||
+    DEFAULT_DUE_DATE;
+
+  const nextPotentialGain =
+    normalizeText(decision.adjustedPotentialGain) ||
+    objective.potentialGain ||
+    buildFallbackPotentialGain(frozen);
+
+  const nextQuickWin =
+    normalizeText(decision.adjustedQuickWin) ||
+    objective.quickWin ||
+    buildFallbackQuickWin(frozen);
+
+  return {
+    ...objective,
+    objectiveLabel: truncate(nextLabel, 180),
+    keyIndicator: truncate(nextIndicator, 180),
+    dueDate: nextDueDate,
+    potentialGain: truncate(nextPotentialGain, 180),
+    quickWin: truncate(nextQuickWin, 180),
+    gainHypotheses: buildGainHypotheses(frozen),
+    validationStatus: "proposed",
+    proposalRevision: nextRevision(objective),
+    proposalSource: hasExplicitFeedback ? "adjusted_feedback" : "fallback",
+    decisionHistory: appendDecisionHistory({
+      objective,
+      status: "adjusted",
+      nextLabel,
+      nextSourceSeedId: objective.sourceSeedId ?? null,
+    }),
+  };
+}
+
+export function buildObjectiveFromFrozenDimension(
+  frozen: FrozenDimensionDiagnosis,
+  index: number
+): FinalObjective {
+  const seed = selectPrimarySeed(frozen);
+  return buildInitialObjectiveFromSeed(frozen, index, seed);
 }
 
 export function buildFinalObjectiveSetFromFrozenDimensions(
@@ -360,6 +631,7 @@ export function buildFinalObjectiveSetFromFrozenDimensions(
 export function applyObjectiveDecisions(params: {
   objectives: FinalObjective[];
   decisions: ObjectiveDecisionInput[];
+  frozenDimensions?: FrozenDimensionDiagnosis[];
 }): FinalObjective[] {
   const decisionsById = new Map(
     params.decisions.map((decision) => [decision.objectiveId, decision])
@@ -369,39 +641,41 @@ export function applyObjectiveDecisions(params: {
     const decision = decisionsById.get(objective.id);
     if (!decision) return objective;
 
-    const nextLabel =
-      decision.status === "adjusted" && normalizeText(decision.adjustedLabel)
-        ? normalizeText(decision.adjustedLabel)
-        : objective.objectiveLabel;
+    const frozen = findFrozenDimension(
+      params.frozenDimensions ?? [],
+      Number(objective.dimensionId)
+    );
 
-    const nextIndicator =
-      decision.status === "adjusted" && normalizeText(decision.adjustedIndicator)
-        ? normalizeText(decision.adjustedIndicator)
-        : objective.keyIndicator;
+    if (decision.status === "validated") {
+      return {
+        ...objective,
+        validationStatus: "validated",
+        decisionHistory: appendDecisionHistory({
+          objective,
+          status: "validated",
+          nextLabel: objective.objectiveLabel,
+          nextSourceSeedId: objective.sourceSeedId ?? null,
+        }),
+      };
+    }
 
-    const nextDueDate =
-      decision.status === "adjusted" && normalizeText(decision.adjustedDueDate)
-        ? normalizeText(decision.adjustedDueDate)
-        : objective.dueDate;
+    if (!frozen) {
+      return {
+        ...objective,
+        validationStatus: "proposed",
+      };
+    }
 
-    const nextPotentialGain =
-      decision.status === "adjusted" && normalizeText(decision.adjustedPotentialGain)
-        ? normalizeText(decision.adjustedPotentialGain)
-        : objective.potentialGain;
+    if (decision.status === "adjusted") {
+      return buildAdjustedProposal(objective, frozen, decision);
+    }
 
-    const nextQuickWin =
-      decision.status === "adjusted" && normalizeText(decision.adjustedQuickWin)
-        ? normalizeText(decision.adjustedQuickWin)
-        : objective.quickWin;
+    const alternativeSeed = selectAlternativeSeed(frozen, objective);
 
-    return {
-      ...objective,
-      objectiveLabel: nextLabel,
-      keyIndicator: nextIndicator,
-      dueDate: nextDueDate,
-      potentialGain: nextPotentialGain,
-      quickWin: nextQuickWin,
-      validationStatus: decision.status,
-    };
+    if (alternativeSeed) {
+      return buildAlternativeProposalFromSeed(objective, frozen, alternativeSeed);
+    }
+
+    return buildAlternativeFallbackFromFrozen(objective, frozen, "refused");
   });
 }

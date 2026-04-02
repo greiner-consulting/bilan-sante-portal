@@ -78,17 +78,39 @@ type PreviewDiagnosticReport = {
   sections: PreviewSection[];
 };
 
-type DisplayMessage =
-  | { role: "assistant" | "user" | "system"; text: string; key: string }
+type BaseDisplayMessage = {
+  key: string;
+  text: string;
+  questionId?: string | null;
+  signalId?: string | null;
+  theme?: string;
+  dimension?: number | null;
+  iteration?: number | null;
+  ordinal?: number | null;
+  total?: number | null;
+};
+
+type StandardDisplayMessage = BaseDisplayMessage & {
+  role: "assistant" | "user" | "system";
+};
+
+type QuestionDisplayMessage = BaseDisplayMessage & {
+  role: "question";
+};
+
+type DisplayMessage = StandardDisplayMessage | QuestionDisplayMessage;
+
+type ConversationBlock =
   | {
-      role: "question";
-      text: string;
-      theme?: string;
-      dimension?: number | null;
-      iteration?: number | null;
-      ordinal?: number | null;
-      total?: number | null;
+      kind: "message";
       key: string;
+      message: StandardDisplayMessage;
+    }
+  | {
+      kind: "question_exchange";
+      key: string;
+      question: QuestionDisplayMessage;
+      answer?: StandardDisplayMessage;
     };
 
 type SessionState = {
@@ -170,6 +192,18 @@ function clampIndex(index: number, total: number) {
 
 function normalizeText(value: unknown) {
   return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
+function cleanPrefixedLabel(value: string, label: string) {
+  const text = String(value || "").trim();
+  const lower = text.toLowerCase();
+  const prefix = `${label.toLowerCase()} :`;
+
+  if (lower.startsWith(prefix)) {
+    return text.slice(prefix.length).trim();
+  }
+
+  return text;
 }
 
 function formatDateTime(value?: string | null): string {
@@ -314,35 +348,107 @@ function buildPlaceholder(params: {
   }
   if (params.currentQuestion) return "Votre réponse à la question affichée...";
   if (params.awaitingValidation) return 'Répondez "oui" ou "non"...';
-  if (params.phase === "report_ready")
+  if (params.phase === "report_ready") {
     return "Le protocole est terminé. Vous pouvez construire le rapport PDF.";
+  }
   return "Votre réponse...";
 }
 
 function buildMessagesFromHistory(turns: PersistedTurn[]): DisplayMessage[] {
   const out: DisplayMessage[] = [];
+
   for (const turn of turns) {
     const text = String(turn.text ?? "").trim();
     if (!text) continue;
+
+    const base = {
+      key: turn.id,
+      text,
+      questionId: turn.questionId ?? null,
+      signalId: turn.signalId ?? null,
+      theme: turn.theme ?? undefined,
+      dimension: turn.dimensionId ?? null,
+      iteration: turn.iteration ?? null,
+      ordinal: turn.ordinal ?? null,
+      total: turn.total ?? null,
+    };
+
     if (turn.role === "question") {
       out.push({
         role: "question",
-        key: turn.id,
-        text,
-        theme: turn.theme ?? undefined,
-        dimension: turn.dimensionId ?? null,
-        iteration: turn.iteration ?? null,
-        ordinal: turn.ordinal ?? null,
-        total: turn.total ?? null,
+        ...base,
       });
       continue;
     }
-    out.push({ role: turn.role, key: turn.id, text });
+
+    out.push({
+      role: turn.role,
+      ...base,
+    });
   }
 
   return out.length > 0
     ? out
     : [{ role: "assistant", key: "initial-assistant", text: initialAssistantMessage() }];
+}
+
+function buildConversationBlocks(messages: DisplayMessage[]): ConversationBlock[] {
+  const blocks: ConversationBlock[] = [];
+  const questionBlockIndexByQuestionId = new Map<string, number>();
+
+  for (const message of messages) {
+    if (message.role === "question") {
+      const block: ConversationBlock = {
+        kind: "question_exchange",
+        key: message.key,
+        question: message,
+      };
+
+      blocks.push(block);
+
+      if (message.questionId) {
+        questionBlockIndexByQuestionId.set(message.questionId, blocks.length - 1);
+      }
+
+      continue;
+    }
+
+    if (message.role === "user") {
+      const questionId = message.questionId ?? null;
+
+      if (questionId && questionBlockIndexByQuestionId.has(questionId)) {
+        const blockIndex = questionBlockIndexByQuestionId.get(questionId)!;
+        const targetBlock = blocks[blockIndex];
+
+        if (targetBlock.kind === "question_exchange" && !targetBlock.answer) {
+          targetBlock.answer = message;
+          continue;
+        }
+      }
+
+      for (let i = blocks.length - 1; i >= 0; i -= 1) {
+        const candidate = blocks[i];
+        if (candidate.kind !== "question_exchange") continue;
+        if (candidate.answer) continue;
+        candidate.answer = message;
+        break;
+      }
+
+      const wasAttached = blocks.some(
+        (block) => block.kind === "question_exchange" && block.answer?.key === message.key
+      );
+
+      if (wasAttached) continue;
+    }
+
+    blocks.push({
+      kind: "message",
+      key: message.key,
+      message,
+    });
+  }
+
+  return blocks;
 }
 
 function triggerBinaryDownload(base64: string, fileName: string, mimeType: string) {
@@ -597,6 +703,51 @@ function ObjectiveCardView({ objective }: { objective: FinalObjective }) {
   );
 }
 
+function QuestionExchangeCard({
+  question,
+  answer,
+}: {
+  question: QuestionDisplayMessage;
+  answer?: StandardDisplayMessage;
+}) {
+  return (
+    <div className="mr-4 space-y-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+      <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+        <div className="text-xs uppercase tracking-wide text-slate-500">
+          Dimension {question.dimension ?? "?"} — Itération {question.iteration ?? "?"}/3
+        </div>
+        <div className="text-xs text-slate-500">
+          Question {question.ordinal ?? "?"} / {question.total ?? "?"}
+        </div>
+      </div>
+
+      {question.theme ? (
+        <div className="text-xs text-slate-500">Thème : {question.theme}</div>
+      ) : null}
+
+      <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+        <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+          Question
+        </div>
+        <div className="mt-1 whitespace-pre-line text-sm leading-6 text-slate-900">
+          {question.text}
+        </div>
+      </div>
+
+      {answer ? (
+        <div className="rounded-lg border border-slate-200 bg-white p-3">
+          <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+            Réponse du dirigeant
+          </div>
+          <div className="mt-1 whitespace-pre-line text-sm leading-6 text-slate-800">
+            {answer.text}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export default function ChatPanel({ sessionId }: Props) {
   const [messages, setMessages] = useState<DisplayMessage[]>([
     { role: "assistant", key: "initial-assistant", text: initialAssistantMessage() },
@@ -635,12 +786,18 @@ export default function ChatPanel({ sessionId }: Props) {
     [finalObjectives]
   );
 
+  const conversationBlocks = useMemo(() => buildConversationBlocks(messages), [messages]);
+
   function pushMessage(role: "assistant" | "user" | "system", text: string) {
     const content = String(text || "").trim();
     if (!content) return;
     setMessages((prev) => [
       ...prev,
-      { role, key: `${role}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, text: content },
+      {
+        role,
+        key: `${role}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        text: content,
+      },
     ]);
   }
 
@@ -699,6 +856,7 @@ export default function ChatPanel({ sessionId }: Props) {
         ? (data.engine_state.final_objectives_json as FinalObjectiveSet)
         : null
     );
+
     setFrozenDimensions(
       Array.isArray(data.engine_state?.consolidation_json)
         ? (data.engine_state.consolidation_json as FrozenDimension[])
@@ -708,6 +866,7 @@ export default function ChatPanel({ sessionId }: Props) {
     const historyTurns = Array.isArray(data.engine_state?.conversation_history_json)
       ? (data.engine_state.conversation_history_json as PersistedTurn[])
       : [];
+
     setMessages(buildMessagesFromHistory(historyTurns));
 
     setAwaitingValidation(
@@ -759,6 +918,7 @@ export default function ChatPanel({ sessionId }: Props) {
         message,
         client_ts: new Date().toISOString(),
       };
+
       const res = await fetch(`/api/session/${sessionId}/answer`, {
         method: "POST",
         credentials: "include",
@@ -806,12 +966,14 @@ export default function ChatPanel({ sessionId }: Props) {
         "assistant",
         "Le rapport dirigeant a été structuré et le PDF client a été généré."
       );
+
       if (data.compliance?.summary?.length) {
         pushMessage(
           "system",
           "Conformité rapport :\n" + data.compliance.summary.join("\n")
         );
       }
+
       setReportPreview(data.preview ?? null);
 
       if (data.pdfBase64 && data.pdfFileName) {
@@ -836,9 +998,15 @@ export default function ChatPanel({ sessionId }: Props) {
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     if (loading || bootstrapping) return;
+
     const userText = input.trim();
     if (!userText) return;
-    pushMessage("user", userText);
+
+    const shouldPushStandaloneUserMessage = !currentQuestion && !awaitingValidation;
+    if (shouldPushStandaloneUserMessage) {
+      pushMessage("user", userText);
+    }
+
     setInput("");
     await sendMessage(userText);
   }
@@ -902,6 +1070,19 @@ export default function ChatPanel({ sessionId }: Props) {
     awaitingValidation,
     phase: sessionState?.phase,
   });
+
+  const displayConstat = currentQuestion
+    ? cleanPrefixedLabel(currentQuestion.constat, "Constat")
+    : "";
+
+  const displayRisque = currentQuestion
+    ? cleanPrefixedLabel(currentQuestion.risque_managerial, "Risque managérial")
+    : "";
+
+  const displayQuestion = currentQuestion
+    ? cleanPrefixedLabel(currentQuestion.question, "Question")
+    : "";
+
   const canBuildReport = sessionState?.phase === "report_ready";
 
   return (
@@ -976,7 +1157,8 @@ export default function ChatPanel({ sessionId }: Props) {
           <div>
             <div className="font-semibold text-slate-900">Dimensions gelées</div>
             <div className="text-sm leading-6 text-slate-600">
-              Les constats consolidés, causes racines dominantes et zones non pilotées restent visibles pendant toute la fin du protocole.
+              Les constats consolidés, causes racines dominantes et zones non pilotées
+              restent visibles pendant toute la fin du protocole.
             </div>
           </div>
           <div className="grid gap-4">
@@ -1010,43 +1192,34 @@ export default function ChatPanel({ sessionId }: Props) {
 
       <div
         ref={scrollRef}
-        className="max-h-[420px] space-y-3 overflow-y-auto rounded-xl border border-slate-200 bg-white p-4"
+        className="max-h-[460px] space-y-3 overflow-y-auto rounded-xl border border-slate-200 bg-white p-4"
       >
-        {messages.map((m) => {
-          if (m.role === "question") {
+        {conversationBlocks.map((block) => {
+          if (block.kind === "question_exchange") {
             return (
-              <div
-                key={m.key}
-                className="mr-8 rounded-xl border border-slate-200 bg-slate-50 p-3"
-              >
-                <div className="mb-2 text-xs uppercase tracking-wide text-slate-500">
-                  Dimension {m.dimension ?? "?"} — Itération {m.iteration ?? "?"}/3 — Question {m.ordinal ?? "?"} / {m.total ?? "?"}
-                </div>
-                {m.theme && (
-                  <div className="mb-2 text-xs text-slate-500">Thème : {m.theme}</div>
-                )}
-                <div className="text-sm leading-6 text-slate-800">
-                  <span className="font-semibold text-slate-900">Question : </span>
-                  {m.text}
-                </div>
-              </div>
+              <QuestionExchangeCard
+                key={block.key}
+                question={block.question}
+                answer={block.answer}
+              />
             );
           }
 
-          const isUser = m.role === "user";
-          const isSystem = m.role === "system";
+          const isUser = block.message.role === "user";
+          const isSystem = block.message.role === "system";
+
           const messageClasses = isUser
-            ? "ml-8 border-slate-900 bg-slate-900 text-white"
+            ? "ml-8 border-slate-200 bg-slate-50 text-slate-800"
             : isSystem
               ? "mr-8 border-red-200 bg-red-50 text-red-700"
               : "mr-8 border-slate-200 bg-slate-50 text-slate-800";
 
           return (
             <div
-              key={m.key}
+              key={block.key}
               className={`whitespace-pre-line rounded-xl border p-3 text-sm leading-6 ${messageClasses}`}
             >
-              {m.text}
+              {block.message.text}
             </div>
           );
         })}
@@ -1056,28 +1229,30 @@ export default function ChatPanel({ sessionId }: Props) {
         <div className="space-y-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
           <div className="flex items-center justify-between text-sm text-slate-700">
             <div className="font-semibold text-slate-900">
-              Dimension {sessionState?.dimension ?? "?"} — Itération {" "}
+              Dimension {sessionState?.dimension ?? "?"} — Itération{" "}
               {sessionState?.iteration ?? "?"}/3
             </div>
             <div>
               Question {Math.min(currentIndex + 1, questions.length)} / {questions.length}
             </div>
           </div>
+
           {currentQuestion.theme && (
             <div className="text-xs text-slate-500">Thème : {currentQuestion.theme}</div>
           )}
+
           <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-4 text-sm leading-6 text-slate-800">
             <div>
               <span className="font-semibold text-slate-900">Constat : </span>
-              {currentQuestion.constat}
+              {displayConstat}
             </div>
             <div>
               <span className="font-semibold text-slate-900">Risque managérial : </span>
-              {currentQuestion.risque_managerial}
+              {displayRisque}
             </div>
             <div>
               <span className="font-semibold text-slate-900">Question : </span>
-              {currentQuestion.question}
+              {displayQuestion}
             </div>
           </div>
         </div>
@@ -1093,7 +1268,8 @@ export default function ChatPanel({ sessionId }: Props) {
           <div className="text-sm leading-6 text-slate-700">
             {sessionState?.phase === "final_objectives_validation" ? (
               <>
-                Répondez par <strong>oui</strong> pour tout valider, ou détaillez objectif par objectif.
+                Répondez par <strong>oui</strong> pour tout valider, ou détaillez
+                objectif par objectif.
               </>
             ) : (
               <>
@@ -1108,7 +1284,8 @@ export default function ChatPanel({ sessionId }: Props) {
         <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
           <div className="font-semibold text-slate-900">Rapport standardisé</div>
           <div className="text-sm leading-6 text-slate-700">
-            Le protocole est terminé. La construction du rapport génère un aperçu structuré lisible et déclenche le téléchargement du PDF client.
+            Le protocole est terminé. La construction du rapport génère un aperçu
+            structuré lisible et déclenche le téléchargement du PDF client.
           </div>
           <button
             type="button"
@@ -1148,7 +1325,12 @@ export default function ChatPanel({ sessionId }: Props) {
         />
         <button
           type="submit"
-          disabled={loading || bootstrapping || canBuildReport || input.trim().length === 0}
+          disabled={
+            loading ||
+            bootstrapping ||
+            canBuildReport ||
+            input.trim().length === 0
+          }
           className="inline-flex items-center justify-center rounded-lg bg-slate-950 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
         >
           {loading ? "Envoi..." : bootstrapping ? "Chargement..." : "Envoyer"}

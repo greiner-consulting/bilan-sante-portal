@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { adminSupabase } from "@/lib/supabaseServer";
+import PortalPageHeader from "@/app/components/PortalPageHeader";
 import {
   entitlementIsUsable,
   getActiveEntitlementForUser,
@@ -140,62 +141,53 @@ export default async function DashboardPage() {
   return (
     <main className="min-h-screen bg-slate-50 px-6 py-8">
       <div className="mx-auto max-w-6xl space-y-6">
-        <section className="rounded-2xl border bg-white p-6 shadow-sm">
-          <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
-            <div>
-              <h1 className="text-2xl font-semibold text-slate-900">
-                {isAdmin ? "Dashboard administrateur" : "Mes diagnostics"}
-              </h1>
-              <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-700">
-                {isAdmin
-                  ? "Vous pouvez gérer les accès invités, créer un nouveau diagnostic et accéder aux diagnostics réalisés depuis une interface unique."
-                  : existingSession
-                    ? "Votre diagnostic reste conservé en mémoire. Vous pouvez l’interrompre puis le reprendre sur la même session."
-                    : "Vous pouvez créer votre diagnostic. Une fois démarré, il sera conservé et repris sur cette même session."}
-              </p>
-            </div>
+        <PortalPageHeader
+          pageTitle={isAdmin ? "Dashboard administrateur" : "Mes diagnostics"}
+          description={
+            isAdmin
+              ? "Vous pouvez gérer les accès invités, créer un nouveau diagnostic et accéder aux diagnostics réalisés depuis une interface unique."
+              : existingSession
+                ? "Votre diagnostic reste conservé en mémoire. Vous pouvez l’interrompre puis le reprendre sur la même session."
+                : "Vous pouvez créer votre diagnostic. Une fois démarré, il sera conservé et repris sur cette même session."
+          }
+          userLabel="Connecté"
+          userValue={user.email ?? user.id}
+          actions={
+            <>
+              {isAdmin && (
+                <>
+                  <Link
+                    href="/admin/access"
+                    className="inline-flex items-center justify-center rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium text-slate-800 transition hover:bg-slate-50"
+                  >
+                    Gestion des accès invités
+                  </Link>
+                  <Link
+                    href="/admin/diagnostics"
+                    className="inline-flex items-center justify-center rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium text-slate-800 transition hover:bg-slate-50"
+                  >
+                    Diagnostics réalisés
+                  </Link>
+                </>
+              )}
 
-            <div className="flex flex-col gap-3 md:items-end">
-              <div className="rounded-xl border bg-slate-50 px-4 py-3 text-sm text-slate-700">
-                Connecté : <span className="font-medium">{user.email ?? user.id}</span>
-              </div>
+              {canCreateNew && (
+                <form action={createSession}>
+                  <button className="inline-flex items-center justify-center rounded-xl bg-slate-950 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-slate-800">
+                    Nouveau diagnostic
+                  </button>
+                </form>
+              )}
 
-              <div className="flex flex-wrap gap-3">
-                {isAdmin && (
-                  <>
-                    <Link
-                      href="/admin/access"
-                      className="inline-flex items-center justify-center rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium text-slate-800 transition hover:bg-slate-50"
-                    >
-                      Gestion des accès invités
-                    </Link>
-                    <Link
-                      href="/admin/diagnostics"
-                      className="inline-flex items-center justify-center rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium text-slate-800 transition hover:bg-slate-50"
-                    >
-                      Diagnostics réalisés
-                    </Link>
-                  </>
-                )}
-
-                {canCreateNew && (
-                  <form action={createSession}>
-                    <button className="inline-flex items-center justify-center rounded-xl bg-slate-950 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-slate-800">
-                      Nouveau diagnostic
-                    </button>
-                  </form>
-                )}
-
-                <Link
-                  href={logoutHref}
-                  className="inline-flex items-center justify-center rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium text-slate-800 transition hover:bg-slate-50"
-                >
-                  Déconnexion
-                </Link>
-              </div>
-            </div>
-          </div>
-        </section>
+              <Link
+                href={logoutHref}
+                className="inline-flex items-center justify-center rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium text-slate-800 transition hover:bg-slate-50"
+              >
+                Déconnexion
+              </Link>
+            </>
+          }
+        />
 
         {!isAdmin && existingSession && (
           <section className="rounded-2xl border border-emerald-200 bg-emerald-50 p-5 shadow-sm">
@@ -205,7 +197,8 @@ export default async function DashboardPage() {
                   Diagnostic en mémoire
                 </div>
                 <div className="mt-1 text-sm leading-6 text-emerald-900">
-                  Votre diagnostic a déjà été créé. Utilisez uniquement la reprise de session pour continuer.
+                  Votre diagnostic a déjà été créé. Utilisez uniquement la reprise de
+                  session pour continuer.
                 </div>
               </div>
               <Link
