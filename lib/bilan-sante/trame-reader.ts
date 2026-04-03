@@ -108,216 +108,64 @@ const STRUCTURE_RULES: DimensionStructureRule[] = [
 const THEME_KEYWORDS_BY_DIMENSION: Record<DimensionId, Record<string, string[]>> = {
   1: {
     "qualité et adéquation des équipes": [
-      "équipe",
-      "equipes",
-      "compétence",
-      "competence",
-      "profil",
-      "encadrement",
-      "expérience",
-      "experience",
-      "formation",
-      "niveau",
-      "senior",
-      "chef de chantier",
-      "chefs de chantier",
+      "équipe","equipes","compétence","competence","profil","encadrement","expérience","experience","formation","niveau","senior","chef de chantier","chefs de chantier",
     ],
     "ressources vs charge": [
-      "ressources",
-      "charge",
-      "capacité",
-      "capacite",
-      "sous-effectif",
-      "sous effectif",
-      "planning",
-      "disponibilité",
-      "disponibilite",
-      "staffing",
+      "ressources","charge","capacité","capacite","sous-effectif","sous effectif","planning","disponibilité","disponibilite","staffing",
     ],
     "turnover absentéisme stabilité": [
-      "turnover",
-      "absentéisme",
-      "absenteisme",
-      "stabilité",
-      "stabilite",
-      "départ",
-      "départs",
-      "rotation",
-      "fidélisation",
-      "fidelisation",
+      "turnover","absentéisme","absenteisme","stabilité","stabilite","départ","départs","rotation","fidélisation","fidelisation",
     ],
     "recrutement et intégration": [
-      "recrutement",
-      "recruter",
-      "embauche",
-      "embauches",
-      "intégration",
-      "integration",
-      "onboarding",
+      "recrutement","recruter","embauche","embauches","intégration","integration","onboarding",
     ],
     "clarté des rôles": [
-      "rôle",
-      "rôles",
-      "role",
-      "roles",
-      "responsabilité",
-      "responsabilite",
-      "organigramme",
-      "périmètre",
-      "perimetre",
-      "délégation",
-      "delegation",
+      "rôle","rôles","role","roles","responsabilité","responsabilite","organigramme","périmètre","perimetre","délégation","delegation",
     ],
   },
   2: {
     "stratégie commerciale": [
-      "stratégie commerciale",
-      "strategie commerciale",
-      "ciblage",
-      "segmentation",
-      "positionnement",
-      "prospection",
-      "offre",
-      "marché",
-      "marche",
+      "stratégie commerciale","strategie commerciale","ciblage","segmentation","positionnement","prospection","offre","marché","marche",
     ],
     "portage managérial et déploiement réel": [
-      "animation commerciale",
-      "déploiement",
-      "deploiement",
-      "portage",
-      "management commercial",
-      "pilotage commercial",
-      "plan d'action",
-      "plan action",
+      "animation commerciale","déploiement","deploiement","portage","management commercial","pilotage commercial","plan d'action","plan action",
     ],
     "indicateurs funnel / taux de succès": [
-      "pipeline",
-      "funnel",
-      "conversion",
-      "taux de succès",
-      "taux de succes",
-      "taux de transformation",
-      "opportunité",
-      "opportunite",
-      "devis gagné",
-      "devis gagne",
+      "pipeline","funnel","conversion","taux de succès","taux de succes","taux de transformation","opportunité","opportunite","devis gagné","devis gagne",
     ],
     "capacité à générer une croissance rentable": [
-      "croissance",
-      "rentable",
-      "rentabilité commerciale",
-      "rentabilite commerciale",
-      "développement rentable",
-      "developpement rentable",
-      "marge commerciale",
+      "croissance","rentable","rentabilité commerciale","rentabilite commerciale","développement rentable","developpement rentable","marge commerciale",
     ],
   },
   3: {
     "construction du prix et hypothèses": [
-      "prix",
-      "tarif",
-      "tarification",
-      "hypothèse",
-      "hypothese",
-      "devis",
-      "chiffrage",
-      "remise",
+      "prix","tarif","tarification","hypothèse","hypothese","devis","chiffrage","remise",
     ],
     "délégation et arbitrage": [
-      "arbitrage",
-      "validation",
-      "délégation",
-      "delegation",
-      "décision",
-      "decision",
-      "autorisation",
-      "escalade",
+      "arbitrage","validation","délégation","delegation","décision","decision","autorisation","escalade",
     ],
     "fiabilité du chiffrage": [
-      "fiabilité",
-      "fiabilite",
-      "écart",
-      "ecart",
-      "coût réel",
-      "cout reel",
-      "dérive",
-      "derive",
-      "sous-chiffrage",
-      "sous chiffrage",
-      "surcoût",
-      "surcout",
+      "fiabilité","fiabilite","écart","ecart","coût réel","cout reel","dérive","derive","sous-chiffrage","sous chiffrage","surcoût","surcout",
     ],
     "taux de succès et critères": [
-      "taux de succès",
-      "taux de succes",
-      "critère",
-      "critere",
-      "go / no go",
-      "go/no go",
-      "sélection",
-      "selection",
-      "qualification",
+      "taux de succès","taux de succes","critère","critere","go / no go","go/no go","sélection","selection","qualification",
     ],
     "maîtrise des écarts prix vendu / coût réel": [
-      "prix vendu",
-      "coût réel",
-      "cout reel",
-      "marge",
-      "écart",
-      "ecart",
-      "rentabilité",
-      "rentabilite",
-      "dérive",
-      "derive",
+      "prix vendu","coût réel","cout reel","marge","écart","ecart","rentabilité","rentabilite","dérive","derive",
     ],
   },
   4: {
     "sécurité qualité performance économique": [
-      "sécurité",
-      "securite",
-      "qualité",
-      "qualite",
-      "performance",
-      "non-qualité",
-      "non qualite",
-      "incident",
-      "accident",
-      "conformité",
-      "conformite",
+      "sécurité","securite","qualité","qualite","performance","non-qualité","non qualite","incident","accident","conformité","conformite",
     ],
     "indicateurs et rituels managériaux": [
-      "indicateur",
-      "indicateurs",
-      "rituel",
-      "rituels",
-      "pilotage",
-      "revue",
-      "tableau de bord",
-      "kpi",
+      "indicateur","indicateurs","rituel","rituels","pilotage","revue","tableau de bord","kpi",
     ],
     "productivité et gestion des effectifs": [
-      "productivité",
-      "productivite",
-      "effectif",
-      "effectifs",
-      "charge",
-      "planning",
-      "capacité",
-      "capacite",
-      "rendement",
+      "productivité","productivite","effectif","effectifs","charge","planning","capacité","capacite","rendement",
     ],
     "pilotage cash résultat marges": [
-      "cash",
-      "trésorerie",
-      "tresorerie",
-      "résultat",
-      "resultat",
-      "marge",
-      "marges",
-      "rentabilité",
-      "rentabilite",
-      "ebitda",
+      "cash","trésorerie","tresorerie","résultat","resultat","marge","marges","rentabilité","rentabilite","ebitda",
     ],
   },
 };
@@ -361,9 +209,7 @@ function uniqueStrings(values: string[]): string[] {
 function splitIntoSections(rawText: string): TrameSection[] {
   const normalized = String(rawText ?? "").replace(/\r/g, "");
   const parts = normalized
-    .split(
-      /\n{2,}|(?=SECTION\s+\d+)|(?=CHAPITRE\s+\d+)|(?=DOMAINE\s+\d+)|(?=DIMENSION\s+\d+)|(?=\d+\s*[). -]\s+)/i
-    )
+    .split(/\n{2,}|(?=SECTION\s+\d+)|(?=CHAPITRE\s+\d+)|(?=DOMAINE\s+\d+)|(?=DIMENSION\s+\d+)|(?=\d+\s*[). -]\s+)/i)
     .map((part) => part.trim())
     .filter((part) => part.length > 0);
 
@@ -386,7 +232,6 @@ function splitIntoSections(rawText: string): TrameSection[] {
 function scoreAliasHits(text: string, aliases: string[]): number {
   const normalized = normalizeText(text);
   let score = 0;
-
   for (const alias of aliases) {
     const normalizedAlias = normalizeText(alias);
     if (!normalizedAlias) continue;
@@ -394,7 +239,6 @@ function scoreAliasHits(text: string, aliases: string[]): number {
       score += normalizedAlias.length >= 12 ? 8 : 5;
     }
   }
-
   return score;
 }
 
@@ -428,18 +272,12 @@ function scoreThemeEvidence(
     ]);
 
     let sectionScore = 0;
-
-    if (headingNorm.includes(normalizeText(theme))) {
-      sectionScore += 12;
-    }
-    if (contentNorm.includes(normalizeText(theme))) {
-      sectionScore += 8;
-    }
+    if (headingNorm.includes(normalizeText(theme))) sectionScore += 12;
+    if (contentNorm.includes(normalizeText(theme))) sectionScore += 8;
 
     for (const keyword of keywords) {
       const normalizedKeyword = normalizeText(keyword);
       if (!normalizedKeyword) continue;
-
       if (headingNorm.includes(normalizedKeyword)) sectionScore += 6;
       if (contentNorm.includes(normalizedKeyword)) sectionScore += 3;
     }
@@ -480,33 +318,16 @@ function buildDimensionBlueprint(
     .map(([theme, keywords]) => scoreThemeEvidence(detectedSections, theme, keywords))
     .sort((a, b) => b.score - a.score);
 
-  const strongExpressed = evidences
-    .filter((item) => item.score >= 12)
-    .map((item) => item.theme);
+  const strongExpressed = evidences.filter((item) => item.score >= 12).map((item) => item.theme);
+  const weakExpressed = evidences.filter((item) => item.score >= 5 && item.score < 12).map((item) => item.theme);
 
-  const weakExpressed = evidences
-    .filter((item) => item.score >= 5 && item.score < 12)
-    .map((item) => item.theme);
-
-  // Correctif clé :
-  // on ne coupe plus artificiellement à 1 seul thème faible
-  // dès qu’un thème fort existe. On garde jusqu’à 3 thèmes
-  // réellement détectés (forts + faibles).
-  const expressedThemes = uniqueStrings([
-    ...strongExpressed,
-    ...weakExpressed,
-  ]).slice(0, 3);
-
+  const expressedThemes = uniqueStrings([...strongExpressed, ...weakExpressed]).slice(0, 3);
   const selectedThemes = [...expressedThemes];
   const inferredThemes: string[] = [];
 
-  // Règle conservée : on peut introduire au maximum 1 thème non exprimé
   if (selectedThemes.length < 3) {
     const remainingThemes = definition.requiredThemes.filter(
-      (theme) =>
-        !selectedThemes.some(
-          (item) => normalizeText(item) === normalizeText(theme)
-        )
+      (theme) => !selectedThemes.some((item) => normalizeText(item) === normalizeText(theme))
     );
 
     if (remainingThemes.length > 0) {
@@ -525,10 +346,7 @@ function buildDimensionBlueprint(
     inferredThemes,
     selectedThemes: uniqueStrings(selectedThemes).slice(0, 3),
     weakSignalThemes: weakExpressed.filter(
-      (theme) =>
-        !expressedThemes.some(
-          (item) => normalizeText(item) === normalizeText(theme)
-        )
+      (theme) => !expressedThemes.some((item) => normalizeText(item) === normalizeText(theme))
     ),
   };
 }
@@ -537,7 +355,6 @@ function buildStructureValidation(
   blueprints: TrameDimensionBlueprint[]
 ): TrameStructureValidation {
   const missing = blueprints.filter((item) => !item.isPresent);
-
   if (missing.length === 0) {
     return {
       isValid: true,
@@ -548,14 +365,11 @@ function buildStructureValidation(
   }
 
   const labels = missing.map((item) => item.label);
-
   return {
     isValid: false,
     missingDimensionIds: missing.map((item) => item.dimensionId),
     missingDimensionLabels: labels,
-    message: `La trame ne respecte pas l’architecture minimale attendue. Domaine(s) manquant(s) ou non reconnaissable(s) : ${labels.join(
-      ", "
-    )}.`,
+    message: `La trame ne respecte pas l’architecture minimale attendue. Domaine(s) manquant(s) ou non reconnaissable(s) : ${labels.join(", ")}.`,
   };
 }
 
@@ -583,7 +397,7 @@ function deriveQualityFlags(
         code: `DIMENSION_${blueprint.dimensionId}_THEMES_UNDER_TARGET`,
         severity: "warning",
         level: "warning",
-        message: `La dimension "${blueprint.label}" ne fournit pas 3 thèmes réellement exploitables. Le moteur restera volontairement contraint sur ${blueprint.selectedThemes.length} thème(s).`,
+        message: `La dimension "${blueprint.label}" ne fournit pas 3 thèmes réellement exploitables. Le moteur restera contraint sur ${blueprint.selectedThemes.length} thème(s).`,
       });
     }
 
@@ -593,15 +407,6 @@ function deriveQualityFlags(
         severity: "info",
         level: "info",
         message: `La dimension "${blueprint.label}" nécessite ${blueprint.inferredThemes.length} thème inféré pour compléter le cadre d’exploration.`,
-      });
-    }
-
-    if (blueprint.expressedThemes.length < 2) {
-      flags.push({
-        code: `DIMENSION_${blueprint.dimensionId}_LOW_THEME_DENSITY`,
-        severity: "warning",
-        level: "warning",
-        message: `La matière explicite de la dimension "${blueprint.label}" reste faible ; le diagnostic sera mécaniquement moins dense sur ce domaine.`,
       });
     }
   }
@@ -615,16 +420,15 @@ function deriveMissingFields(
   const missing: MissingFieldSignal[] = [];
 
   for (const blueprint of blueprints) {
-    const unselectedExpressibleThemes = DIAGNOSTIC_DIMENSIONS.find(
-      (item) => item.id === blueprint.dimensionId
-    )!.requiredThemes.filter(
+    const definition = DIAGNOSTIC_DIMENSIONS.find((item) => item.id === blueprint.dimensionId);
+    const notSelected = (definition?.requiredThemes ?? []).filter(
       (theme) =>
         !blueprint.selectedThemes.some(
           (selected) => normalizeText(selected) === normalizeText(theme)
         )
     );
 
-    for (const theme of unselectedExpressibleThemes.slice(0, 2)) {
+    for (const theme of notSelected.slice(0, 2)) {
       missing.push({
         field: theme,
         label: theme,
@@ -641,11 +445,9 @@ function deriveMissingFields(
 
 export function readBaseTrame(rawText: string): BaseTrame {
   const sections = splitIntoSections(rawText);
-
   const dimensionBlueprints = DIAGNOSTIC_DIMENSIONS.map((dimension) =>
     buildDimensionBlueprint(dimension.id, sections)
   );
-
   const structureValidation = buildStructureValidation(dimensionBlueprints);
 
   if (!structureValidation.isValid) {
@@ -655,10 +457,7 @@ export function readBaseTrame(rawText: string): BaseTrame {
   const qualityFlags = deriveQualityFlags(rawText, dimensionBlueprints);
   const missingFields = deriveMissingFields(dimensionBlueprints);
 
-  const snapshot: BaseTrameSnapshot & {
-    dimensionBlueprints: TrameDimensionBlueprint[];
-    structureValidation: TrameStructureValidation;
-  } = {
+  const snapshot: BaseTrameSnapshot = {
     rawText: String(rawText ?? ""),
     sections,
     qualityFlags,

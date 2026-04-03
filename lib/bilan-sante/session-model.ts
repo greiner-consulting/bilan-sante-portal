@@ -69,6 +69,10 @@ export interface BaseTrameSection {
   id: string;
   heading: string;
   content: string;
+  title?: string;
+  sectionNumber?: string;
+  qualityFlags?: QualityFlag[];
+  missingFields?: MissingFieldHint[];
 }
 
 export interface MissingFieldHint {
@@ -89,6 +93,23 @@ export interface BaseTrameSnapshot {
   rawText?: string;
   extractedAt?: string;
   qualityFlags: QualityFlag[];
+  dimensionBlueprints?: Array<{
+    dimensionId: DimensionId;
+    label: string;
+    detectedSectionIds: string[];
+    detectedHeadings: string[];
+    isPresent: boolean;
+    expressedThemes: string[];
+    inferredThemes: string[];
+    selectedThemes: string[];
+    weakSignalThemes: string[];
+  }>;
+  structureValidation?: {
+    isValid: boolean;
+    missingDimensionIds: DimensionId[];
+    missingDimensionLabels: string[];
+    message: string;
+  };
 }
 
 export type BaseTrame = BaseTrameSnapshot;
@@ -274,8 +295,6 @@ export interface FrozenDimensionDiagnosis {
   exploredThemes?: string[];
   exploredSignalIds?: string[];
   analysisSnapshot?: DimensionAnalysisSnapshot;
-
-  // compat consolidation / builder
   summary?: string;
   evidenceSummary?: string[];
   facts?: DimensionFact[];
@@ -313,7 +332,6 @@ export interface FinalObjective {
   gainHypotheses: string[];
   validationStatus: "proposed" | "validated" | "adjusted" | "refused";
   quickWin: string;
-
   proposalRevision?: number;
   sourceSeedId?: string | null;
   proposalSource?: FinalObjectiveProposalSource;
