@@ -263,6 +263,12 @@ export interface ObjectiveSeed {
   quickWin?: string;
   linkedFactIds?: string[];
   priorityScore?: number;
+
+  // lot 4
+  objectiveFamily?: string;
+  knowledgeActionIds?: string[];
+  knowledgeIndicatorIds?: string[];
+  quantificationNotes?: string[];
 }
 
 export interface ZoneNonPilotee {

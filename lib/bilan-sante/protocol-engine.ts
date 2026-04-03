@@ -49,6 +49,10 @@ import {
   buildFinalObjectiveSetFromFrozenDimensions,
 } from "@/lib/bilan-sante/objectives-builder";
 import { buildFrozenDimensionNarrativeWithLlm } from "@/lib/bilan-sante/llm-diagnostic-writer";
+import {
+  buildKnowledgeSeed,
+  thematicFocusLabel,
+} from "@/lib/bilan-sante/objective-knowledge";
 
 export interface EngineView {
   assistantMessage: string;
@@ -496,7 +500,6 @@ async function buildWorkset(
   };
 }
 
-
 type SignalFreezeState = "active" | "mitigated" | "contradicted";
 
 type SignalFreezeAssessment = {
@@ -627,11 +630,7 @@ function assessSignalForFreeze(
 
   for (const item of relatedMemory) {
     const combinedText = normalizeForMatch(
-      [
-        item.rawMessage,
-        item.summary,
-        ...(item.extractedFacts ?? []),
-      ].join(" | ")
+      [item.rawMessage, item.summary, ...(item.extractedFacts ?? [])].join(" | ")
     );
 
     const exactSignalWeight = item.signalId === signal.id ? 3 : 2;
@@ -777,7 +776,8 @@ function buildStabilizedDimensionNarrative(params: {
 function conservativeScoreFromSignals(signals: DiagnosticSignal[]): 1 | 2 | 3 | 4 | 5 {
   if (signals.length === 0) return 4;
   const avgCriticality = signals.reduce((sum, item) => sum + item.criticalityScore, 0) / signals.length;
-  const absenceRatio = signals.filter((item) => item.signalKind === "absence").length / signals.length;
+  const absenceRatio =
+    signals.filter((item) => item.signalKind === "absence").length / signals.length;
   const raw = 5 - Math.round((avgCriticality / 100) * 2 + absenceRatio * 2);
   return Math.max(1, Math.min(5, raw)) as 1 | 2 | 3 | 4 | 5;
 }
@@ -878,8 +878,10 @@ function prioritizeSignalsForFreeze(
     const bFactBonus = (latestFactsByTheme.get(normalizeForMatch(b.theme))?.length ?? 0) * 12;
     const aExplicit = a.signalKind === "explicit" ? 18 : 0;
     const bExplicit = b.signalKind === "explicit" ? 18 : 0;
-    const aAdjustment = aAssessment.state === "mitigated" ? -24 : aAssessment.state === "contradicted" ? -120 : 0;
-    const bAdjustment = bAssessment.state === "mitigated" ? -24 : bAssessment.state === "contradicted" ? -120 : 0;
+    const aAdjustment =
+      aAssessment.state === "mitigated" ? -24 : aAssessment.state === "contradicted" ? -120 : 0;
+    const bAdjustment =
+      bAssessment.state === "mitigated" ? -24 : bAssessment.state === "contradicted" ? -120 : 0;
     const aScore = a.criticalityScore + a.confidenceScore + aFactBonus + aExplicit + aAdjustment;
     const bScore = b.criticalityScore + b.confidenceScore + bFactBonus + bExplicit + bAdjustment;
     return bScore - aScore;
@@ -1000,38 +1002,6 @@ function getExploredSignalsForDimension(
     : registrySignals;
 }
 
-function extractQuotedTheme(value: string | null | undefined): string | null {
-  const text = normalizeText(value);
-  if (!text) return null;
-  const quoted = text.match(/th[èe]me\s*["«]([^"»]+)["»]/i);
-  if (quoted?.[1]) return normalizeText(quoted[1]);
-  return null;
-}
-
-function firstSentence(value: string | null | undefined): string {
-  const text = normalizeText(value);
-  if (!text) return "";
-  const match = text.match(/^(.+?[.!?])(?:\s|$)/);
-  return normalizeText(match?.[1] ?? text);
-}
-
-function thematicFocusLabel(value: string | null | undefined): string {
-  const theme = extractQuotedTheme(value);
-  if (theme) return theme;
-
-  const sentence = firstSentence(value)
-    .replace(/^le\s+th[èe]me\s+/i, "")
-    .replace(/^sur\s+le\s+th[èe]me\s+/i, "")
-    .replace(/^la\s+zone\s+/i, "")
-    .replace(/^le\s+point\s+/i, "")
-    .replace(/^constat\s*:\s*/i, "")
-    .replace(/^risque\s+manag[ée]rial\s*:\s*/i, "")
-    .replace(/^cons[ée]quence\s*:\s*/i, "")
-    .trim();
-
-  return shortenText(sentence, 120) || "zone non pilotée dominante";
-}
-
 function lowerFirst(value: string | null | undefined): string {
   const text = normalizeText(value);
   if (!text) return "";
@@ -1096,116 +1066,27 @@ function buildEvidenceSummary(
   );
 }
 
-function buildObjectiveLabelFromZone(
-  dimensionId: DimensionId,
-  zone: ZoneNonPilotee | undefined,
-  dominantRootCause: string
-): string {
-  if (!zone) {
-    return `Sous 6 mois, réduire l’exposition de la dimension "${dimensionTitle(dimensionId)}" à la cause racine dominante`;
-  }
-
-  const focus = thematicFocusLabel(zone.constat);
-  const text = normalizeForMatch(
-    `${zone.constat} ${zone.risqueManagerial} ${zone.consequence}`
-  );
-
-  if (text.includes("arbitr")) {
-    return `Sous 6 mois, rendre pilotable la zone dominante "${focus}" en clarifiant les arbitrages qui la bloquent`;
-  }
-  if (
-    text.includes("depend") ||
-    text.includes("dépend") ||
-    text.includes("relais") ||
-    text.includes("personne cle")
-  ) {
-    return `Sous 6 mois, rendre pilotable la zone dominante "${focus}" en réduisant la dépendance critique qui la fragilise`;
-  }
-  if (
-    text.includes("marge") ||
-    text.includes("cash") ||
-    text.includes("prix") ||
-    text.includes("cout") ||
-    text.includes("coût") ||
-    text.includes("rentabil")
-  ) {
-    return `Sous 6 mois, rendre pilotable la zone dominante "${focus}" en reconnectant le pilotage opérationnel à son impact économique réel`;
-  }
-  if (
-    text.includes("role") ||
-    text.includes("rôle") ||
-    text.includes("organisation") ||
-    text.includes("recrut") ||
-    text.includes("equipe") ||
-    text.includes("équipe")
-  ) {
-    return `Sous 6 mois, rendre pilotable la zone dominante "${focus}" en sécurisant les rôles, relais et responsabilités associés`;
-  }
-
-  return `Sous 6 mois, rendre pilotable la zone dominante "${focus}" et réduire le risque managérial associé`;
-}
-
-function buildObjectiveIndicatorFromZone(
-  zone: ZoneNonPilotee | undefined,
-  dominantRootCause: string
-): string {
-  const text = normalizeForMatch(
-    `${zone?.constat ?? ""} ${zone?.risqueManagerial ?? ""} ${zone?.consequence ?? ""} ${dominantRootCause}`
-  );
-
-  if (text.includes("arbitr")) {
-    return "Délai d’arbitrage, taux de décisions escaladées, part des décisions prises au bon niveau";
-  }
-  if (
-    text.includes("depend") ||
-    text.includes("dépend") ||
-    text.includes("relais") ||
-    text.includes("personne cle")
-  ) {
-    return "Taux de couverture des relais, nombre de points tenus sans personne clé, niveau de dépendance critique";
-  }
-  if (
-    text.includes("marge") ||
-    text.includes("cash") ||
-    text.includes("prix") ||
-    text.includes("cout") ||
-    text.includes("coût") ||
-    text.includes("rentabil")
-  ) {
-    return "Écart prix vendu / coût réel, marge tenue, visibilité cash sur le point dominant";
-  }
-  if (
-    text.includes("role") ||
-    text.includes("rôle") ||
-    text.includes("organisation") ||
-    text.includes("recrut") ||
-    text.includes("equipe") ||
-    text.includes("équipe")
-  ) {
-    return "Couverture des rôles clés, stabilité des relais, tenue du pilotage sur la zone dominante";
-  }
-
-  return "Indicateur de maîtrise de la zone dominante, fréquence de revue et taux de traitement des écarts";
-}
-
-function buildObjectiveQuickWinFromZone(zone: ZoneNonPilotee | undefined): string {
-  if (!zone) {
-    return "Nommer un propriétaire et formaliser un premier point de revue sur la zone dominante dans le mois.";
-  }
-
-  const focus = thematicFocusLabel(zone.constat);
-  return `Dans les 30 jours, nommer un propriétaire, clarifier la règle de pilotage et installer un point de revue sur "${focus}".`;
-}
-
-function buildObjectivePotentialGainFromZone(zone: ZoneNonPilotee | undefined): string {
-  if (!zone) {
-    return "Gain à préciser en validation finale sur la réduction de l’exposition managériale dominante.";
-  }
-
-  return `Gain à préciser en validation finale, en lien direct avec la conséquence prioritaire identifiée : ${shortenText(
-    zone.consequence,
-    150
-  )}`;
+function buildKnowledgeFallbackSeed(params: {
+  dimensionId: DimensionId;
+  dominantRootCause: string;
+  consolidatedFindings: [string, string, string];
+  evidenceSummary?: string[];
+}): ObjectiveSeed {
+  return buildKnowledgeSeed({
+    seedId: `seed-d${params.dimensionId}-fallback`,
+    dimensionId: params.dimensionId,
+    dimensionTitle: dimensionTitle(params.dimensionId),
+    dominantRootCause: params.dominantRootCause,
+    consolidatedFindings: params.consolidatedFindings,
+    evidenceSummary: params.evidenceSummary,
+    zone: null,
+    priority: normalizeForMatch(params.dominantRootCause).includes("aucune cause racine critique")
+      ? "low"
+      : "high",
+    priorityScore: normalizeForMatch(params.dominantRootCause).includes("aucune cause racine critique")
+      ? 35
+      : 60,
+  });
 }
 
 function buildObjectiveSeedsForFrozenDimension(params: {
@@ -1213,59 +1094,36 @@ function buildObjectiveSeedsForFrozenDimension(params: {
   dominantRootCause: string;
   consolidatedFindings: [string, string, string];
   unmanagedZones: ZoneNonPilotee[];
+  evidenceSummary?: string[];
 }): ObjectiveSeed[] {
   const zones = params.unmanagedZones.slice(0, 3);
   const seeds: ObjectiveSeed[] = [];
 
   zones.forEach((zone, index) => {
-    seeds.push({
-      id: `seed-d${params.dimensionId}-${index + 1}`,
-      label: buildObjectiveLabelFromZone(
-        params.dimensionId,
+    seeds.push(
+      buildKnowledgeSeed({
+        seedId: `seed-d${params.dimensionId}-${index + 1}`,
+        dimensionId: params.dimensionId,
+        dimensionTitle: dimensionTitle(params.dimensionId),
+        dominantRootCause: params.dominantRootCause,
+        consolidatedFindings: params.consolidatedFindings,
+        evidenceSummary: params.evidenceSummary,
         zone,
-        params.dominantRootCause
-      ),
-      rationale: `${shortenText(zone.constat, 150)} Risque : ${shortenText(zone.risqueManagerial, 130)}`,
-      indicator: buildObjectiveIndicatorFromZone(zone, params.dominantRootCause),
-      suggestedDueDate:
-        index === 0
-          ? "90 jours pour sécuriser le cadre / 6 mois pour tenir le résultat"
-          : "À séquencer après traitement de la zone dominante",
-      potentialGain: buildObjectivePotentialGainFromZone(zone),
-      quickWin: buildObjectiveQuickWinFromZone(zone),
-      priority: index === 0 ? "high" : index === 1 ? "medium" : "low",
-      priorityScore: index === 0 ? 100 : index === 1 ? 74 : 58,
-    });
+        priority: index === 0 ? "high" : index === 1 ? "medium" : "low",
+        priorityScore: index === 0 ? 100 : index === 1 ? 74 : 58,
+      })
+    );
   });
 
   if (seeds.length === 0) {
-    if (normalizeForMatch(params.dominantRootCause).includes("aucune cause racine critique")) {
-      seeds.push({
-        id: `seed-d${params.dimensionId}-stability`,
-        label: `Sous 6 mois, consolider dans la durée les mécanismes de pilotage déjà en place sur la dimension "${dimensionTitle(params.dimensionId)}"`,
-        rationale: params.consolidatedFindings[0],
-        indicator: "Tenue des délégations, continuité des relais et absence de dérive sur les thèmes explorés",
-        suggestedDueDate: "Revue de stabilité à 3 mois puis à 6 mois",
-        potentialGain: "Préserver la robustesse constatée et éviter qu’un point aujourd’hui maîtrisé ne redevienne fragile",
-        quickWin: "Documenter brièvement les règles, délégations et relais cités par le dirigeant sur cette dimension",
-        priority: "low",
-        priorityScore: 35,
-      });
-    } else {
-      seeds.push({
-        id: `seed-d${params.dimensionId}-fallback`,
-        label: `Sous 6 mois, réduire l’exposition de la dimension "${dimensionTitle(params.dimensionId)}" à la cause racine dominante`,
-        rationale: params.dominantRootCause,
-        indicator: buildObjectiveIndicatorFromZone(undefined, params.dominantRootCause),
-        suggestedDueDate: "À définir avec le dirigeant",
-        potentialGain:
-          "Gain à préciser en validation finale sur la réduction de l’exposition dominante.",
-        quickWin:
-          "Nommer un propriétaire, formaliser une cible et installer un premier rituel de revue.",
-        priority: "high",
-        priorityScore: 60,
-      });
-    }
+    seeds.push(
+      buildKnowledgeFallbackSeed({
+        dimensionId: params.dimensionId,
+        dominantRootCause: params.dominantRootCause,
+        consolidatedFindings: params.consolidatedFindings,
+        evidenceSummary: params.evidenceSummary,
+      })
+    );
   }
 
   return seeds;
@@ -1327,6 +1185,7 @@ async function freezeDimension(
     dominantRootCause: llmNarrative.dominantRootCause,
     consolidatedFindings: llmNarrative.consolidatedFindings,
     unmanagedZones: llmNarrative.unmanagedZones,
+    evidenceSummary,
   });
 
   return {
