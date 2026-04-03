@@ -496,8 +496,286 @@ async function buildWorkset(
   };
 }
 
+
+type SignalFreezeState = "active" | "mitigated" | "contradicted";
+
+type SignalFreezeAssessment = {
+  signalId: string;
+  theme: string;
+  state: SignalFreezeState;
+  rationale: string[];
+  rebuttalFacts: string[];
+};
+
+const DIRECTOR_REBUTTAL_PATTERNS = [
+  "pas un point de fragilité",
+  "pas un point de fragilite",
+  "ce n'est pas un point de fragilité",
+  "ce n est pas un point de fragilité",
+  "ce n'est pas un point de fragilite",
+  "ce n est pas un point de fragilite",
+  "pas une difficulté",
+  "pas une difficulte",
+  "ce n'est pas une difficulté",
+  "ce n est pas une difficulté",
+  "ce n'est pas une difficulte",
+  "ce n est pas une difficulte",
+  "pas un risque",
+  "pas de risque",
+  "aucun risque",
+  "pas un problème",
+  "pas un probleme",
+  "ce n'est pas un problème",
+  "ce n est pas un problème",
+  "ce n'est pas un probleme",
+  "ce n est pas un probleme",
+  "aucune difficulté",
+  "aucune difficulte",
+  "rien de bloquant",
+  "pas une fragilité",
+  "pas une fragilite",
+  "pas une faiblesse",
+  "pas le sujet",
+  "pas un sujet de fragilité",
+  "pas un sujet de fragilite",
+  "pas une vraie difficulté",
+  "pas une vraie difficulte",
+  "ne nous expose pas",
+  "ne nous expose pas à ce risque",
+  "n'expose pas l'entreprise",
+];
+
+const DIRECTOR_MITIGATION_PATTERNS = [
+  "délégation",
+  "delegation",
+  "délégations",
+  "delegations",
+  "relais en place",
+  "des relais existent",
+  "cadre en place",
+  "processus en place",
+  "procédure en place",
+  "procedure en place",
+  "on sait gérer",
+  "on sait gerer",
+  "est couvert",
+  "est géré",
+  "est gere",
+  "permet de gérer",
+  "permet de gerer",
+  "permettent de régler",
+  "permettent de regler",
+  "permet de régler",
+  "permet de regler",
+  "continuité assurée",
+  "continuite assuree",
+  "pas suffisamment d'offres",
+  "pas suffisamment d offres",
+  "peu d'offres",
+  "peu d offres",
+  "peu de volume",
+  "faible volumétrie",
+  "faible volumetrie",
+  "volume limité",
+  "volume limite",
+  "cas rare",
+  "cas rares",
+  "rarement",
+  "ponctuel",
+];
+
+function textMatchesAnyPattern(text: string, patterns: string[]): boolean {
+  return patterns.some((pattern) => text.includes(normalizeForMatch(pattern)));
+}
+
+function getSignalRelatedMemory(
+  session: DiagnosticSessionAggregate,
+  dimensionId: DimensionId,
+  signal: DiagnosticSignal
+) {
+  const themeKey = normalizeForMatch(signal.theme);
+
+  return (session.analysisMemory ?? []).filter((item) => {
+    if (item.dimensionId !== dimensionId) return false;
+    if (item.signalId === signal.id) return true;
+    return normalizeForMatch(item.theme) === themeKey;
+  });
+}
+
+function assessSignalForFreeze(
+  session: DiagnosticSessionAggregate,
+  dimensionId: DimensionId,
+  signal: DiagnosticSignal
+): SignalFreezeAssessment {
+  const relatedMemory = getSignalRelatedMemory(session, dimensionId, signal);
+
+  if (relatedMemory.length === 0) {
+    return {
+      signalId: signal.id,
+      theme: signal.theme,
+      state: "active",
+      rationale: [],
+      rebuttalFacts: [],
+    };
+  }
+
+  let contradictionScore = 0;
+  let mitigationScore = 0;
+  let supportScore = 0;
+  const rationale: string[] = [];
+  const rebuttalFacts: string[] = [];
+
+  for (const item of relatedMemory) {
+    const combinedText = normalizeForMatch(
+      [
+        item.rawMessage,
+        item.summary,
+        ...(item.extractedFacts ?? []),
+      ].join(" | ")
+    );
+
+    const exactSignalWeight = item.signalId === signal.id ? 3 : 2;
+    const matchesRebuttal = textMatchesAnyPattern(combinedText, DIRECTOR_REBUTTAL_PATTERNS);
+    const matchesMitigation = textMatchesAnyPattern(combinedText, DIRECTOR_MITIGATION_PATTERNS);
+    const explicitContradiction =
+      item.intent === "challenge" ||
+      item.intent === "reframing" ||
+      (item.contradictionSignals?.length ?? 0) > 0;
+
+    if (explicitContradiction || matchesRebuttal) {
+      contradictionScore += exactSignalWeight;
+      rationale.push("postulat contesté par la réponse dirigeant");
+      rebuttalFacts.push(...(item.extractedFacts ?? []), item.rawMessage);
+    }
+
+    if (matchesMitigation) {
+      mitigationScore += item.signalId === signal.id ? 2 : 1;
+      rationale.push("mécanisme de couverture ou exposition limitée mentionné");
+      rebuttalFacts.push(...(item.extractedFacts ?? []), item.rawMessage);
+    }
+
+    if (item.isUsableBusinessMatter && !explicitContradiction && !matchesRebuttal) {
+      supportScore += 1;
+      if ((item.detectedRootCauses?.length ?? 0) > 0) supportScore += 1;
+      if ((item.extractedFacts?.length ?? 0) >= 2) supportScore += 1;
+    }
+  }
+
+  const uniqueRationale = uniqueStrings(rationale, 4);
+  const uniqueRebuttalFacts = uniqueStrings(rebuttalFacts, 3);
+
+  if (contradictionScore >= Math.max(2, supportScore + 1)) {
+    return {
+      signalId: signal.id,
+      theme: signal.theme,
+      state: "contradicted",
+      rationale: uniqueRationale,
+      rebuttalFacts: uniqueRebuttalFacts,
+    };
+  }
+
+  if (mitigationScore >= Math.max(2, supportScore)) {
+    return {
+      signalId: signal.id,
+      theme: signal.theme,
+      state: "mitigated",
+      rationale: uniqueRationale,
+      rebuttalFacts: uniqueRebuttalFacts,
+    };
+  }
+
+  return {
+    signalId: signal.id,
+    theme: signal.theme,
+    state: "active",
+    rationale: uniqueRationale,
+    rebuttalFacts: uniqueRebuttalFacts,
+  };
+}
+
+function splitSignalsForFreeze(
+  session: DiagnosticSessionAggregate,
+  dimensionId: DimensionId,
+  signals: DiagnosticSignal[]
+): {
+  activeSignals: DiagnosticSignal[];
+  mitigatedSignals: DiagnosticSignal[];
+  contradictedSignals: DiagnosticSignal[];
+  assessments: Map<string, SignalFreezeAssessment>;
+} {
+  const assessments = new Map<string, SignalFreezeAssessment>();
+  const activeSignals: DiagnosticSignal[] = [];
+  const mitigatedSignals: DiagnosticSignal[] = [];
+  const contradictedSignals: DiagnosticSignal[] = [];
+
+  for (const signal of signals) {
+    const assessment = assessSignalForFreeze(session, dimensionId, signal);
+    assessments.set(signal.id, assessment);
+
+    if (assessment.state === "contradicted") {
+      contradictedSignals.push(signal);
+      continue;
+    }
+
+    if (assessment.state === "mitigated") {
+      mitigatedSignals.push(signal);
+      continue;
+    }
+
+    activeSignals.push(signal);
+  }
+
+  return {
+    activeSignals: uniqueById(activeSignals),
+    mitigatedSignals: uniqueById(mitigatedSignals),
+    contradictedSignals: uniqueById(contradictedSignals),
+    assessments,
+  };
+}
+
+function buildStabilizedDimensionNarrative(params: {
+  session: DiagnosticSessionAggregate;
+  dimensionId: DimensionId;
+  mitigatedSignals: DiagnosticSignal[];
+  contradictedSignals: DiagnosticSignal[];
+  assessments: Map<string, SignalFreezeAssessment>;
+}): Pick<
+  FrozenDimensionDiagnosis,
+  "consolidatedFindings" | "dominantRootCause" | "unmanagedZones"
+> {
+  const themes = uniqueStrings(
+    [...params.mitigatedSignals, ...params.contradictedSignals].map((signal) => signal.theme),
+    3
+  );
+  const themeLabel =
+    themes.length > 0
+      ? themes.map((theme) => `"${theme}"`).join(", ")
+      : "les thèmes explorés";
+  const rebuttalFacts = uniqueStrings(
+    [...params.assessments.values()].flatMap((assessment) => assessment.rebuttalFacts),
+    3
+  );
+  const rebuttalPart =
+    rebuttalFacts.length > 0
+      ? ` Éléments apportés en échange : ${rebuttalFacts
+          .map((fact) => shortenText(fact, 120))
+          .join(" | ")}.`
+      : "";
+
+  return {
+    consolidatedFindings: [
+      `Les échanges dirigeant n’ont pas confirmé de difficulté structurelle majeure sur ${themeLabel}.${rebuttalPart}`,
+      "Les points initialement remontés par la trame ont été relativisés par le fonctionnement réel décrit, les délégations en place ou un niveau d’exposition jugé limité.",
+      "La vigilance recommandée reste proportionnée : il s’agit surtout de vérifier dans la durée la tenue des mécanismes décrits, sans qualifier à ce stade ces sujets de zone non pilotée dominante.",
+    ],
+    dominantRootCause:
+      "Aucune cause racine critique n’a été confirmée sur cette dimension ; la matière recueillie conduit plutôt à maintenir une vigilance proportionnée qu’à retenir une rupture de pilotage avérée.",
+    unmanagedZones: [],
+  };
+}
+
 function conservativeScoreFromSignals(signals: DiagnosticSignal[]): 1 | 2 | 3 | 4 | 5 {
-  if (signals.length === 0) return 2;
+  if (signals.length === 0) return 4;
   const avgCriticality = signals.reduce((sum, item) => sum + item.criticalityScore, 0) / signals.length;
   const absenceRatio = signals.filter((item) => item.signalKind === "absence").length / signals.length;
   const raw = 5 - Math.round((avgCriticality / 100) * 2 + absenceRatio * 2);
@@ -509,6 +787,10 @@ function deriveRootCause(
   dimensionId: DimensionId,
   signals: DiagnosticSignal[]
 ): string {
+  if (signals.length === 0) {
+    return "Aucune cause racine critique n’a été confirmée sur cette dimension ; les réponses du dirigeant conduisent plutôt à maintenir une vigilance proportionnée.";
+  }
+
   const themeMemory = (session.analysisMemory ?? []).filter(
     (item) =>
       item.dimensionId === dimensionId &&
@@ -590,12 +872,16 @@ function prioritizeSignalsForFreeze(
 ): DiagnosticSignal[] {
   const latestFactsByTheme = getLatestFactsByTheme(session, dimensionId);
   return [...signals].sort((a, b) => {
+    const aAssessment = assessSignalForFreeze(session, dimensionId, a);
+    const bAssessment = assessSignalForFreeze(session, dimensionId, b);
     const aFactBonus = (latestFactsByTheme.get(normalizeForMatch(a.theme))?.length ?? 0) * 12;
     const bFactBonus = (latestFactsByTheme.get(normalizeForMatch(b.theme))?.length ?? 0) * 12;
     const aExplicit = a.signalKind === "explicit" ? 18 : 0;
     const bExplicit = b.signalKind === "explicit" ? 18 : 0;
-    const aScore = a.criticalityScore + a.confidenceScore + aFactBonus + aExplicit;
-    const bScore = b.criticalityScore + b.confidenceScore + bFactBonus + bExplicit;
+    const aAdjustment = aAssessment.state === "mitigated" ? -24 : aAssessment.state === "contradicted" ? -120 : 0;
+    const bAdjustment = bAssessment.state === "mitigated" ? -24 : bAssessment.state === "contradicted" ? -120 : 0;
+    const aScore = a.criticalityScore + a.confidenceScore + aFactBonus + aExplicit + aAdjustment;
+    const bScore = b.criticalityScore + b.confidenceScore + bFactBonus + bExplicit + bAdjustment;
     return bScore - aScore;
   });
 }
@@ -605,6 +891,14 @@ function buildConsolidatedFindings(
   dimensionId: DimensionId,
   signals: DiagnosticSignal[]
 ): [string, string, string] {
+  if (signals.length === 0) {
+    return [
+      "Les échanges dirigeant n’ont pas confirmé de difficulté structurelle majeure sur les thèmes explorés de cette dimension.",
+      "Plusieurs points initialement suspects ont été relativisés ou expliqués par le fonctionnement réel décrit en séance.",
+      "La vigilance recommandée reste proportionnée : il s’agit surtout de vérifier dans la durée que les mécanismes décrits tiennent réellement.",
+    ];
+  }
+
   const prioritized = prioritizeSignalsForFreeze(session, dimensionId, signals).slice(0, 3);
   const latestFactsByTheme = getLatestFactsByTheme(session, dimensionId);
 
@@ -631,8 +925,13 @@ function buildUnmanagedZones(
   dimensionId: DimensionId,
   signals: DiagnosticSignal[]
 ): ZoneNonPilotee[] {
+  if (signals.length === 0) {
+    return [];
+  }
+
   const prioritized = prioritizeSignalsForFreeze(session, dimensionId, signals);
   const selected = prioritized
+    .filter((signal) => assessSignalForFreeze(session, dimensionId, signal).state === "active")
     .filter((s, index) => {
       if (index < 2 && s.signalKind === "explicit") return true;
       return s.signalKind === "absence" || s.criticalityScore >= 82;
@@ -640,16 +939,7 @@ function buildUnmanagedZones(
     .slice(0, 3);
 
   if (selected.length === 0) {
-    return [
-      {
-        constat:
-          "Peu de zones non pilotées massives ressortent, mais plusieurs sujets restent dépendants d’usages plus que d’un cadre structuré.",
-        risqueManagerial:
-          "Risque de dérive progressive sans signal faible suffisamment remonté.",
-        consequence:
-          "Dégradation lente de la tenue des engagements, de la coordination ou de la visibilité économique.",
-      },
-    ];
+    return [];
   }
 
   const latestFactsByTheme = getLatestFactsByTheme(session, dimensionId);
@@ -772,6 +1062,18 @@ function buildEvidenceSummary(
 ): string[] {
   const factsByTheme = getLatestFactsByTheme(session, dimensionId);
   const evidence: string[] = [];
+
+  if (signals.length === 0) {
+    return uniqueStrings(
+      [
+        ...[...factsByTheme.entries()].flatMap(([theme, facts]) =>
+          facts.map((fact) => `${theme} — ${shortenText(fact, 120)}`)
+        ),
+        ...consolidatedFindings.map((item) => shortenText(item, 160)),
+      ],
+      5
+    );
+  }
 
   for (const signal of prioritizeSignalsForFreeze(session, dimensionId, signals).slice(0, 4)) {
     const facts = factsByTheme.get(normalizeForMatch(signal.theme)) ?? [];
@@ -937,19 +1239,33 @@ function buildObjectiveSeedsForFrozenDimension(params: {
   });
 
   if (seeds.length === 0) {
-    seeds.push({
-      id: `seed-d${params.dimensionId}-fallback`,
-      label: `Sous 6 mois, réduire l’exposition de la dimension "${dimensionTitle(params.dimensionId)}" à la cause racine dominante`,
-      rationale: params.dominantRootCause,
-      indicator: buildObjectiveIndicatorFromZone(undefined, params.dominantRootCause),
-      suggestedDueDate: "À définir avec le dirigeant",
-      potentialGain:
-        "Gain à préciser en validation finale sur la réduction de l’exposition dominante.",
-      quickWin:
-        "Nommer un propriétaire, formaliser une cible et installer un premier rituel de revue.",
-      priority: "high",
-      priorityScore: 60,
-    });
+    if (normalizeForMatch(params.dominantRootCause).includes("aucune cause racine critique")) {
+      seeds.push({
+        id: `seed-d${params.dimensionId}-stability`,
+        label: `Sous 6 mois, consolider dans la durée les mécanismes de pilotage déjà en place sur la dimension "${dimensionTitle(params.dimensionId)}"`,
+        rationale: params.consolidatedFindings[0],
+        indicator: "Tenue des délégations, continuité des relais et absence de dérive sur les thèmes explorés",
+        suggestedDueDate: "Revue de stabilité à 3 mois puis à 6 mois",
+        potentialGain: "Préserver la robustesse constatée et éviter qu’un point aujourd’hui maîtrisé ne redevienne fragile",
+        quickWin: "Documenter brièvement les règles, délégations et relais cités par le dirigeant sur cette dimension",
+        priority: "low",
+        priorityScore: 35,
+      });
+    } else {
+      seeds.push({
+        id: `seed-d${params.dimensionId}-fallback`,
+        label: `Sous 6 mois, réduire l’exposition de la dimension "${dimensionTitle(params.dimensionId)}" à la cause racine dominante`,
+        rationale: params.dominantRootCause,
+        indicator: buildObjectiveIndicatorFromZone(undefined, params.dominantRootCause),
+        suggestedDueDate: "À définir avec le dirigeant",
+        potentialGain:
+          "Gain à préciser en validation finale sur la réduction de l’exposition dominante.",
+        quickWin:
+          "Nommer un propriétaire, formaliser une cible et installer un premier rituel de revue.",
+        priority: "high",
+        priorityScore: 60,
+      });
+    }
   }
 
   return seeds;
@@ -959,23 +1275,38 @@ async function freezeDimension(
   session: DiagnosticSessionAggregate,
   dimensionId: DimensionId
 ): Promise<FrozenDimensionDiagnosis> {
-  const signals = getExploredSignalsForDimension(session, dimensionId);
-  const exploredThemes = [...new Set(signals.map((signal) => signal.theme))];
-  const exploredSignalIds = signals.map((signal) => signal.id);
+  const exploredSignals = getExploredSignalsForDimension(session, dimensionId);
+  const exploredThemes = [...new Set(exploredSignals.map((signal) => signal.theme))];
+  const exploredSignalIds = exploredSignals.map((signal) => signal.id);
 
-  const fallback = {
-    consolidatedFindings: buildConsolidatedFindings(session, dimensionId, signals),
-    dominantRootCause: deriveRootCause(session, dimensionId, signals),
-    unmanagedZones: buildUnmanagedZones(session, dimensionId, signals),
-  };
+  const split = splitSignalsForFreeze(session, dimensionId, exploredSignals);
+  const narrativeSignals = split.activeSignals;
 
-  const llmNarrative = await buildFrozenDimensionNarrativeWithLlm({
-    dimensionId,
-    dimensionTitle: dimensionTitle(dimensionId),
-    signals,
-    memory: (session.analysisMemory ?? []).filter((item) => item.dimensionId === dimensionId),
-    fallback,
-  });
+  const fallback =
+    narrativeSignals.length > 0
+      ? {
+          consolidatedFindings: buildConsolidatedFindings(session, dimensionId, narrativeSignals),
+          dominantRootCause: deriveRootCause(session, dimensionId, narrativeSignals),
+          unmanagedZones: buildUnmanagedZones(session, dimensionId, narrativeSignals),
+        }
+      : buildStabilizedDimensionNarrative({
+          session,
+          dimensionId,
+          mitigatedSignals: split.mitigatedSignals,
+          contradictedSignals: split.contradictedSignals,
+          assessments: split.assessments,
+        });
+
+  const llmNarrative =
+    narrativeSignals.length > 0
+      ? await buildFrozenDimensionNarrativeWithLlm({
+          dimensionId,
+          dimensionTitle: dimensionTitle(dimensionId),
+          signals: narrativeSignals,
+          memory: (session.analysisMemory ?? []).filter((item) => item.dimensionId === dimensionId),
+          fallback,
+        })
+      : fallback;
 
   const summary = buildDimensionSummary({
     dimensionId,
@@ -987,7 +1318,7 @@ async function freezeDimension(
   const evidenceSummary = buildEvidenceSummary(
     session,
     dimensionId,
-    signals,
+    narrativeSignals.length > 0 ? narrativeSignals : split.mitigatedSignals,
     llmNarrative.consolidatedFindings
   );
 
@@ -1000,7 +1331,7 @@ async function freezeDimension(
 
   return {
     dimensionId,
-    score: conservativeScoreFromSignals(signals),
+    score: conservativeScoreFromSignals(narrativeSignals),
     consolidatedFindings: llmNarrative.consolidatedFindings,
     dominantRootCause: llmNarrative.dominantRootCause,
     unmanagedZones: llmNarrative.unmanagedZones,
