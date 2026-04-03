@@ -1,9 +1,12 @@
+
 import { NextResponse } from "next/server";
 import {
   createSupabaseServerClient,
   adminSupabase,
 } from "@/lib/supabaseServer";
-import { loadAggregate } from "@/lib/bilan-sante/session-repository";
+import { loadAggregate, saveAggregate } from "@/lib/bilan-sante/session-repository";
+import { bootstrapSessionFromTrameWithLlm } from "@/lib/bilan-sante/protocol-engine";
+import type { DiagnosticSessionAggregate } from "@/lib/bilan-sante/session-model";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -53,6 +56,36 @@ function mapSessionStatus(phase?: string | null, fallback?: string | null): stri
   }
 }
 
+function aggregateNeedsRecovery(params: {
+  row: {
+    extracted_text: string | null;
+    phase?: string | null;
+  };
+  aggregate: DiagnosticSessionAggregate | null;
+}): boolean {
+  if (!params.row.extracted_text) return false;
+  if (!params.aggregate) return true;
+
+  if (params.aggregate.phase === "awaiting_trame") return true;
+
+  if (
+    params.aggregate.phase === "dimension_iteration" &&
+    (!params.aggregate.currentWorkset ||
+      (params.aggregate.currentWorkset.questions?.length ?? 0) === 0)
+  ) {
+    return true;
+  }
+
+  if (
+    params.aggregate.phase === "iteration_validation" &&
+    !params.aggregate.currentWorkset
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
 export async function GET(req: Request) {
   try {
     const { searchParams } = new URL(req.url);
@@ -100,7 +133,16 @@ export async function GET(req: Request) {
 
     const loaded = await loadAggregate(sessionId);
     const row = loaded.row;
-    const aggregate = loaded.aggregate;
+    let aggregate = loaded.aggregate;
+
+    if (aggregateNeedsRecovery({ row, aggregate })) {
+      aggregate = await bootstrapSessionFromTrameWithLlm({
+        sessionId,
+        rawTrameText: String(row.extracted_text),
+      });
+      await saveAggregate(sessionId, aggregate);
+    }
+
     const activeQuestionBatch =
       aggregate?.phase === "dimension_iteration" && aggregate.currentWorkset?.questions
         ? aggregate.currentWorkset.questions

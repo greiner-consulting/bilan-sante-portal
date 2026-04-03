@@ -1,3 +1,4 @@
+
 import { adminSupabase } from "@/lib/supabaseServer";
 import type {
   DiagnosticSessionAggregate,
@@ -69,14 +70,76 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function hasQuestionArray(value: unknown): boolean {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (item) =>
+        isObject(item) &&
+        typeof item.id === "string" &&
+        typeof item.signalId === "string" &&
+        typeof item.theme === "string" &&
+        typeof item.questionOuverte === "string"
+    )
+  );
+}
+
 function isValidAggregate(raw: unknown): raw is DiagnosticSessionAggregate {
   if (!isObject(raw)) return false;
 
-  return (
-    typeof raw.sessionId === "string" &&
-    typeof raw.phase === "string" &&
-    Array.isArray(raw.frozenDimensions)
-  );
+  if (
+    typeof raw.sessionId !== "string" ||
+    typeof raw.phase !== "string" ||
+    !Array.isArray(raw.frozenDimensions)
+  ) {
+    return false;
+  }
+
+  const phase = String(raw.phase);
+
+  if (
+    raw.currentDimensionId != null &&
+    typeof raw.currentDimensionId !== "number"
+  ) {
+    return false;
+  }
+
+  if (
+    raw.currentIteration != null &&
+    typeof raw.currentIteration !== "number"
+  ) {
+    return false;
+  }
+
+  if (phase === "dimension_iteration" || phase === "iteration_validation") {
+    if (!isObject(raw.currentWorkset)) return false;
+
+    const workset = raw.currentWorkset as Record<string, unknown>;
+
+    if (
+      typeof workset.dimensionId !== "number" ||
+      typeof workset.iteration !== "number" ||
+      !hasQuestionArray(workset.questions) ||
+      !Array.isArray(workset.answers)
+    ) {
+      return false;
+    }
+
+    if (!isObject(raw.signalRegistry)) return false;
+  }
+
+  if (phase === "final_objectives_validation" || phase === "report_ready") {
+    if (raw.finalObjectives != null && !isObject(raw.finalObjectives)) return false;
+  }
+
+  if (raw.analysisMemory != null && !Array.isArray(raw.analysisMemory)) return false;
+  if (raw.iterationHistory != null && !Array.isArray(raw.iterationHistory)) return false;
+  if (raw.themeCoverage != null && !Array.isArray(raw.themeCoverage)) return false;
+  if (raw.conversationHistory != null && !Array.isArray(raw.conversationHistory)) {
+    return false;
+  }
+
+  return true;
 }
 
 function mapStatus(aggregate: DiagnosticSessionAggregate): string {

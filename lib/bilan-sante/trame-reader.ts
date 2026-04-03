@@ -1,3 +1,4 @@
+
 import type {
   BaseTrame,
   BaseTrameSnapshot,
@@ -301,6 +302,42 @@ function scoreThemeEvidence(
   };
 }
 
+function orderThemesForPlanning(params: {
+  requiredThemes: string[];
+  strongExpressed: string[];
+  weakExpressed: string[];
+}): {
+  selectedThemes: string[];
+  inferredThemes: string[];
+} {
+  const selected: string[] = [];
+  const inferred: string[] = [];
+
+  for (const theme of params.strongExpressed) {
+    if (!selected.some((item) => normalizeText(item) === normalizeText(theme))) {
+      selected.push(theme);
+    }
+  }
+
+  for (const theme of params.weakExpressed) {
+    if (!selected.some((item) => normalizeText(item) === normalizeText(theme))) {
+      selected.push(theme);
+    }
+  }
+
+  for (const theme of params.requiredThemes) {
+    if (!selected.some((item) => normalizeText(item) === normalizeText(theme))) {
+      selected.push(theme);
+      inferred.push(theme);
+    }
+  }
+
+  return {
+    selectedThemes: uniqueStrings(selected),
+    inferredThemes: uniqueStrings(inferred),
+  };
+}
+
 function buildDimensionBlueprint(
   dimensionId: DimensionId,
   sections: TrameSection[]
@@ -318,23 +355,20 @@ function buildDimensionBlueprint(
     .map(([theme, keywords]) => scoreThemeEvidence(detectedSections, theme, keywords))
     .sort((a, b) => b.score - a.score);
 
-  const strongExpressed = evidences.filter((item) => item.score >= 12).map((item) => item.theme);
-  const weakExpressed = evidences.filter((item) => item.score >= 5 && item.score < 12).map((item) => item.theme);
+  const strongExpressed = evidences
+    .filter((item) => item.score >= 12)
+    .map((item) => item.theme);
 
-  const expressedThemes = uniqueStrings([...strongExpressed, ...weakExpressed]).slice(0, 3);
-  const selectedThemes = [...expressedThemes];
-  const inferredThemes: string[] = [];
+  const weakExpressed = evidences
+    .filter((item) => item.score >= 5 && item.score < 12)
+    .map((item) => item.theme);
 
-  if (selectedThemes.length < 3) {
-    const remainingThemes = definition.requiredThemes.filter(
-      (theme) => !selectedThemes.some((item) => normalizeText(item) === normalizeText(theme))
-    );
-
-    if (remainingThemes.length > 0) {
-      selectedThemes.push(remainingThemes[0]);
-      inferredThemes.push(remainingThemes[0]);
-    }
-  }
+  const expressedThemes = uniqueStrings([...strongExpressed, ...weakExpressed]);
+  const ordered = orderThemesForPlanning({
+    requiredThemes: definition.requiredThemes,
+    strongExpressed,
+    weakExpressed,
+  });
 
   return {
     dimensionId,
@@ -343,10 +377,11 @@ function buildDimensionBlueprint(
     detectedHeadings: uniqueStrings(detectedSections.map((item) => item.heading)),
     isPresent: detectedSections.length > 0,
     expressedThemes,
-    inferredThemes,
-    selectedThemes: uniqueStrings(selectedThemes).slice(0, 3),
+    inferredThemes: ordered.inferredThemes,
+    selectedThemes: ordered.selectedThemes,
     weakSignalThemes: weakExpressed.filter(
-      (theme) => !expressedThemes.some((item) => normalizeText(item) === normalizeText(theme))
+      (theme) =>
+        !strongExpressed.some((item) => normalizeText(item) === normalizeText(theme))
     ),
   };
 }
@@ -392,12 +427,12 @@ function deriveQualityFlags(
   for (const blueprint of blueprints) {
     if (!blueprint.isPresent) continue;
 
-    if (blueprint.selectedThemes.length < 3) {
+    if (blueprint.expressedThemes.length < 3) {
       flags.push({
-        code: `DIMENSION_${blueprint.dimensionId}_THEMES_UNDER_TARGET`,
+        code: `DIMENSION_${blueprint.dimensionId}_THEMES_WEAK`,
         severity: "warning",
         level: "warning",
-        message: `La dimension "${blueprint.label}" ne fournit pas 3 thèmes réellement exploitables. Le moteur restera contraint sur ${blueprint.selectedThemes.length} thème(s).`,
+        message: `La dimension "${blueprint.label}" offre moins de 3 thèmes explicitement étayés. Le moteur élargira le plan aux thèmes requis pour tenir le protocole.`,
       });
     }
 
@@ -406,7 +441,7 @@ function deriveQualityFlags(
         code: `DIMENSION_${blueprint.dimensionId}_INFERRED_THEME_USED`,
         severity: "info",
         level: "info",
-        message: `La dimension "${blueprint.label}" nécessite ${blueprint.inferredThemes.length} thème inféré pour compléter le cadre d’exploration.`,
+        message: `La dimension "${blueprint.label}" nécessite ${blueprint.inferredThemes.length} thème(s) inféré(s) pour compléter le cadre d’exploration.`,
       });
     }
   }
@@ -421,19 +456,19 @@ function deriveMissingFields(
 
   for (const blueprint of blueprints) {
     const definition = DIAGNOSTIC_DIMENSIONS.find((item) => item.id === blueprint.dimensionId);
-    const notSelected = (definition?.requiredThemes ?? []).filter(
+    const notExpressed = (definition?.requiredThemes ?? []).filter(
       (theme) =>
-        !blueprint.selectedThemes.some(
+        !blueprint.expressedThemes.some(
           (selected) => normalizeText(selected) === normalizeText(theme)
         )
     );
 
-    for (const theme of notSelected.slice(0, 2)) {
+    for (const theme of notExpressed.slice(0, 3)) {
       missing.push({
         field: theme,
         label: theme,
         severity: "medium",
-        message: `Le thème "${theme}" n’apparaît pas comme suffisamment exploitable dans la trame pour être retenu dans le plan d’exploration de la dimension.`,
+        message: `Le thème "${theme}" n’apparaît pas comme suffisamment exploitable dans la trame pour être retenu comme matière explicite. Il sera traité en exploration complémentaire.`,
         dimensionId: blueprint.dimensionId,
         sourceText: blueprint.detectedHeadings.join(" | "),
       });

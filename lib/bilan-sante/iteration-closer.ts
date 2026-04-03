@@ -1,3 +1,4 @@
+
 import type {
   DiagnosticSessionAggregate,
   EntryAngle,
@@ -50,7 +51,6 @@ export function mandatoryAnglesForIteration(
 function isWeakTailQuestion(question: StructuredQuestion): boolean {
   const constat = normalizeForMatch(question.constat);
   const questionText = normalizeForMatch(question.questionOuverte);
-  const theme = normalizeForMatch(question.theme);
 
   return (
     constat.includes("no_evidence") ||
@@ -59,11 +59,9 @@ function isWeakTailQuestion(question: StructuredQuestion): boolean {
     constat.includes("insuffisamment étayé") ||
     constat.includes("non documente") ||
     constat.includes("non documenté") ||
-    questionText.includes("comment ce sujet est il reellement traite") ||
-    questionText.includes("comment ce sujet est-il reellement traite") ||
-    questionText.includes("comment ce sujet est-il réellement traité") ||
-    theme.includes("recrutement et integration") ||
-    theme.includes("recrutement et intégration")
+    questionText.includes("aucun signal suffisamment explicite") ||
+    questionText.includes("insuffisamment documente") ||
+    questionText.includes("insuffisamment documenté")
   );
 }
 
@@ -89,14 +87,14 @@ function residualValueScore(params: {
 
   let score = 50;
 
-  if (isWeakTailQuestion(question)) score -= 35;
-  if (!angle) score -= 10;
+  if (isWeakTailQuestion(question)) score -= 22;
+  if (!angle) score -= 6;
 
   if (angle && coverage) {
-    if (coverage.confirmedAngles.includes(angle)) score -= 40;
-    if (coverage.askedAngles.includes(angle)) score -= 18;
-    if (coverage.factDensity >= 2) score -= 12;
-    if (coverage.closureStatus === "saturated") score -= 15;
+    if (coverage.confirmedAngles.includes(angle)) score -= 36;
+    if (coverage.askedAngles.includes(angle)) score -= 14;
+    if (coverage.factDensity >= 2) score -= 10;
+    if (coverage.closureStatus === "saturated") score -= 12;
   }
 
   if (
@@ -110,7 +108,7 @@ function residualValueScore(params: {
       statuses: ["asked", "confirmed"],
     })
   ) {
-    score -= workset.iteration === 3 ? 30 : 18;
+    score -= workset.iteration === 3 ? 26 : 14;
   }
 
   const mandatoryAngles = mandatoryAnglesForIteration(workset.iteration);
@@ -123,6 +121,14 @@ function residualValueScore(params: {
     if (!covered.includes(angle)) {
       score += 18;
     }
+  }
+
+  if (question.theme && normalizeText(question.theme).length > 0) {
+    score += 4;
+  }
+
+  if (normalizeText(question.questionOuverte).length >= 80) {
+    score += 4;
   }
 
   return score;
@@ -158,7 +164,7 @@ export function trimLowValueTail(params: {
       question: tail,
     });
 
-    if (score >= 20) break;
+    if (score >= 14) break;
     trimmed.pop();
   }
 
@@ -241,12 +247,12 @@ export function decideIterationClosure(
   }));
 
   const highValueRemainderQuestionIds = scoredRemainder
-    .filter((item) => item.score >= 20)
+    .filter((item) => item.score >= 14)
     .map((item) => item.question.id);
 
   const remainingLowValue =
     highValueRemainderQuestionIds.length === 0 ||
-    scoredRemainder.every((item) => item.score < 20);
+    scoredRemainder.every((item) => item.score < 14);
 
   if (remainingLowValue) {
     return {
