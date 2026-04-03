@@ -217,6 +217,96 @@ function buildLegacyQuestions(
   ).slice(0, targetCount);
 }
 
+function desiredIterationQuestionCap(params: {
+  iteration: IterationNumber;
+  previousIterationQuestionCount?: number | null;
+}): number {
+  const { iteration, previousIterationQuestionCount = null } = params;
+  let cap = maxQuestionsForIteration(iteration);
+  if ((iteration === 2 || iteration === 3) && previousIterationQuestionCount != null) {
+    cap = Math.min(cap, previousIterationQuestionCount);
+  }
+  return Math.max(0, cap);
+}
+
+function themeCountsFromQuestions(questions: StructuredQuestion[]): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const question of questions) {
+    const key = normalizeForMatch(question.theme);
+    out.set(key, (out.get(key) ?? 0) + 1);
+  }
+  return out;
+}
+
+function supplementScore(params: {
+  signal: DiagnosticSignal;
+  iteration: IterationNumber;
+  existingThemeCounts: Map<string, number>;
+}): number {
+  const { signal, iteration, existingThemeCounts } = params;
+  const themeKey = normalizeForMatch(signal.theme);
+  const themeCount = existingThemeCounts.get(themeKey) ?? 0;
+
+  let score = signal.criticalityScore + signal.confidenceScore;
+  score += signal.signalKind === "explicit" ? 18 : -4;
+  score += themeCount === 0 ? 26 : themeCount === 1 ? 8 : -18;
+
+  if (iteration === 1) {
+    if (signal.entryAngle === "mechanism") score += 10;
+    if (signal.entryAngle === "formalization") score += 8;
+  }
+
+  if (iteration === 2) {
+    if (signal.entryAngle === "causality") score += 12;
+    if (signal.entryAngle === "arbitration") score += 10;
+  }
+
+  if (iteration === 3) {
+    if (signal.entryAngle === "formalization") score += 10;
+    if (signal.entryAngle === "dependency") score += 10;
+  }
+
+  return score;
+}
+
+function backfillQuestionsToTarget(params: {
+  session: DiagnosticSessionAggregate;
+  dimensionId: DimensionId;
+  iteration: IterationNumber;
+  questions: StructuredQuestion[];
+  targetCount: number;
+}): StructuredQuestion[] {
+  const { session, dimensionId, iteration, targetCount } = params;
+  const baseQuestions = uniqueById(params.questions);
+
+  if (baseQuestions.length >= targetCount) {
+    return baseQuestions.slice(0, targetCount);
+  }
+
+  const existingSignalIds = new Set(baseQuestions.map((question) => question.signalId));
+  const themeCounts = themeCountsFromQuestions(baseQuestions);
+
+  const supplements = [...getDimensionSignals(session, dimensionId)]
+    .filter((signal) => !existingSignalIds.has(signal.id))
+    .sort((a, b) => {
+      const left = supplementScore({ signal: a, iteration, existingThemeCounts: themeCounts });
+      const right = supplementScore({ signal: b, iteration, existingThemeCounts: themeCounts });
+      return right - left;
+    });
+
+  const completed = [...baseQuestions];
+
+  for (const signal of supplements) {
+    if (completed.length >= targetCount) break;
+    const question = buildLegacyQuestion(signal, iteration, completed.length + 1);
+    completed.push(question);
+    const themeKey = normalizeForMatch(question.theme);
+    themeCounts.set(themeKey, (themeCounts.get(themeKey) ?? 0) + 1);
+  }
+
+  return uniqueById(completed).slice(0, targetCount);
+}
+
 function getPreviousIterationQuestionCount(
   session: DiagnosticSessionAggregate,
   dimensionId: DimensionId,
@@ -240,10 +330,10 @@ function computeIterationQuestionPolicy(params: {
   minimumRequiredCount: number;
 } {
   const { iteration, candidateCount, previousIterationQuestionCount = null } = params;
-  let cap = maxQuestionsForIteration(iteration);
-  if ((iteration === 2 || iteration === 3) && previousIterationQuestionCount != null) {
-    cap = Math.min(cap, previousIterationQuestionCount);
-  }
+  const cap = desiredIterationQuestionCap({
+    iteration,
+    previousIterationQuestionCount,
+  });
   const targetQuestionCount = Math.max(0, Math.min(candidateCount, cap));
   const floor = minimumFloorForIteration(iteration);
   return {
@@ -281,9 +371,10 @@ async function buildWorkset(
     iteration
   );
 
-  const initialTarget = reopen
-    ? Math.max(maxQuestionsForIteration(iteration), 5)
-    : maxQuestionsForIteration(iteration);
+  const desiredQuestionCount = desiredIterationQuestionCap({
+    iteration,
+    previousIterationQuestionCount: previousQuestionCount,
+  });
 
   let questions: StructuredQuestion[] = [];
   let planningDiagnostics = null;
@@ -309,7 +400,7 @@ async function buildWorkset(
   }
 
   if (questions.length === 0) {
-    questions = buildLegacyQuestions(session, dimensionId, iteration, initialTarget);
+    questions = buildLegacyQuestions(session, dimensionId, iteration, desiredQuestionCount);
     planningNotes = ["Fallback legacy planner utilisé."];
     planningDiagnostics = {
       generatedAt: new Date().toISOString(),
@@ -318,6 +409,24 @@ async function buildWorkset(
       candidateDiagnostics: [],
       notes: planningNotes,
     };
+  }
+
+  if (questions.length < desiredQuestionCount) {
+    const before = questions.length;
+    questions = backfillQuestionsToTarget({
+      session,
+      dimensionId,
+      iteration,
+      questions,
+      targetCount: desiredQuestionCount,
+    });
+    const added = Math.max(0, questions.length - before);
+    if (added > 0) {
+      planningNotes = [
+        ...planningNotes,
+        `Backfill runtime activé avant trim: +${added} question(s) pour viser ${desiredQuestionCount}.`,
+      ];
+    }
   }
 
   const policy = computeIterationQuestionPolicy({
@@ -335,17 +444,39 @@ async function buildWorkset(
     minimumRequiredCount: policy.minimumRequiredCount,
   });
 
+  let finalQuestions = trimmedQuestions;
+
+  if (finalQuestions.length < desiredQuestionCount) {
+    const before = finalQuestions.length;
+    finalQuestions = backfillQuestionsToTarget({
+      session,
+      dimensionId,
+      iteration,
+      questions: finalQuestions,
+      targetCount: desiredQuestionCount,
+    });
+    const added = Math.max(0, finalQuestions.length - before);
+    if (added > 0) {
+      planningNotes = [
+        ...planningNotes,
+        `Backfill runtime activé après trim: +${added} question(s) pour éviter un workset sous-alimenté.`,
+      ];
+    }
+  }
+
   const finalPolicy = computeIterationQuestionPolicy({
     iteration,
-    candidateCount: trimmedQuestions.length,
+    candidateCount: finalQuestions.length,
     previousIterationQuestionCount: previousQuestionCount,
   });
+
+  const boundedFinalQuestions = finalQuestions.slice(0, finalPolicy.targetQuestionCount);
 
   return {
     dimensionId,
     iteration,
     header: buildIterationHeader(dimensionId, iteration),
-    questions: trimmedQuestions.slice(0, finalPolicy.targetQuestionCount),
+    questions: boundedFinalQuestions,
     answers: [],
     closurePrompt: buildIterationClosurePrompt(dimensionId, iteration),
     targetQuestionCount: finalPolicy.targetQuestionCount,
@@ -354,8 +485,12 @@ async function buildWorkset(
     planningDiagnostics: planningDiagnostics
       ? {
           ...planningDiagnostics,
-          selectedQuestionIds: trimmedQuestions.map((item) => item.id),
-          notes: [...planningNotes, `Questions retenues: ${trimmedQuestions.length}.`],
+          selectedQuestionIds: boundedFinalQuestions.map((item) => item.id),
+          notes: [
+            ...planningNotes,
+            `Questions retenues: ${boundedFinalQuestions.length}.`,
+            reopen ? "Réouverture sur la même itération sans dépasser le cap protocolaire." : "",
+          ].filter(Boolean),
         }
       : null,
   };

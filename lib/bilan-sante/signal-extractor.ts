@@ -85,13 +85,13 @@ type LlmFilterStats = {
 };
 
 const MAX_EXCERPT_LENGTH = 280;
-const MIN_EXPLICIT_SCORE = 32;
-const STRONG_EXPLICIT_SCORE = 42;
-const SECTION_REUSE_PENALTY = 18;
-const GENERIC_REUSE_EXTRA_PENALTY = 10;
-const MAX_EXPLICIT_SIGNALS_PER_THEME = 2;
-const SECONDARY_DETERMINISTIC_GAP = 14;
-const SECONDARY_LLM_RATIO = 0.72;
+const MIN_EXPLICIT_SCORE = 28;
+const STRONG_EXPLICIT_SCORE = 38;
+const SECTION_REUSE_PENALTY = 12;
+const GENERIC_REUSE_EXTRA_PENALTY = 6;
+const MAX_EXPLICIT_SIGNALS_PER_THEME = 3;
+const SECONDARY_DETERMINISTIC_GAP = 22;
+const SECONDARY_LLM_RATIO = 0.64;
 
 const LOG_PREFIX = "[BilanSante][SignalExtraction]";
 
@@ -950,6 +950,13 @@ function sameDeterministicIdea(left: ThemeCandidate, right: ThemeCandidate): boo
   );
 }
 
+function canAddDeterministicCandidate(
+  selected: ThemeCandidate[],
+  candidate: ThemeCandidate
+): boolean {
+  return !selected.some((existing) => sameDeterministicIdea(existing, candidate));
+}
+
 function selectCandidatesForTheme(
   candidates: ThemeCandidate[],
   usageBySection: Map<string, number>
@@ -973,20 +980,24 @@ function selectCandidatesForTheme(
 
   if (selected.length === 0) return [];
 
-  const secondary = adjusted.find(({ candidate, adjustedScore }) => {
-    if (selected.length >= MAX_EXPLICIT_SIGNALS_PER_THEME) return false;
-    if (sameDeterministicIdea(selected[0], candidate)) return false;
-    const distinctSection = selected[0].section.id !== candidate.section.id;
-    const distinctAngle = selected[0].entryAngle !== candidate.entryAngle;
-    if (!distinctSection && !distinctAngle) return false;
-    return (
-      adjustedScore >= Math.max(MIN_EXPLICIT_SCORE - 2, primary.adjustedScore - SECONDARY_DETERMINISTIC_GAP) ||
-      candidate.score >= STRONG_EXPLICIT_SCORE + 4
-    );
-  });
+  for (const { candidate, adjustedScore } of adjusted.slice(1)) {
+    if (selected.length >= MAX_EXPLICIT_SIGNALS_PER_THEME) break;
+    if (!canAddDeterministicCandidate(selected, candidate)) continue;
 
-  if (secondary) {
-    selected.push(secondary.candidate);
+    const distinctFromPrimary =
+      selected[0].section.id !== candidate.section.id ||
+      selected[0].entryAngle !== candidate.entryAngle;
+
+    if (!distinctFromPrimary && adjustedScore < STRONG_EXPLICIT_SCORE + 4) {
+      continue;
+    }
+
+    const strongEnough =
+      adjustedScore >= Math.max(MIN_EXPLICIT_SCORE - 2, primary.adjustedScore - SECONDARY_DETERMINISTIC_GAP) ||
+      candidate.score >= STRONG_EXPLICIT_SCORE + 4;
+
+    if (!strongEnough) continue;
+    selected.push(candidate);
   }
 
   return selected;
@@ -1347,6 +1358,13 @@ function sameLlmIdea(left: LlmAcceptedCandidate, right: LlmAcceptedCandidate): b
   );
 }
 
+function canAddLlmCandidate(
+  selected: LlmAcceptedCandidate[],
+  candidate: LlmAcceptedCandidate
+): boolean {
+  return !selected.some((existing) => sameLlmIdea(existing, candidate));
+}
+
 function selectLlmCandidatesForTheme(
   candidates: LlmAcceptedCandidate[],
   usageBySection: Map<string, number>
@@ -1366,17 +1384,16 @@ function selectLlmCandidatesForTheme(
 
   const selected: LlmAcceptedCandidate[] = [primary.candidate];
 
-  const secondary = ranked.find(({ candidate, score, base }) => {
-    if (selected.length >= MAX_EXPLICIT_SIGNALS_PER_THEME) return false;
-    if (sameLlmIdea(primary.candidate, candidate)) return false;
-    const distinctSection = primary.candidate.section.id !== candidate.section.id;
-    const distinctAngle = primary.candidate.entryAngle !== candidate.entryAngle;
-    if (!distinctSection && !distinctAngle) return false;
-    return score >= primary.score * SECONDARY_LLM_RATIO || base >= primary.base * SECONDARY_LLM_RATIO;
-  });
+  for (const item of ranked.slice(1)) {
+    if (selected.length >= MAX_EXPLICIT_SIGNALS_PER_THEME) break;
+    if (!canAddLlmCandidate(selected, item.candidate)) continue;
 
-  if (secondary) {
-    selected.push(secondary.candidate);
+    const strongEnough =
+      item.score >= primary.score * SECONDARY_LLM_RATIO ||
+      item.base >= primary.base * SECONDARY_LLM_RATIO;
+
+    if (!strongEnough) continue;
+    selected.push(item.candidate);
   }
 
   return selected;
@@ -1542,7 +1559,7 @@ function mergeExplicitSignalsWithDeterministicRescue(params: {
 
   const rescuedSignals = params.deterministicSignals.filter((signal) => {
     if (signal.signalKind !== "explicit") return false;
-    if (signal.confidenceScore < 64) return false;
+    if (signal.confidenceScore < 58) return false;
     const signature = signalSignatureKey(signal);
     if (llmSignatures.has(signature)) return false;
     const themeKey = signalThemeKey(signal);
