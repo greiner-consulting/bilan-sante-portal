@@ -89,7 +89,7 @@ export async function GET(
     const safeSessionId = safeFilePart(sessionId) || "session";
     const filename = `Bilan_de_Sante_Rapport_Dirigeant_${safeSessionId}.pdf`;
 
-    return new NextResponse(pdfBuffer, {
+    return new NextResponse(new Uint8Array(pdfBuffer), {
       status: 200,
       headers: {
         "Cache-Control": "no-store",
