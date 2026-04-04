@@ -343,17 +343,11 @@ const KEYWORDS_BY_DIMENSION: Record<DimensionId, ThemeKeywordMap> = {
 
 const ENTRY_ANGLE_HINTS: Record<DiagnosticSignal["entryAngle"], string[]> = {
   causality: [
-    "parce que",
     "cause",
-    "causes",
     "origine",
-    "origines",
     "explique",
-    "explication",
     "lié à",
     "liée à",
-    "du fait de",
-    "en raison de",
     "manque de",
     "défaut de",
     "erreur",
@@ -383,8 +377,10 @@ const ENTRY_ANGLE_HINTS: Record<DiagnosticSignal["entryAngle"], string[]> = {
     "résultat",
     "rentabilité",
     "prix",
-    "impact économique",
     "budget",
+    "surdimension",
+    "volume nécessaire",
+    "volume necessaire",
   ],
   formalization: [
     "procédure",
@@ -493,7 +489,7 @@ function findAllPositions(haystack: string, needle: string): number[] {
 function humanizeList(values: string[]): string {
   const items = uniqueStrings(values).slice(0, 3);
 
-  if (items.length === 0) return "des éléments de pilotage à préciser";
+  if (items.length === 0) return "des éléments de la trame à préciser";
   if (items.length === 1) return `"${items[0]}"`;
   if (items.length === 2) return `"${items[0]}" et "${items[1]}"`;
 
@@ -665,6 +661,72 @@ function buildContextExcerpt(
   return trimSnippet(clean, start, end);
 }
 
+function textIncludesAny(text: string, patterns: string[]): boolean {
+  const normalized = normalizeText(text);
+  return patterns.some((pattern) => normalized.includes(normalizeText(pattern)));
+}
+
+function looksLikeGrowthStaffingCase(text: string): boolean {
+  const growthTerms = [
+    "croissance",
+    "volume",
+    "charge",
+    "montée en charge",
+    "montee en charge",
+    "activité",
+    "activite",
+    "développement",
+    "developpement",
+  ];
+
+  const staffingTerms = [
+    "recrut",
+    "encadrement",
+    "équipe",
+    "equipe",
+    "ressource",
+    "effectif",
+    "staffing",
+    "profil",
+  ];
+
+  return textIncludesAny(text, growthTerms) && textIncludesAny(text, staffingTerms);
+}
+
+function looksLikeAdvanceStructureCase(text: string): boolean {
+  return textIncludesAny(text, [
+    "surdimension",
+    "surdimensionné",
+    "surdimensionne",
+    "pas encore le volume",
+    "pas encore le niveau",
+    "pas encore la charge",
+    "pour soutenir la croissance",
+    "en avance de phase",
+    "avant le volume nécessaire",
+    "avant le volume necessaire",
+  ]);
+}
+
+function looksLikeEconomicJustificationCase(text: string): boolean {
+  return textIncludesAny(text, [
+    "coût",
+    "cout",
+    "marge",
+    "rentabilité",
+    "rentabilite",
+    "coût fixe",
+    "cout fixe",
+    "structure de coûts",
+    "structure de couts",
+    "justifié",
+    "justifie",
+    "surdimension",
+    "volume nécessaire",
+    "volume necessaire",
+  ]);
+}
+
 function pickEntryAngle(
   theme: string,
   sectionHeading: string,
@@ -674,6 +736,14 @@ function pickEntryAngle(
   const text = normalizeText(
     [theme, sectionHeading, excerpt, ...matchedKeywords].join(" | ")
   );
+
+  // Simple hint faible, pas angle métier fort
+  if (looksLikeGrowthStaffingCase(text)) {
+    if (looksLikeAdvanceStructureCase(text) || looksLikeEconomicJustificationCase(text)) {
+      return "economics";
+    }
+    return "causality";
+  }
 
   const scoreByAngle = (
     Object.keys(ENTRY_ANGLE_HINTS) as DiagnosticSignal["entryAngle"][]
@@ -714,40 +784,26 @@ function buildExplicitConstat(params: {
   return `La section "${sectionHeading}" constitue le meilleur appui disponible pour instruire le thème "${theme}".`;
 }
 
-function buildManagerialRisk(
+function buildMinimalRisk(
   theme: string,
-  isAbsence: boolean,
-  entryAngle?: DiagnosticSignal["entryAngle"]
+  isAbsence: boolean
 ): string {
   if (isAbsence) {
-    return `Le thème "${theme}" apparaît insuffisamment objectivé ou non suivi, ce qui expose l’entreprise à un pilotage managérial insuffisamment fondé.`;
+    return `Le thème "${theme}" apparaît insuffisamment documenté ou objectivé dans la trame.`;
   }
 
-  switch (entryAngle) {
-    case "causality":
-      return `Le signal rattaché au thème "${theme}" suggère une cause racine non traitée ou insuffisamment nommée dans le pilotage.`;
-    case "arbitration":
-      return `Le signal rattaché au thème "${theme}" suggère une chaîne d’arbitrage ou de décision insuffisamment clarifiée.`;
-    case "dependency":
-      return `Le signal rattaché au thème "${theme}" suggère une dépendance excessive à des personnes, relais ou séquences critiques.`;
-    case "economics":
-      return `Le signal rattaché au thème "${theme}" suggère des décisions insuffisamment reliées à l’impact économique réel.`;
-    case "formalization":
-      return `Le signal rattaché au thème "${theme}" suggère un cadre de pilotage ou des pratiques insuffisamment formalisés.`;
-    default:
-      return `Le signal rattaché au thème "${theme}" suggère un risque de pilotage incomplet, de dépendance excessive ou d’arbitrage insuffisamment maîtrisé.`;
-  }
+  return `La matière disponible sur le thème "${theme}" invite à clarifier ce sujet avant d'en tirer une conclusion plus structurée.`;
 }
 
 function buildProbableConsequence(theme: string): string {
   const lower = theme.toLowerCase();
 
   if (lower.includes("prix") || lower.includes("chiffrage")) {
-    return "Probable dérive de marge, décisions commerciales fragiles ou perte de rentabilité.";
+    return "Point à vérifier sur les effets possibles sur la marge ou la rentabilité.";
   }
 
   if (lower.includes("commercial") || lower.includes("croissance")) {
-    return "Probable inefficacité commerciale, croissance non rentable ou visibilité insuffisante sur le pipeline.";
+    return "Point à vérifier sur la capacité à soutenir une croissance réellement maîtrisée.";
   }
 
   if (
@@ -755,7 +811,7 @@ function buildProbableConsequence(theme: string): string {
     lower.includes("marge") ||
     lower.includes("résultat")
   ) {
-    return "Probable dégradation du cash, du résultat ou de la visibilité économique.";
+    return "Point à vérifier sur les effets possibles sur la visibilité économique.";
   }
 
   if (
@@ -763,10 +819,10 @@ function buildProbableConsequence(theme: string): string {
     lower.includes("équipe") ||
     lower.includes("recrutement")
   ) {
-    return "Probables reprises managériales, flou de responsabilités ou fragilité d’exécution.";
+    return "Point à vérifier sur la solidité de l'organisation ou du dimensionnement.";
   }
 
-  return "Probable dégradation de l’exécution, de la coordination ou de la robustesse de pilotage.";
+  return "Point à vérifier sur la robustesse du fonctionnement réel ou du pilotage.";
 }
 
 function scoreConfidenceFromCandidate(candidate: ThemeCandidate): number {
@@ -1055,7 +1111,7 @@ function buildExplicitSignalsDeterministic(snapshot: BaseTrameSnapshot): Diagnos
           sourceSection: selected.section.id,
           sourceExcerpt: selected.excerpt || "",
           constat: selected.constat,
-          managerialRisk: buildManagerialRisk(bucket.theme, false, selected.entryAngle),
+          managerialRisk: buildMinimalRisk(bucket.theme, false),
           probableConsequence: buildProbableConsequence(bucket.theme),
           entryAngle: selected.entryAngle,
           confidenceScore: scoreConfidenceFromCandidate(selected),
@@ -1104,13 +1160,17 @@ function findBestMissingFieldHit(
   return candidates[0]?.field;
 }
 
-function buildAbsenceConstat(theme: string, llmMissing?: { reason: LlmUncoveredTheme["reason"]; whyMissing: string }, missingFieldHit?: MissingField): string {
+function buildAbsenceConstat(
+  theme: string,
+  llmMissing?: { reason: LlmUncoveredTheme["reason"]; whyMissing: string },
+  missingFieldHit?: MissingField
+): string {
   if (llmMissing?.reason === "only_illustrative" || llmMissing?.reason === "too_weak") {
-    return `Le thème "${theme}" reste insuffisamment consolidé dans la trame : la matière disponible existe mais demeure trop partielle pour établir un pilotage clairement objectivé.`;
+    return `Le thème "${theme}" reste insuffisamment consolidé dans la trame : la matière disponible existe mais demeure trop partielle pour établir un support exploitable.`;
   }
 
   if (llmMissing?.reason === "not_enough_material") {
-    return `Le thème "${theme}" apparaît encore trop peu documenté dans la trame pour établir un signal managérial suffisamment robuste.`;
+    return `Le thème "${theme}" apparaît encore trop peu documenté dans la trame pour établir un appui réellement exploitable.`;
   }
 
   if (llmMissing) {
@@ -1170,7 +1230,7 @@ function buildAbsenceSignals(
         sourceSection: null,
         sourceExcerpt: sourceExcerpt || "",
         constat,
-        managerialRisk: buildManagerialRisk(theme, true),
+        managerialRisk: buildMinimalRisk(theme, true),
         probableConsequence: buildProbableConsequence(theme),
         entryAngle: "formalization",
         confidenceScore: clamp(
@@ -1481,9 +1541,7 @@ function buildExplicitSignalsFromLlm(params: {
         constat:
           normalizeExtractionText(selected.constat) ||
           `La trame fournit un appui exploitable sur le thème "${selected.theme}".`,
-        managerialRisk:
-          normalizeExtractionText(selected.managerialRisk) ||
-          buildManagerialRisk(selected.theme, false, selected.entryAngle),
+        managerialRisk: buildMinimalRisk(selected.theme, false),
         probableConsequence:
           normalizeExtractionText(selected.probableConsequence) ||
           buildProbableConsequence(selected.theme),

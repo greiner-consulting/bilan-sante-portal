@@ -167,29 +167,161 @@ function getCurrentUnansweredQuestion(
   return workset.questions.find((question) => !answeredIds.has(question.id)) ?? null;
 }
 
+function wordCount(value: string): number {
+  return normalizeText(value)
+    .split(/\s+/)
+    .filter(Boolean).length;
+}
+
+function isVisibleQuestionTooComplex(value: string): boolean {
+  const text = normalizeText(value);
+  if (!text) return true;
+  if (wordCount(text) > 28) return true;
+  if ((text.match(/\set\s/gi) ?? []).length > 1) return true;
+  if ((text.match(/,/g) ?? []).length >= 3) return true;
+
+  const normalized = normalizeForMatch(text);
+  const banned = [
+    "comment decrivez-vous",
+    "comment décrivez-vous",
+    "dans quelle mesure",
+    "a quel moment precis",
+    "à quel moment précis",
+    "mecanisme actuel",
+    "mécanisme actuel",
+    "interactions concretes",
+    "interactions concrètes",
+    "effets en chaine",
+    "effets en chaîne",
+    "selon quel enchainement",
+    "selon quel enchaînement",
+    "avec quel effet visible",
+  ];
+
+  return banned.some((pattern) => normalized.includes(normalizeForMatch(pattern)));
+}
+
+function buildSafeQuestionFallback(params: {
+  theme: string;
+  iteration: IterationNumber;
+  signal?: DiagnosticSignal;
+}): string {
+  const { theme, iteration, signal } = params;
+  const angle = signal?.entryAngle ?? "mechanism";
+
+  if (iteration === 1) {
+    if (angle === "formalization") {
+      return `Sur "${theme}", est-ce formalisé ou géré au cas par cas ?`;
+    }
+    if (angle === "arbitration") {
+      return `Sur "${theme}", qui décide concrètement aujourd'hui ?`;
+    }
+    return `Sur "${theme}", comment cela fonctionne-t-il concrètement aujourd'hui ?`;
+  }
+
+  if (iteration === 2) {
+    if (angle === "dependency") {
+      return `Sur "${theme}", ce sujet dépend-il encore trop de quelques personnes ?`;
+    }
+    if (angle === "economics") {
+      return `Sur "${theme}", quel impact économique concret voyez-vous aujourd'hui ?`;
+    }
+    if (angle === "formalization") {
+      return `Sur "${theme}", est-ce formalisé ou géré au cas par cas ?`;
+    }
+    if (angle === "arbitration") {
+      return `Sur "${theme}", qui arbitre réellement ce point aujourd'hui ?`;
+    }
+    return `Sur "${theme}", quelle est selon vous la cause principale ?`;
+  }
+
+  if (angle === "economics") {
+    return `Sur "${theme}", quel impact économique concret cela crée-t-il ?`;
+  }
+  if (angle === "dependency") {
+    return `Sur "${theme}", ce sujet dépend-il encore trop de quelques personnes ?`;
+  }
+  if (angle === "formalization") {
+    return `Sur "${theme}", qu'est-ce qui n'est pas suffisamment formalisé aujourd'hui ?`;
+  }
+  return `Sur "${theme}", quel est aujourd'hui le principal point faible ?`;
+}
+
+function sanitizeStructuredQuestion(
+  question: StructuredQuestion,
+  iteration: IterationNumber,
+  signal?: DiagnosticSignal
+): StructuredQuestion {
+  const raw = normalizeText(question.questionOuverte);
+  const safeQuestion = !raw || isVisibleQuestionTooComplex(raw)
+    ? buildSafeQuestionFallback({
+        theme: question.theme,
+        iteration,
+        signal,
+      })
+    : raw;
+
+  return {
+    ...question,
+    questionOuverte: safeQuestion,
+  };
+}
+
+function sanitizeQuestionsForDisplay(params: {
+  questions: StructuredQuestion[];
+  session: DiagnosticSessionAggregate;
+  iteration: IterationNumber;
+}): StructuredQuestion[] {
+  return params.questions.map((question) =>
+    sanitizeStructuredQuestion(
+      question,
+      params.iteration,
+      findSignalById(params.session, question.signalId)
+    )
+  );
+}
+
 function buildLegacyQuestion(
   signal: DiagnosticSignal,
   iteration: IterationNumber,
   index: number
 ): StructuredQuestion {
-  const excerpt = shortenText(signal.sourceExcerpt, 160);
-  let questionOuverte = `Pouvez-vous préciser ce point sur le thème "${signal.theme}" ?`;
+  let questionOuverte = `Sur "${signal.theme}", comment cela fonctionne-t-il concrètement aujourd'hui ?`;
 
   if (iteration === 1) {
-    questionOuverte =
-      signal.signalKind === "absence"
-        ? `Sur le thème "${signal.theme}", la trame ne permet pas de voir clairement comment le sujet est piloté. Comment ce sujet fonctionne-t-il réellement aujourd’hui, qui intervient, et où se situent les principaux points de fragilité ?`
-        : excerpt
-          ? `Sur le thème "${signal.theme}", la trame mentionne : "${excerpt}". Concrètement, comment ce sujet est-il géré aujourd’hui dans le fonctionnement réel de l’entreprise ?`
-          : `Sur le thème "${signal.theme}", comment ce sujet est-il géré aujourd’hui dans le fonctionnement réel de l’entreprise ?`;
+    if (signal.entryAngle === "formalization") {
+      questionOuverte = `Sur "${signal.theme}", est-ce formalisé ou géré au cas par cas ?`;
+    } else if (signal.entryAngle === "arbitration") {
+      questionOuverte = `Sur "${signal.theme}", qui décide concrètement aujourd'hui ?`;
+    } else {
+      questionOuverte = `Sur "${signal.theme}", comment cela fonctionne-t-il concrètement aujourd'hui ?`;
+    }
   }
 
   if (iteration === 2) {
-    questionOuverte = `Si l’on creuse ce point sur "${signal.theme}" : ${signal.constat} Quelles sont, selon vous, les causes principales de cette situation, et quels arbitrages ou dépendances la maintiennent ?`;
+    if (signal.entryAngle === "economics") {
+      questionOuverte = `Sur "${signal.theme}", quel impact économique concret voyez-vous aujourd'hui ?`;
+    } else if (signal.entryAngle === "dependency") {
+      questionOuverte = `Sur "${signal.theme}", ce sujet dépend-il encore trop de quelques personnes ?`;
+    } else if (signal.entryAngle === "formalization") {
+      questionOuverte = `Sur "${signal.theme}", est-ce formalisé ou géré au cas par cas ?`;
+    } else if (signal.entryAngle === "arbitration") {
+      questionOuverte = `Sur "${signal.theme}", qui arbitre réellement ce point aujourd'hui ?`;
+    } else {
+      questionOuverte = `Sur "${signal.theme}", quelle est selon vous la cause principale ?`;
+    }
   }
 
   if (iteration === 3) {
-    questionOuverte = `Sur le sujet "${signal.theme}", quel point reste aujourd’hui le moins piloté ou le moins sécurisé, et quel risque concret cela crée-t-il pour l’entreprise ?`;
+    if (signal.entryAngle === "economics") {
+      questionOuverte = `Sur "${signal.theme}", quel impact économique concret cela crée-t-il ?`;
+    } else if (signal.entryAngle === "dependency") {
+      questionOuverte = `Sur "${signal.theme}", ce sujet dépend-il encore trop de quelques personnes ?`;
+    } else if (signal.entryAngle === "formalization") {
+      questionOuverte = `Sur "${signal.theme}", qu'est-ce qui n'est pas suffisamment formalisé aujourd'hui ?`;
+    } else {
+      questionOuverte = `Sur "${signal.theme}", quel est aujourd'hui le principal point faible ?`;
+    }
   }
 
   return {
@@ -263,11 +395,14 @@ function supplementScore(params: {
   if (iteration === 2) {
     if (signal.entryAngle === "causality") score += 12;
     if (signal.entryAngle === "arbitration") score += 10;
+    if (signal.entryAngle === "dependency") score += 8;
+    if (signal.entryAngle === "economics") score += 8;
   }
 
   if (iteration === 3) {
     if (signal.entryAngle === "formalization") score += 10;
     if (signal.entryAngle === "dependency") score += 10;
+    if (signal.entryAngle === "economics") score += 8;
   }
 
   return score;
@@ -392,11 +527,16 @@ async function buildWorkset(
       session,
     });
 
-    questions = planned.questions;
+    questions = sanitizeQuestionsForDisplay({
+      questions: planned.questions,
+      session,
+      iteration,
+    });
+
     planningDiagnostics = {
       generatedAt: new Date().toISOString(),
       strategy: "heuristic_planner_with_llm_composer",
-      selectedQuestionIds: planned.questions.map((item) => item.id),
+      selectedQuestionIds: questions.map((item) => item.id),
       candidateDiagnostics: planned.diagnostics,
       notes: planned.notes,
     };
@@ -404,7 +544,11 @@ async function buildWorkset(
   }
 
   if (questions.length === 0) {
-    questions = buildLegacyQuestions(session, dimensionId, iteration, desiredQuestionCount);
+    questions = sanitizeQuestionsForDisplay({
+      questions: buildLegacyQuestions(session, dimensionId, iteration, desiredQuestionCount),
+      session,
+      iteration,
+    });
     planningNotes = ["Fallback legacy planner utilisé."];
     planningDiagnostics = {
       generatedAt: new Date().toISOString(),
@@ -417,12 +561,16 @@ async function buildWorkset(
 
   if (questions.length < desiredQuestionCount) {
     const before = questions.length;
-    questions = backfillQuestionsToTarget({
+    questions = sanitizeQuestionsForDisplay({
+      questions: backfillQuestionsToTarget({
+        session,
+        dimensionId,
+        iteration,
+        questions,
+        targetCount: desiredQuestionCount,
+      }),
       session,
-      dimensionId,
       iteration,
-      questions,
-      targetCount: desiredQuestionCount,
     });
     const added = Math.max(0, questions.length - before);
     if (added > 0) {
@@ -448,16 +596,24 @@ async function buildWorkset(
     minimumRequiredCount: policy.minimumRequiredCount,
   });
 
-  let finalQuestions = trimmedQuestions;
+  let finalQuestions = sanitizeQuestionsForDisplay({
+    questions: trimmedQuestions,
+    session,
+    iteration,
+  });
 
   if (finalQuestions.length < desiredQuestionCount) {
     const before = finalQuestions.length;
-    finalQuestions = backfillQuestionsToTarget({
+    finalQuestions = sanitizeQuestionsForDisplay({
+      questions: backfillQuestionsToTarget({
+        session,
+        dimensionId,
+        iteration,
+        questions: finalQuestions,
+        targetCount: desiredQuestionCount,
+      }),
       session,
-      dimensionId,
       iteration,
-      questions: finalQuestions,
-      targetCount: desiredQuestionCount,
     });
     const added = Math.max(0, finalQuestions.length - before);
     if (added > 0) {
@@ -474,7 +630,11 @@ async function buildWorkset(
     previousIterationQuestionCount: previousQuestionCount,
   });
 
-  const boundedFinalQuestions = finalQuestions.slice(0, finalPolicy.targetQuestionCount);
+  const boundedFinalQuestions = sanitizeQuestionsForDisplay({
+    questions: finalQuestions.slice(0, finalPolicy.targetQuestionCount),
+    session,
+    iteration,
+  });
 
   return {
     dimensionId,
@@ -1368,7 +1528,11 @@ export function getEngineView(session: DiagnosticSessionAggregate): EngineView {
 
   return {
     assistantMessage: workset.header,
-    questions: workset.questions,
+    questions: sanitizeQuestionsForDisplay({
+      questions: workset.questions,
+      session,
+      iteration: workset.iteration,
+    }),
     needsValidation: false,
     phase: session.phase,
     currentDimensionId: workset.dimensionId,
@@ -1645,10 +1809,14 @@ export async function challengeCurrentQuestion(
     currentAngle: signal?.entryAngle ?? null,
   });
 
-  const rewrittenQuestion: StructuredQuestion = {
-    ...currentQuestion,
-    questionOuverte: nextQuestionOuverte,
-  };
+  const rewrittenQuestion: StructuredQuestion = sanitizeStructuredQuestion(
+    {
+      ...currentQuestion,
+      questionOuverte: nextQuestionOuverte,
+    },
+    workset.iteration,
+    signal
+  );
 
   if ("phase" in arg1) {
     return rewrittenQuestion;

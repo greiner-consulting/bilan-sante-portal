@@ -1,8 +1,6 @@
-
 import type { DimensionId, IterationNumber } from "@/lib/bilan-sante/protocol";
 import {
   DIAGNOSTIC_DIMENSIONS,
-  dimensionTitle,
   maxQuestionsForIteration,
 } from "@/lib/bilan-sante/protocol";
 import type {
@@ -11,14 +9,9 @@ import type {
   StructuredQuestion,
   DiagnosticSignal,
   MemoryInsight,
-  EntryAngle,
-  MemoryRootCauseCategory,
   PlanningDiagnostic,
 } from "@/lib/bilan-sante/session-model";
-import {
-  getThemeCoverage,
-  wasAngleMarkedInPriorIterations,
-} from "@/lib/bilan-sante/coverage-tracker";
+import { getThemeCoverage } from "@/lib/bilan-sante/coverage-tracker";
 import { mandatoryAnglesForIteration } from "@/lib/bilan-sante/iteration-closer";
 import { composeQuestionWithLlm } from "@/lib/bilan-sante/llm-diagnostic-writer";
 
@@ -33,13 +26,11 @@ type ThemeMemorySummary = {
   theme: string;
   all: MemoryInsight[];
   usable: MemoryInsight[];
-  dominantSuggestedAngle: EntryAngle | null;
-  dominantRootCauses: MemoryRootCauseCategory[];
   extractedFacts: string[];
   usableFactCount: number;
-  askedAngles: EntryAngle[];
-  confirmedAngles: EntryAngle[];
-  rejectedAngles: EntryAngle[];
+  askedAngles: DiagnosticSignal["entryAngle"][];
+  confirmedAngles: DiagnosticSignal["entryAngle"][];
+  rejectedAngles: DiagnosticSignal["entryAngle"][];
   lastQuestionText: string | null;
   lastIteration: IterationNumber | null;
   saturationScore: number;
@@ -65,15 +56,15 @@ const CANDIDATE_POOL_SIZE: Record<IterationNumber, number> = {
 };
 
 const ABSOLUTE_MIN_SCORE: Record<IterationNumber, number> = {
-  1: 24,
-  2: 24,
-  3: 22,
+  1: 22,
+  2: 22,
+  3: 20,
 };
 
 const EXTENSION_MIN_SCORE: Record<IterationNumber, number> = {
-  1: 30,
-  2: 30,
-  3: 28,
+  1: 28,
+  2: 28,
+  3: 24,
 };
 
 function normalizeText(value: string | null | undefined): string {
@@ -138,51 +129,24 @@ function getThemeMemorySummary(
   );
   const usable = all.filter((item) => item.isUsableBusinessMatter);
 
-  const angleCounts = new Map<EntryAngle, number>();
-  for (const item of all) {
-    if (!item.suggestedAngle) continue;
-    angleCounts.set(item.suggestedAngle, (angleCounts.get(item.suggestedAngle) ?? 0) + 1);
-  }
-
-  let dominantSuggestedAngle: EntryAngle | null = null;
-  let bestAngleScore = -1;
-
-  for (const [angle, count] of angleCounts.entries()) {
-    if (count > bestAngleScore) {
-      dominantSuggestedAngle = angle;
-      bestAngleScore = count;
-    }
-  }
-
-  const rootCauseCounts = new Map<MemoryRootCauseCategory, number>();
-  for (const item of usable) {
-    for (const category of item.detectedRootCauses ?? []) {
-      rootCauseCounts.set(category, (rootCauseCounts.get(category) ?? 0) + 1);
-    }
-  }
-
-  const dominantRootCauses = [...rootCauseCounts.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .map(([category]) => category)
-    .slice(0, 3);
-
-  const extractedFacts = uniqueStrings(usable.flatMap((item) => item.extractedFacts ?? [])).slice(0, 4);
+  const extractedFacts = uniqueStrings(
+    usable.flatMap((item) => item.extractedFacts ?? [])
+  ).slice(0, 4);
 
   const coverage = getThemeCoverage(session, dimensionId, theme);
   const askedAngles = coverage?.askedAngles ?? [];
   const confirmedAngles = coverage?.confirmedAngles ?? [];
   const rejectedAngles = coverage?.rejectedAngles ?? [];
+
   const saturationScore =
-    confirmedAngles.length * 22 +
-    extractedFacts.length * 14 +
+    confirmedAngles.length * 18 +
+    extractedFacts.length * 16 +
     (coverage?.factDensity ?? 0) * 10;
 
   return {
     theme,
     all,
     usable,
-    dominantSuggestedAngle,
-    dominantRootCauses,
     extractedFacts,
     usableFactCount: extractedFacts.length,
     askedAngles,
@@ -261,163 +225,192 @@ function getInferredThemesForDimension(
   return new Set<string>(inferred);
 }
 
-function countCoveredAngle(themeMemory: ThemeMemorySummary, angle: EntryAngle): number {
-  let count = 0;
-  if (themeMemory.askedAngles.includes(angle)) count += 1;
-  if (themeMemory.confirmedAngles.includes(angle)) count += 2;
-  for (const item of themeMemory.all) {
-    if (item.suggestedAngle === angle) count += 1;
-  }
-  return count;
+function signalLooksLowValue(signal: DiagnosticSignal): boolean {
+  const excerpt = normalizeForMatch(signal.sourceExcerpt);
+  const constat = normalizeForMatch(signal.constat);
+
+  return (
+    signal.signalKind === "absence" &&
+    (excerpt.length < 110 ||
+      excerpt.includes("aucun signal") ||
+      excerpt.includes("not_enough_material") ||
+      constat.includes("insuffisamment etaye") ||
+      constat.includes("insuffisamment étayé") ||
+      constat.includes("absent") ||
+      constat.includes("peu documente") ||
+      constat.includes("peu documenté"))
+  );
 }
 
-function scoreAngleNovelty(
-  session: DiagnosticSessionAggregate,
+function signalLooksConcrete(signal: DiagnosticSignal): boolean {
+  const text = normalizeForMatch(
+    [signal.sourceExcerpt, signal.constat].join(" | ")
+  );
+
+  return (
+    normalizeText(signal.sourceExcerpt).length >= 120 ||
+    /(client|chantier|devis|marge|charge|effectif|encadrement|croissance|recrut|validation|arbitrage|prix|cash|rentabilite|rentabilité|planning|productivite|productivité)/.test(
+      text
+    )
+  );
+}
+
+function signalLooksSalientManagerially(signal: DiagnosticSignal): boolean {
+  const text = normalizeForMatch(
+    [signal.constat, signal.sourceExcerpt, signal.probableConsequence].join(" | ")
+  );
+
+  return /(en difficulte|difficulté|difficulte|fragile|fragilite|fragilité|insuffisant|insuffisante|pas au niveau|ne tient pas|ne suit pas|blocage|derive|dérive|tension|inadéquat|inadequat|sous-dimensionne|sous-dimensionné|surdimensionne|surdimensionné|competence insuffisante|compétence insuffisante|cadre en difficulte|cadre en difficulté|cadres en difficulte|cadres en difficulté)/.test(
+    text
+  );
+}
+
+function signalLooksCatalogLike(signal: DiagnosticSignal): boolean {
+  const constat = normalizeForMatch(signal.constat);
+  const excerpt = normalizeForMatch(signal.sourceExcerpt);
+
+  return (
+    constat.includes("la trame traite explicitement le theme") ||
+    constat.includes("le meilleur support trouve pour le theme") ||
+    constat.includes("constitue le meilleur appui disponible") ||
+    (excerpt.length < 140 && !signalLooksConcrete(signal))
+  );
+}
+
+function semanticBucket(text: string): string[] {
+  const normalized = normalizeForMatch(text);
+  const buckets: string[] = [];
+
+  if (/(encadrement|cadre|effectif|equipe|équipe|ressource|staffing)/.test(normalized)) {
+    buckets.push("workforce");
+  }
+  if (/(charge|volume|montee en charge|montée en charge|croissance|seuil)/.test(normalized)) {
+    buckets.push("capacity_growth");
+  }
+  if (/(recrut|profil|competence|compétence|renfort)/.test(normalized)) {
+    buckets.push("recruitment_profiles");
+  }
+  if (/(arbitrage|validation|decide|décide|decision)/.test(normalized)) {
+    buckets.push("decision_arbitration");
+  }
+  if (/(marge|cash|cout|coût|rentabilite|rentabilité)/.test(normalized)) {
+    buckets.push("economics");
+  }
+  if (/(rituel|indicateur|formalise|formalisé|objectiv|processus|cadre)/.test(normalized)) {
+    buckets.push("formalization");
+  }
+
+  return buckets.sort();
+}
+
+function signalSemanticSignature(signal: DiagnosticSignal): string {
+  const tokens = semanticBucket(
+    [signal.theme, signal.constat, signal.sourceExcerpt].join(" | ")
+  );
+
+  if (tokens.length === 0) {
+    return normalizeForMatch(signal.theme);
+  }
+
+  return tokens.join("|");
+}
+
+function dedupeSemanticSignals(
+  selected: ScoredSignal[],
+  iteration: IterationNumber
+): ScoredSignal[] {
+  const out: ScoredSignal[] = [];
+  const seen = new Map<string, ScoredSignal>();
+
+  for (const item of selected) {
+    const signature = signalSemanticSignature(item.signal);
+    const existing = seen.get(signature);
+
+    if (!existing) {
+      seen.set(signature, item);
+      out.push(item);
+      continue;
+    }
+
+    const keepCurrent =
+      item.score > existing.score ||
+      (iteration === 1 &&
+        signalLooksSalientManagerially(item.signal) &&
+        !signalLooksSalientManagerially(existing.signal));
+
+    if (keepCurrent) {
+      const index = out.findIndex((x) => x.signal.id === existing.signal.id);
+      if (index >= 0) out.splice(index, 1, item);
+      seen.set(signature, item);
+    }
+  }
+
+  return out;
+}
+
+function scoreIterationIntentFit(
   signal: DiagnosticSignal,
-  themeMemory: ThemeMemorySummary,
-  dimensionId: DimensionId,
   iteration: IterationNumber
 ): number {
-  const sameAngleCount = countCoveredAngle(themeMemory, signal.entryAngle);
-  if (sameAngleCount === 0) return iteration === 1 ? 8 : 16;
+  let score = 0;
 
-  if (
-    wasAngleMarkedInPriorIterations({
-      session,
-      dimensionId,
-      theme: themeMemory.theme,
-      angle: signal.entryAngle,
-      currentIteration: iteration,
-    })
-  ) {
-    return iteration === 3 ? -18 : -12;
+  if (iteration === 1) {
+    if (signal.signalKind === "explicit") score += 14;
+    if (signalLooksConcrete(signal)) score += 12;
+    if (signal.signalKind === "absence") score -= 4;
   }
 
-  return sameAngleCount === 1 ? -2 : -8;
+  if (iteration === 2) {
+    if (signal.signalKind === "explicit") score += 10;
+    if (signalLooksConcrete(signal)) score += 12;
+  }
+
+  if (iteration === 3) {
+    if (signalLooksConcrete(signal)) score += 8;
+    if (signal.signalKind === "absence") score -= 2;
+  }
+
+  return score;
 }
 
-function scoreThemeContinuation(themeMemory: ThemeMemorySummary, iteration: IterationNumber): number {
-  if (themeMemory.usable.length === 0 && themeMemory.confirmedAngles.length === 0) return 10;
-  if (themeMemory.saturationScore >= 78) return -16;
-  if (themeMemory.usable.length === 1 || themeMemory.confirmedAngles.length === 1) {
-    return iteration === 1 ? 6 : 12;
+function scoreThemeContinuation(
+  themeMemory: ThemeMemorySummary,
+  iteration: IterationNumber
+): number {
+  if (themeMemory.usable.length === 0 && themeMemory.confirmedAngles.length === 0) {
+    return iteration === 1 ? 8 : 4;
   }
-  if (themeMemory.usable.length >= 2 || themeMemory.confirmedAngles.length >= 2) {
-    return iteration === 3 ? 8 : 4;
+
+  if (themeMemory.saturationScore >= 80) return -14;
+
+  if (themeMemory.usableFactCount === 1) {
+    return iteration === 1 ? 6 : 10;
   }
+
+  if (themeMemory.usableFactCount >= 2) {
+    return iteration === 3 ? 6 : 3;
+  }
+
   return 0;
 }
 
-function scoreRootCauseAlignment(signal: DiagnosticSignal, themeMemory: ThemeMemorySummary): number {
-  let score = 0;
-  if (
-    (themeMemory.dominantRootCauses.includes("skills") ||
-      themeMemory.dominantRootCauses.includes("experience") ||
-      themeMemory.dominantRootCauses.includes("decision")) &&
-    signal.entryAngle === "causality"
-  ) score += 10;
-  if (
-    themeMemory.dominantRootCauses.includes("arbitration") &&
-    signal.entryAngle === "arbitration"
-  ) score += 10;
-  if (
-    (themeMemory.dominantRootCauses.includes("pricing") ||
-      themeMemory.dominantRootCauses.includes("cash")) &&
-    signal.entryAngle === "economics"
-  ) score += 10;
-  if (
-    themeMemory.dominantRootCauses.includes("organization") &&
-    signal.entryAngle === "formalization"
-  ) score += 8;
-  if (
-    themeMemory.dominantRootCauses.includes("resources") &&
-    signal.entryAngle === "dependency"
-  ) score += 8;
-  return score;
-}
-
-function scoreIterationIntentFit(signal: DiagnosticSignal, iteration: IterationNumber): number {
-  let score = 0;
-  if (iteration === 1) {
-    if (signal.signalKind === "explicit") score += 14;
-    if (signal.entryAngle === "mechanism") score += 10;
-    if (signal.entryAngle === "formalization") score += 8;
-    if (signal.signalKind === "absence") score -= 2;
-  }
-  if (iteration === 2) {
-    if (signal.entryAngle === "causality") score += 18;
-    if (signal.entryAngle === "arbitration") score += 14;
-    if (signal.entryAngle === "dependency") score += 10;
-    if (signal.entryAngle === "economics") score += 8;
-  }
-  if (iteration === 3) {
-    if (signal.entryAngle === "formalization") score += 12;
-    if (signal.entryAngle === "dependency") score += 12;
-    if (signal.entryAngle === "arbitration") score += 10;
-    if (signal.entryAngle === "economics") score += 6;
-  }
-  return score;
-}
-
-function isLowEvidenceSignal(signal: DiagnosticSignal): boolean {
-  if (signal.signalKind !== "absence") return false;
-  const excerpt = normalizeForMatch(signal.sourceExcerpt);
-  const constat = normalizeForMatch(signal.constat);
-  const genericExcerpt =
-    excerpt.length < 110 ||
-    excerpt.includes("aucun signal suffisamment explicite") ||
-    excerpt.includes("aucun signal") ||
-    excerpt.includes("no_evidence") ||
-    excerpt.includes("not_enough_material");
-  const genericConstat =
-    constat.includes("no_evidence") ||
-    constat.includes("no evidence") ||
-    constat.includes("insuffisamment etaye") ||
-    constat.includes("non documente") ||
-    constat.includes("non documenté");
-  return genericExcerpt && genericConstat;
-}
-
-function scoreLowEvidencePenalty(
+function scoreNovelty(
   signal: DiagnosticSignal,
   themeMemory: ThemeMemorySummary,
   iteration: IterationNumber
 ): number {
-  if (!isLowEvidenceSignal(signal)) return 0;
-  let score = iteration === 1 ? -8 : -4;
-  if (themeMemory.usable.length > 0 || themeMemory.confirmedAngles.length > 0) score -= 4;
-  return score;
-}
+  const sameAngleAlreadyAsked = themeMemory.askedAngles.includes(signal.entryAngle);
+  const sameAngleAlreadyConfirmed = themeMemory.confirmedAngles.includes(signal.entryAngle);
 
-function scoreMandatoryAngleGap(
-  session: DiagnosticSessionAggregate,
-  signal: DiagnosticSignal,
-  dimensionId: DimensionId,
-  iteration: IterationNumber
-): number {
-  const mandatoryAngles = mandatoryAnglesForIteration(iteration);
-  if (!mandatoryAngles.includes(signal.entryAngle)) return 0;
-  const alreadyCovered = (session.themeCoverage ?? []).some(
-    (item) =>
-      item.dimensionId === dimensionId &&
-      item.angleHistory.some(
-        (mark) =>
-          mark.iteration === iteration &&
-          (mark.status === "asked" || mark.status === "confirmed") &&
-          mark.angle === signal.entryAngle
-      )
-  );
-  return alreadyCovered ? -2 : 12;
-}
+  if (!sameAngleAlreadyAsked && !sameAngleAlreadyConfirmed) {
+    return iteration === 1 ? 4 : 8;
+  }
 
-function scoreThemeSaturation(
-  signal: DiagnosticSignal,
-  themeMemory: ThemeMemorySummary,
-  iteration: IterationNumber
-): number {
-  if (themeMemory.saturationScore < 78) return 0;
-  if (iteration === 3 && !themeMemory.confirmedAngles.includes(signal.entryAngle)) return 6;
-  return -12;
+  if (sameAngleAlreadyConfirmed) {
+    return -6;
+  }
+
+  return -2;
 }
 
 function scoreEvidenceDensity(
@@ -427,45 +420,43 @@ function scoreEvidenceDensity(
 ): number {
   const excerptLength = normalizeText(signal.sourceExcerpt).length;
   const constatLength = normalizeText(signal.constat).length;
+
   let score = 0;
+
   if (signal.signalKind === "explicit") score += 8;
   if (excerptLength >= 120) score += 6;
   if (excerptLength >= 220) score += 6;
   if (constatLength >= 120) score += 4;
   if (themeMemory.usableFactCount > 0) score += 6;
-  if (themeMemory.usableFactCount >= 2) score += 6;
+  if (themeMemory.usableFactCount >= 2) score += 4;
   if (iteration >= 2 && themeMemory.usableFactCount > 0) score += 4;
+
   return score;
 }
 
-function scoreQuestionSpecificity(
+function scoreLowValuePenalty(
   signal: DiagnosticSignal,
   themeMemory: ThemeMemorySummary,
   iteration: IterationNumber
 ): number {
-  const text = normalizeForMatch(`${signal.constat} ${signal.managerialRisk} ${signal.sourceExcerpt}`);
-  let score = 0;
-  if (/(arbitrage|validation|decide|décide|comite|comité)/.test(text)) score += 8;
-  if (/(depend|dépend|personne cle|personne clé|relais|goulot)/.test(text)) score += 8;
-  if (/(marge|cash|cout|coût|rentabilite|rentabilité)/.test(text)) score += 8;
-  if (/(rituel|indicateur|tableau de bord|cadre|role|rôle|procedure|procédure)/.test(text)) {
-    score += 6;
-  }
-  if (iteration === 3 && /(moins pilote|moins piloté|hors pilotage|non suivi)/.test(text)) {
-    score += 6;
-  }
-  if (
-    themeMemory.lastQuestionText &&
-    normalizeForMatch(themeMemory.lastQuestionText) === normalizeForMatch(signal.constat)
-  ) {
-    score -= 6;
-  }
+  if (!signalLooksLowValue(signal)) return 0;
+
+  let score = iteration === 1 ? -10 : -6;
+  if (themeMemory.usableFactCount > 0) score -= 4;
+
   return score;
 }
 
 function scoreThemePlanAlignment(signal: DiagnosticSignal, inferredThemes: Set<string>): number {
   const themeKey = normalizeForMatch(signal.theme);
-  return inferredThemes.has(themeKey) ? -2 : 10;
+  return inferredThemes.has(themeKey) ? -1 : 8;
+}
+
+function scoreAlreadyUsedPenalty(
+  signal: DiagnosticSignal,
+  alreadyUsedSignalIds: Set<string>
+): number {
+  return alreadyUsedSignalIds.has(signal.id) ? -28 : 0;
 }
 
 function scoreSignalForIteration(
@@ -473,49 +464,62 @@ function scoreSignalForIteration(
   iteration: IterationNumber,
   themeMemory: ThemeMemorySummary,
   alreadyUsedSignalIds: Set<string>,
-  session: DiagnosticSessionAggregate,
-  dimensionId: DimensionId,
   inferredThemes: Set<string>,
   rationale: string[]
 ): number {
   let score = signal.criticalityScore + signal.confidenceScore;
+
   if (signal.signalKind === "explicit") score += 8;
-  if (signal.signalKind === "absence") score -= 1;
-  score += scoreIterationIntentFit(signal, iteration);
-  if (alreadyUsedSignalIds.has(signal.id)) {
-    score -= 28;
-    rationale.push("signal déjà utilisé");
-  }
+  if (signal.signalKind === "absence") score -= 2;
+
+  const usedPenalty = scoreAlreadyUsedPenalty(signal, alreadyUsedSignalIds);
+  score += usedPenalty;
+  if (usedPenalty < 0) rationale.push("signal déjà utilisé");
+
+  const iterationFit = scoreIterationIntentFit(signal, iteration);
+  score += iterationFit;
+  if (iterationFit >= 12) rationale.push("bon support pour l'itération");
+
   const continuation = scoreThemeContinuation(themeMemory, iteration);
   score += continuation;
-  if (continuation > 8) rationale.push("thème encore à instruire");
+  if (continuation > 6) rationale.push("thème encore à instruire");
   if (continuation < -10) rationale.push("thème déjà saturé");
-  const novelty = scoreAngleNovelty(session, signal, themeMemory, dimensionId, iteration);
+
+  const novelty = scoreNovelty(signal, themeMemory, iteration);
   score += novelty;
-  if (novelty > 10) rationale.push("angle nouveau");
-  if (novelty < -10) rationale.push("angle déjà couvert");
-  const rootCauseAlignment = scoreRootCauseAlignment(signal, themeMemory);
-  score += rootCauseAlignment;
-  if (rootCauseAlignment > 0) rationale.push("alignement causes racines");
-  const lowEvidencePenalty = scoreLowEvidencePenalty(signal, themeMemory, iteration);
-  score += lowEvidencePenalty;
-  if (lowEvidencePenalty < 0) rationale.push("signal faible");
-  const mandatoryGap = scoreMandatoryAngleGap(session, signal, dimensionId, iteration);
-  score += mandatoryGap;
-  if (mandatoryGap > 0) rationale.push("angle obligatoire non couvert");
-  const saturation = scoreThemeSaturation(signal, themeMemory, iteration);
-  score += saturation;
-  if (saturation < -10) rationale.push("thème saturé");
+  if (novelty > 6) rationale.push("angle encore peu exploré");
+  if (novelty < -4) rationale.push("angle déjà bien couvert");
+
   const density = scoreEvidenceDensity(signal, themeMemory, iteration);
   score += density;
-  if (density >= 12) rationale.push("matière exploitable dense");
-  const specificity = scoreQuestionSpecificity(signal, themeMemory, iteration);
-  score += specificity;
-  if (specificity >= 10) rationale.push("mécanisme managérial spécifique");
+  if (density >= 12) rationale.push("matière exploitable");
+
+  const salienceBonus =
+    iteration === 1 && signalLooksSalientManagerially(signal)
+      ? 22
+      : iteration >= 2 && signalLooksSalientManagerially(signal)
+      ? 10
+      : 0;
+  score += salienceBonus;
+  if (salienceBonus > 0) rationale.push("signal saillant métier");
+
+  const catalogPenalty =
+    iteration === 1 && signalLooksCatalogLike(signal)
+      ? -18
+      : signalLooksCatalogLike(signal)
+      ? -8
+      : 0;
+  score += catalogPenalty;
+  if (catalogPenalty < 0) rationale.push("support trop catalogue");
+
+  const lowValuePenalty = scoreLowValuePenalty(signal, themeMemory, iteration);
+  score += lowValuePenalty;
+  if (lowValuePenalty < 0) rationale.push("support faible");
+
   const themePlanAlignment = scoreThemePlanAlignment(signal, inferredThemes);
   score += themePlanAlignment;
   if (themePlanAlignment > 0) rationale.push("thème retenu");
-  if (themePlanAlignment < 0) rationale.push("thème inféré");
+
   return score;
 }
 
@@ -528,7 +532,9 @@ async function buildStructuredQuestion(
 ): Promise<StructuredQuestion> {
   const llmQuestion = await composeQuestionWithLlm({
     dimensionId,
-    dimensionTitle: dimensionTitle(dimensionId),
+    dimensionTitle:
+      DIAGNOSTIC_DIMENSIONS.find((item) => item.id === dimensionId)?.title ??
+      `Dimension ${dimensionId}`,
     iteration,
     theme: signal.theme,
     constat: signal.constat,
@@ -543,10 +549,10 @@ async function buildStructuredQuestion(
 
   const fallbackQuestion =
     iteration === 1
-      ? `Sur le thème "${signal.theme}", comment ce sujet fonctionne-t-il réellement aujourd’hui dans l’entreprise, avec quels repères concrets et quels points de fragilité éventuels ?`
+      ? `Sur "${signal.theme}", qu'est-ce que cela veut dire concrètement aujourd'hui ?`
       : iteration === 2
-      ? `Si l’on creuse le thème "${signal.theme}", quelles sont selon vous les causes principales de la situation observée et quels arbitrages la maintiennent ?`
-      : `Sur le thème "${signal.theme}", quel point reste aujourd’hui le moins piloté et quel risque concret cela crée-t-il pour l’entreprise ?`;
+      ? `Sur "${signal.theme}", qu'est-ce qu'il faut vérifier ou clarifier maintenant ?`
+      : `Sur "${signal.theme}", quel point reste aujourd'hui à objectiver ou sécuriser ?`;
 
   return {
     id: buildQuestionId(signal, iteration, index),
@@ -561,11 +567,10 @@ async function buildStructuredQuestion(
 function hasStrongReasonToKeep(item: ScoredSignal, iteration: IterationNumber): boolean {
   if (item.signal.criticalityScore >= 85) return true;
   if (item.themeMemory.usableFactCount >= 2) return true;
-  if (item.themeMemory.confirmedAngles.length >= 2 && iteration >= 2) return true;
-  if (
-    normalizeText(item.signal.sourceExcerpt).length >= 180 &&
-    item.signal.signalKind === "explicit"
-  ) return true;
+  if (item.signal.signalKind === "explicit" && normalizeText(item.signal.sourceExcerpt).length >= 180) {
+    return true;
+  }
+  if (iteration >= 2 && item.themeMemory.usableFactCount >= 1) return true;
   return false;
 }
 
@@ -623,11 +628,13 @@ function canReuseThemeInSameIteration(
   const maxPerTheme = maxPerThemeForIteration(iteration);
   if (sameTheme.length === 0) return true;
   if (sameTheme.length >= maxPerTheme) return false;
-  const differentAngle = sameTheme.every(
-    (existing) => existing.signal.entryAngle !== candidate.signal.entryAngle
+
+  const differentSignal = sameTheme.every(
+    (existing) => existing.signal.id !== candidate.signal.id
   );
-  if (differentAngle) return true;
-  return candidate.score >= EXTENSION_MIN_SCORE[iteration] + 4;
+  if (!differentSignal) return false;
+
+  return candidate.score >= EXTENSION_MIN_SCORE[iteration];
 }
 
 function chooseOneCandidateForTheme(params: {
@@ -659,6 +666,7 @@ function seedByThemeDistribution(params: {
   const activeThemeKeys = params.targetThemes
     .map((item) => normalizeForMatch(item))
     .filter((themeKey) => (grouped.get(themeKey) ?? []).length > 0);
+
   const distribution = distributionForAvailableThemeCount(
     params.iteration,
     activeThemeKeys.length
@@ -691,16 +699,25 @@ function fillRemainingCapacity(params: {
 }): ScoredSignal[] {
   const maxQuestions = maxQuestionsForIteration(params.iteration);
   const out = [...params.selected];
+  const seenSemantic = new Set(out.map((item) => signalSemanticSignature(item.signal)));
+
   for (const item of params.scoredSignals) {
     if (out.length >= maxQuestions) break;
     if (out.some((existing) => existing.signal.id === item.signal.id)) continue;
     if (!canReuseThemeInSameIteration(out, item, params.iteration)) continue;
+
+    const semanticSignature = signalSemanticSignature(item.signal);
+    if (seenSemantic.has(semanticSignature)) continue;
+
     if (
       item.score < EXTENSION_MIN_SCORE[params.iteration] &&
       !hasStrongReasonToKeep(item, params.iteration)
     ) continue;
+
     out.push(item);
+    seenSemantic.add(semanticSignature);
   }
+
   return out;
 }
 
@@ -711,12 +728,20 @@ function forceFillToTarget(params: {
 }): ScoredSignal[] {
   const maxQuestions = maxQuestionsForIteration(params.iteration);
   const out = [...params.selected];
+  const seenSemantic = new Set(out.map((item) => signalSemanticSignature(item.signal)));
+
   for (const item of params.scoredSignals) {
     if (out.length >= maxQuestions) break;
     if (out.some((existing) => existing.signal.id === item.signal.id)) continue;
     if (!canReuseThemeInSameIteration(out, item, params.iteration)) continue;
+
+    const semanticSignature = signalSemanticSignature(item.signal);
+    if (seenSemantic.has(semanticSignature)) continue;
+
     out.push(item);
+    seenSemantic.add(semanticSignature);
   }
+
   return out.slice(0, maxQuestions);
 }
 
@@ -726,18 +751,23 @@ function selectHighQualitySignals(params: {
   targetThemes: string[];
 }): ScoredSignal[] {
   if (params.scoredSignals.length === 0) return [];
+
   const seeded = seedByThemeDistribution({
     scoredSignals: params.scoredSignals,
     iteration: params.iteration,
     targetThemes: params.targetThemes,
   });
+
   const completed = fillRemainingCapacity({
     selected: seeded,
     scoredSignals: params.scoredSignals,
     iteration: params.iteration,
   });
+
+  const deduped = dedupeSemanticSignals(completed, params.iteration);
+
   return forceFillToTarget({
-    selected: completed,
+    selected: deduped,
     scoredSignals: params.scoredSignals,
     iteration: params.iteration,
   });
@@ -749,22 +779,31 @@ function selectPriorityThemes(params: {
   maxThemeCount: number;
 }): string[] {
   const allowedThemeSet = new Set(params.selectedThemes.map((item) => normalizeForMatch(item)));
-  const bestByTheme = new Map<string, { theme: string; bestScore: number; strongEvidence: number }>();
+  const bestByTheme = new Map<
+    string,
+    { theme: string; bestScore: number; explicitCount: number; salientCount: number }
+  >();
 
   for (const item of params.scoredSignals) {
     const key = normalizeForMatch(item.signal.theme);
     if (allowedThemeSet.size > 0 && !allowedThemeSet.has(key)) continue;
     const current = bestByTheme.get(key);
-    const strongEvidence = item.signal.signalKind === "explicit" ? 1 : 0;
+    const explicitCount = item.signal.signalKind === "explicit" ? 1 : 0;
+    const salientCount = signalLooksSalientManagerially(item.signal) ? 1 : 0;
+
     if (
       !current ||
       item.score > current.bestScore ||
-      (item.score === current.bestScore && strongEvidence > current.strongEvidence)
+      (item.score === current.bestScore && explicitCount > current.explicitCount) ||
+      (item.score === current.bestScore &&
+        explicitCount === current.explicitCount &&
+        salientCount > current.salientCount)
     ) {
       bestByTheme.set(key, {
         theme: item.signal.theme,
         bestScore: item.score,
-        strongEvidence,
+        explicitCount,
+        salientCount,
       });
     }
   }
@@ -772,7 +811,8 @@ function selectPriorityThemes(params: {
   const ranked = [...bestByTheme.values()]
     .sort((a, b) => {
       if (b.bestScore !== a.bestScore) return b.bestScore - a.bestScore;
-      return b.strongEvidence - a.strongEvidence;
+      if (b.explicitCount !== a.explicitCount) return b.explicitCount - a.explicitCount;
+      return b.salientCount - a.salientCount;
     })
     .slice(0, params.maxThemeCount)
     .map((item) => item.theme);
@@ -813,8 +853,6 @@ export async function planIterationQuestionsWithDiagnostics(params: PlanParams):
           iteration,
           themeMemory,
           alreadyUsedSignalIds,
-          session,
-          dimensionId,
           inferredThemes,
           rationale
         ),
@@ -858,11 +896,11 @@ export async function planIterationQuestionsWithDiagnostics(params: PlanParams):
       ? `Thèmes inférés présents dans le plan : ${selectedThemes.filter((item) => inferredThemes.has(normalizeForMatch(item))).join(" | ")}.`
       : "Aucun thème inféré utilisé sur cette dimension.",
     `Sélection ${questions.length} question(s) sur ${candidates.length} candidat(s).`,
-    `Itération ${iteration}/3 — angles prioritaires : ${mandatoryAnglesForIteration(iteration).join(", ")}.`,
+    `Itération ${iteration}/3 — angles obligatoires suivis à titre indicatif : ${mandatoryAnglesForIteration(iteration).join(", ")}.`,
     `Cap cible itération : ${maxQuestionsForIteration(iteration)} question(s).`,
     `Thèmes réellement alimentés dans le workset : ${activeThemeKeys.size}.`,
     `Cap max par thème sur cette itération : ${maxPerThemeForIteration(iteration)}.`,
-    "Le planner couvre d’abord les meilleurs thèmes disponibles, puis remplit de manière contrôlée pour tenir 5/5/4.",
+    "Le planner fait remonter d'abord les signaux saillants métier, puis déduplique les objets sémantiquement redondants.",
   ];
 
   return { questions, diagnostics, notes };

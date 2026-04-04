@@ -29,6 +29,13 @@ function normalizeText(value: unknown): string {
   return String(value ?? "").replace(/\s+/g, " ").trim();
 }
 
+function normalizeForMatch(value: unknown): string {
+  return normalizeText(value)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+}
+
 function truncate(value: unknown, max = 220): string {
   const text = normalizeText(value);
   if (text.length <= max) return text;
@@ -42,10 +49,7 @@ function uniqueStrings(values: Array<string | null | undefined>, max?: number): 
   for (const value of values) {
     const text = normalizeText(value);
     if (!text) continue;
-    const key = text
-      .normalize("NFD")
-      .replace(/[\u0300-\u036f]/g, "")
-      .toLowerCase();
+    const key = normalizeForMatch(text);
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(text);
@@ -70,11 +74,11 @@ export function llmDiagnosticWriterEnabled(): boolean {
 function iterationObjective(iteration: IterationNumber): string {
   switch (iteration) {
     case 1:
-      return "cadrage et compréhension initiale du fonctionnement réel";
+      return "comprendre le fonctionnement réel sans surinterpréter";
     case 2:
-      return "approfondissement des causes, arbitrages, dépendances et mécanismes";
+      return "vérifier ou approfondir les hypothèses réellement utiles";
     case 3:
-      return "consolidation, signaux de pilotage, zones non pilotées et risques explicites";
+      return "consolider ce qui reste à clarifier, arbitrer ou objectiver";
     default:
       return "questionnement qualitatif";
   }
@@ -83,19 +87,140 @@ function iterationObjective(iteration: IterationNumber): string {
 function anglePrompt(angle: EntryAngle): string {
   switch (angle) {
     case "causality":
-      return "fais apparaître la cause racine, le mécanisme déclencheur ou le vrai facteur explicatif";
+      return "si pertinent, explorer ce qui explique réellement le sujet";
     case "arbitration":
-      return "fais apparaître la chaîne d'arbitrage, de décision ou de validation";
+      return "si pertinent, explorer qui décide ou arbitre réellement";
     case "economics":
-      return "fais apparaître le lien avec marge, coût réel, cash, rentabilité ou sélectivité";
+      return "si pertinent, explorer la cohérence entre structure, volume, coût, marge ou rentabilité";
     case "formalization":
-      return "fais apparaître ce qui n'est pas cadré, ritualisé, objectivé ou formalisé";
+      return "si pertinent, explorer ce qui est réellement formalisé, suivi ou objectivé";
     case "dependency":
-      return "fais apparaître la dépendance à une personne, un passage obligé, une ressource rare ou un relais fragile";
+      return "si pertinent, explorer une dépendance réelle à une personne ou à un passage obligé";
     case "mechanism":
     default:
-      return "fais apparaître le fonctionnement réel, l'enchaînement concret et le point de rupture";
+      return "décrire le fonctionnement réel ou le point utile à clarifier";
   }
+}
+
+function textIncludesAny(text: string, patterns: string[]): boolean {
+  const normalized = normalizeForMatch(text);
+  return patterns.some((pattern) => normalized.includes(normalizeForMatch(pattern)));
+}
+
+function looksLikeGrowthRecruitmentCase(text: string): boolean {
+  return (
+    textIncludesAny(text, ["croissance", "volume", "charge", "activité", "activite"]) &&
+    textIncludesAny(text, ["recrut", "encadrement", "équipe", "equipe", "effectif", "staffing"])
+  );
+}
+
+function looksLikeAdvanceStructureCase(text: string): boolean {
+  return textIncludesAny(text, [
+    "surdimension",
+    "surdimensionné",
+    "surdimensionne",
+    "pour soutenir la croissance",
+    "pas encore le volume",
+    "pas encore la charge",
+    "pas encore le niveau",
+    "volume nécessaire",
+    "volume necessaire",
+    "avance de phase",
+  ]);
+}
+
+function looksLikeRatherReassuringCase(text: string): boolean {
+  return textIncludesAny(text, [
+    "plutôt bon",
+    "plutot bon",
+    "assez bon",
+    "satisfaisant",
+    "correct",
+    "suivi",
+    "on suit",
+    "bon niveau",
+    "bonne tenue",
+    "peu de pertes de temps",
+    "limiter les pertes de temps",
+    "ça fonctionne",
+    "cela fonctionne",
+  ]);
+}
+
+function looksLikeCurrentVsFutureSplit(text: string): boolean {
+  return (
+    textIncludesAny(text, [
+      "aujourd'hui",
+      "actuellement",
+      "pour l'instant",
+      "à date",
+      "a date",
+      "les experts actuels",
+      "les équipes actuelles",
+      "les ressources actuelles",
+      "permettent de répondre aux besoins",
+      "suffisent aujourd'hui",
+      "tiennent aujourd'hui",
+    ]) &&
+    textIncludesAny(text, [
+      "mais",
+      "en revanche",
+      "à condition que",
+      "a condition que",
+      "si",
+      "demain",
+      "plus tard",
+      "à terme",
+      "a terme",
+      "dans le futur",
+      "nécessitera",
+      "necessitera",
+      "nécessiterait",
+      "necessiterait",
+    ])
+  );
+}
+
+function looksLikeConditionalNeedCase(text: string): boolean {
+  return (
+    textIncludesAny(text, [
+      "contrat structurant",
+      "nouveau contrat",
+      "gros contrat",
+      "si le contrat se concrétise",
+      "si le contrat se concretise",
+      "si la croissance se confirme",
+      "si la croissance arrive",
+      "si le volume augmente",
+      "si la charge augmente",
+      "à partir d'un certain volume",
+      "a partir d'un certain volume",
+    ]) &&
+    textIncludesAny(text, [
+      "recrut",
+      "renfort",
+      "embauche",
+      "profils",
+      "effectif",
+      "ressources supplémentaires",
+      "ressources supplementaires",
+      "besoin de recruter",
+    ])
+  );
+}
+
+function riskLooksGeneric(risk: string): boolean {
+  const text = normalizeForMatch(risk);
+  return [
+    "pilotage incomplet",
+    "dependance excessive",
+    "dépendance excessive",
+    "arbitrage insuffisamment maitrise",
+    "arbitrage insuffisamment maîtrisé",
+    "risque managérial",
+    "pilotage insuffisamment fonde",
+    "pilotage insuffisamment fondé",
+  ].some((pattern) => text.includes(normalizeForMatch(pattern)));
 }
 
 function buildQuestionFallback(params: {
@@ -110,60 +235,101 @@ function buildQuestionFallback(params: {
 }): string {
   const theme = normalizeText(params.theme);
   const constat = truncate(params.constat, 170);
-  const risk = truncate(params.managerialRisk, 170);
   const evidence = truncate(params.trameEvidence, 170);
   const fact = truncate(params.facts?.[0], 150);
-  const anchor = fact ? ` Vous avez déjà mentionné par exemple : "${fact}".` : "";
+  const prudentRisk = !riskLooksGeneric(params.managerialRisk)
+    ? truncate(params.managerialRisk, 170)
+    : "";
+  const anchor = fact ? ` Vous avez déjà indiqué par exemple : "${fact}".` : "";
+  const combinedText = normalizeForMatch([theme, constat, evidence, prudentRisk].join(" | "));
 
   if (params.iteration === 1) {
     if (params.isAbsence) {
-      switch (params.entryAngle) {
-        case "dependency":
-          return `Sur le thème "${theme}", la trame ne permet pas de voir clairement où se situe la dépendance opérationnelle. Aujourd'hui, sur qui ou sur quoi ce sujet repose-t-il réellement, à quel moment cela bloque-t-il, et quel risque concret cela crée-t-il ?${anchor}`;
-        case "arbitration":
-          return `Sur le thème "${theme}", la trame ne montre pas clairement qui arbitre et comment la décision se prend. Concrètement, qui décide aujourd'hui, où la validation se fait-elle, et où voyez-vous les principaux frottements ?${anchor}`;
-        case "economics":
-          return `Sur le thème "${theme}", la trame n'éclaire pas clairement l'impact économique du sujet. Comment ce point se traduit-il aujourd'hui sur la marge, le coût réel, le cash ou la rentabilité, et comment le voyez-vous dans les faits ?${anchor}`;
-        case "formalization":
-          return `Sur le thème "${theme}", la trame laisse penser que le sujet n'est pas objectivé de façon suffisamment lisible. Comment ce sujet est-il piloté aujourd'hui, avec quels rôles, quels rituels ou quelles règles, et où se situe la vraie fragilité ?${anchor}`;
-        default:
-          return `Sur le thème "${theme}", la trame ne permet pas de comprendre clairement le fonctionnement réel. Comment ce sujet se traite-t-il aujourd'hui en pratique, avec quels acteurs, quelles étapes et quel point de fragilité principal ?${anchor}`;
-      }
+      return `Sur "${theme}", comment ce sujet est-il géré concrètement aujourd'hui ?${anchor}`;
     }
 
-    return `Sur le thème "${theme}", on lit dans la trame : "${evidence || constat}". Qu'est-ce que cela recouvre concrètement aujourd'hui dans le fonctionnement réel, avec quels acteurs, quelles étapes et quel risque managérial derrière : "${risk}" ?${anchor}`;
+    if (
+      looksLikeCurrentVsFutureSplit(combinedText) ||
+      looksLikeConditionalNeedCase(combinedText)
+    ) {
+      return `Sur "${theme}", avez-vous déjà identifié à partir de quel type de contrat ou de quel niveau de volume ces recrutements deviendraient nécessaires ?${anchor}`;
+    }
+
+    if (looksLikeGrowthRecruitmentCase(combinedText) && looksLikeAdvanceStructureCase(combinedText)) {
+      return `Sur "${theme}", sur quels volumes ou quelles perspectives avez-vous dimensionné cet encadrement aujourd'hui ?${anchor}`;
+    }
+
+    if (looksLikeRatherReassuringCase(combinedText)) {
+      return `Sur "${theme}", qu'est-ce qui vous fait dire aujourd'hui que le sujet tient plutôt bien ?${anchor}`;
+    }
+
+    if (normalizeForMatch(evidence).includes("croissance") && normalizeForMatch(evidence).includes("recrut")) {
+      return `Sur "${theme}", avez-vous déjà identifié à partir de quel niveau de croissance vous devrez recruter ?${anchor}`;
+    }
+
+    return `Sur "${theme}", qu'est-ce que cela veut dire concrètement aujourd'hui : "${truncate(evidence || constat, 130)}" ?${anchor}`;
   }
 
   if (params.iteration === 2) {
+    if (
+      looksLikeCurrentVsFutureSplit(combinedText) ||
+      looksLikeConditionalNeedCase(combinedText)
+    ) {
+      return `Sur "${theme}", quels profils ou quelles compétences faudrait-il renforcer si ce seuil était franchi ?${anchor}`;
+    }
+
+    if (looksLikeGrowthRecruitmentCase(combinedText) && looksLikeAdvanceStructureCase(combinedText)) {
+      return `Sur "${theme}", à partir de quel niveau de charge ou de volume cet encadrement sera-t-il pleinement justifié ?${anchor}`;
+    }
+
+    if (looksLikeRatherReassuringCase(combinedText)) {
+      return `Sur "${theme}", dans quel cas ce bon niveau pourrait-il devenir plus fragile ?${anchor}`;
+    }
+
     switch (params.entryAngle) {
       case "causality":
-        return `Si l'on creuse "${theme}", qu'est-ce qui produit réellement la situation suivante : "${constat}" ? Est-ce surtout un sujet de compétences, d'organisation, de décisions prises, d'arbitrages évités ou d'un mode de fonctionnement devenu fragile ?${anchor}`;
+        return `Sur "${theme}", quelle est selon vous la cause principale de ce point ?${anchor}`;
       case "arbitration":
-        return `Sur "${theme}", où se situe le vrai problème d'arbitrage derrière le constat "${constat}" : qui décide, qui valide, où cela remonte, et en quoi cette chaîne entretient-elle le risque "${risk}" ?${anchor}`;
+        return `Sur "${theme}", qui arbitre réellement ce point aujourd'hui ?${anchor}`;
       case "dependency":
-        return `Sur "${theme}", derrière le constat "${constat}", quelle dépendance pèse réellement le plus aujourd'hui : personne clé, expert rare, validateur obligé, relais insuffisant ou séquence fragile ? Et que produit cette dépendance dans les faits ?${anchor}`;
+        return `Sur "${theme}", ce sujet dépend-il encore trop de quelques personnes ?${anchor}`;
       case "economics":
-        return `Sur "${theme}", derrière le constat "${constat}", où se loge l'impact économique réel : marge, coût, cash, sélectivité, rentabilité ou dérive non visible ? Comment cela se matérialise-t-il concrètement ?${anchor}`;
+        return `Sur "${theme}", quel impact concret voyez-vous aujourd'hui sur la charge, le coût ou la rentabilité ?${anchor}`;
       case "formalization":
-        return `Sur "${theme}", derrière le constat "${constat}", qu'est-ce qui manque vraiment pour piloter le sujet : rôle clair, rituel, méthode, indicateur, règle d'arbitrage ou point de contrôle ?${anchor}`;
+        return `Sur "${theme}", qu'est-ce qui est réellement formalisé aujourd'hui ?${anchor}`;
       default:
-        return `Si l'on creuse "${theme}", quel mécanisme concret explique aujourd'hui le constat "${constat}", et qu'est-ce qui maintient encore le risque "${risk}" ?${anchor}`;
+        return `Sur "${theme}", qu'est-ce qu'il faut clarifier ou vérifier en priorité ?${anchor}`;
     }
+  }
+
+  if (
+    looksLikeCurrentVsFutureSplit(combinedText) ||
+    looksLikeConditionalNeedCase(combinedText)
+  ) {
+    return `Sur "${theme}", qu'est-ce qui reste aujourd'hui le moins préparé si cette montée en charge se concrétise ?${anchor}`;
+  }
+
+  if (looksLikeGrowthRecruitmentCase(combinedText) && looksLikeAdvanceStructureCase(combinedText)) {
+    return `Sur "${theme}", quel est aujourd'hui le principal point à objectiver entre structure en place, volume réel et croissance attendue ?${anchor}`;
+  }
+
+  if (looksLikeRatherReassuringCase(combinedText)) {
+    return `Sur "${theme}", quel point mérite malgré tout d'être gardé sous vigilance ?${anchor}`;
   }
 
   switch (params.entryAngle) {
     case "arbitration":
-      return `Sur "${theme}", quel arbitrage reste aujourd'hui le moins tenu ou le moins explicite, et quel risque concret cela crée-t-il pour l'entreprise si rien ne change ? Qu'est-ce qu'il faudrait rendre clair ou objectivable en priorité ?${anchor}`;
+      return `Sur "${theme}", quel arbitrage reste aujourd'hui le moins clair ?${anchor}`;
     case "dependency":
-      return `Sur "${theme}", quelle dépendance reste aujourd'hui la plus dangereuse, parce qu'elle tient sur trop peu de personnes, trop peu de relais ou un passage obligé ? Quel effet cela produit-il déjà, et qu'est-ce qu'il faudrait sécuriser en premier ?${anchor}`;
+      return `Sur "${theme}", quelle dépendance reste aujourd'hui la plus sensible ?${anchor}`;
     case "economics":
-      return `Sur "${theme}", quel point reste aujourd'hui le moins piloté sur le plan économique, et quel impact concret cela crée-t-il déjà sur la marge, le coût réel, le cash ou la rentabilité ? Qu'est-ce qu'il faudrait objectiver en priorité ?${anchor}`;
+      return `Sur "${theme}", quel point reste aujourd'hui le moins objectivé sur le plan économique ?${anchor}`;
     case "formalization":
-      return `Sur "${theme}", quel point reste aujourd'hui hors pilotage réel malgré le constat "${constat}" : absence de règle, de rôle, de rituel, d'indicateur ou de revue ? Quel risque concret cela crée-t-il, et qu'est-ce qu'il faudrait formaliser en premier ?${anchor}`;
+      return `Sur "${theme}", qu'est-ce qui n'est pas suffisamment objectivé aujourd'hui ?${anchor}`;
     case "causality":
-      return `Sur "${theme}", si vous isolez le point aujourd'hui le moins maîtrisé, quelle cause racine domine réellement derrière le constat "${constat}", et quel risque concret cela crée-t-il déjà pour l'entreprise ?${anchor}`;
+      return `Sur "${theme}", quelle hypothèse principale reste aujourd'hui à confirmer ?${anchor}`;
     default:
-      return `Sur "${theme}", quel point reste aujourd'hui le moins piloté dans le fonctionnement réel, et quel risque concret cela crée-t-il déjà pour l'entreprise ? Si vous deviez rendre ce point pilotable, qu'est-ce qu'il faudrait objectiver ou sécuriser en priorité ?${anchor}`;
+      return `Sur "${theme}", quel est aujourd'hui le principal point à sécuriser ou objectiver ?${anchor}`;
   }
 }
 
@@ -173,6 +339,12 @@ function normalizeQuestionOutput(value: unknown, fallback: string): string {
   if (/[?؟]$/.test(text)) return text;
   return `${text}?`;
 }
+
+type QuestionDecisionShape = {
+  assessmentLevel?: "strong_signal" | "moderate_signal" | "weak_signal" | "reassuring_signal";
+  workingHypothesis?: string;
+  question?: string;
+};
 
 export async function composeQuestionWithLlm(params: {
   dimensionId: DimensionId;
@@ -202,51 +374,109 @@ export async function composeQuestionWithLlm(params: {
   const client = getClient();
   if (!client) return fallback;
 
+  const combinedText = normalizeForMatch(
+    [
+      params.theme,
+      params.constat,
+      params.managerialRisk,
+      params.trameEvidence,
+      ...(params.extractedFacts ?? []),
+    ].join(" | ")
+  );
+
+  const specialCaseInstruction =
+    looksLikeGrowthRecruitmentCase(combinedText) && looksLikeAdvanceStructureCase(combinedText)
+      ? [
+          "Cas métier détecté : structure ou encadrement en avance par rapport au volume réel / à la croissance attendue.",
+          "Dans ce cas, la question doit viser la justification du dimensionnement, le seuil de volume, la montée en charge ou l'hypothèse retenue.",
+          "Ne pas basculer vers une question de formalisation si le vrai sujet est la cohérence entre structure, volume réel et croissance attendue.",
+        ].join("\n")
+      : looksLikeCurrentVsFutureSplit(combinedText) || looksLikeConditionalNeedCase(combinedText)
+      ? [
+          "Cas métier détecté : la matière oppose une situation actuelle tenue à un besoin futur conditionnel.",
+          "Dans ce cas, la question doit obligatoirement porter sur le seuil, le déclencheur, les profils à renforcer ou le niveau de préparation.",
+          "Ne pas revenir à une question générique de thème.",
+          "Ne pas demander 'comment cela fonctionne aujourd'hui' si le constat porte déjà sur une bascule actuelle versus future.",
+        ].join("\n")
+      : looksLikeRatherReassuringCase(combinedText)
+      ? [
+          "Cas métier détecté : matière plutôt rassurante ou déjà assez bien tenue.",
+          "Dans ce cas, ne pas fabriquer un faux risque.",
+          "Poser plutôt une question simple de confirmation, de limite ou de vigilance résiduelle.",
+        ].join("\n")
+      : "";
+
   const prompt = [
     "Tu es un consultant senior en diagnostic dirigeant.",
-    "Rédige UNE seule question, en français professionnel naturel.",
-    "Objectif : obtenir une matière managériale utile, dense et exploitable.",
-    "Contraintes impératives :",
-    "- rester strictement sur le thème fourni",
-    "- partir du constat et du risque managérial fournis",
-    "- faire sentir le constat explicite puis le risque explicite, avant la question ouverte",
-    "- poser une question qualitative, concrète, spécifique au thème réel",
-    "- éclairer si utile les arbitrages, mécanismes, dépendances, défauts de pilotage ou zones non formalisées",
-    "- ne pas demander artificiellement des chiffres",
-    "- ne pas produire une question générique réutilisable sur n'importe quel thème",
-    "- pour l'itération 3, bannir les formulations mécaniques du type 'insuffisamment clarifié / formalisé / sécurisé' si elles ne sont pas spécifiques au thème",
-    "- répondre uniquement avec le texte de la question finale",
+    "Tu dois décider d'abord s'il y a vraiment un sujet fort, un sujet faible, un sujet plutôt rassurant ou simplement un point à vérifier.",
+    "Ensuite seulement, tu rédiges UNE seule question.",
     "",
-    "Forme attendue : une seule phrase interrogative, fluide, orientée dirigeant.",
-    `Angle attendu : ${anglePrompt(params.entryAngle)}.`,
+    "Objectif : obtenir une matière managériale utile, naturelle, crédible et exploitable.",
+    "",
+    "Règles impératives :",
+    "- partir d'abord du constat, de l'évidence trame et des faits déjà acquis",
+    "- ne pas inventer de risque s'il n'est pas réellement suggéré par la matière",
+    "- si la matière est plutôt rassurante, poser une question simple de confirmation ou de limite",
+    "- si la matière est ambiguë, poser une question prudente de clarification",
+    "- si la matière révèle un vrai sujet, poser une question ciblée d'approfondissement",
+    "- ne jamais extrapoler sans preuve vers dépendance excessive, arbitrage défaillant ou pilotage incomplet",
+    "- rester strictement sur le thème fourni",
+    "- poser une seule question",
+    "- question courte, claire, concrète, directement compréhensible par un dirigeant",
+    "- ne pas produire une question générique réutilisable sur n'importe quel thème",
+    "- ne pas commenter, ne pas expliquer, ne pas ajouter d'introduction",
+    "",
+    "Quand le sujet porte sur une structure, un encadrement, un recrutement ou des ressources dimensionnés pour une croissance future, la bonne question porte d'abord sur :",
+    "- les volumes réels",
+    "- les hypothèses retenues",
+    "- le seuil de montée en charge",
+    "- la justification économique ou opérationnelle du dimensionnement",
+    "",
+    specialCaseInstruction,
+    "",
+    "Réponds en JSON strict avec :",
+    '- assessmentLevel: "strong_signal" | "moderate_signal" | "weak_signal" | "reassuring_signal"',
+    "- workingHypothesis: courte hypothèse prudente",
+    "- question: la question finale",
+    "",
+    `Angle indicatif : ${anglePrompt(params.entryAngle)}.`,
     `Dimension : ${params.dimensionId} — ${params.dimensionTitle}`,
     `Itération : ${params.iteration}/3 (${iterationObjective(params.iteration)})`,
     `Thème : ${normalizeText(params.theme)}`,
     `Constat : ${normalizeText(params.constat)}`,
-    `Risque managérial : ${normalizeText(params.managerialRisk)}`,
-    `Angle suggéré : ${params.entryAngle}`,
+    `Risque fourni (à utiliser seulement s'il est vraiment utile) : ${normalizeText(params.managerialRisk)}`,
     `Signal d'absence : ${params.isAbsence ? "oui" : "non"}`,
     `Évidence trame : ${truncate(params.trameEvidence, 360) || "aucune citation utile"}`,
     `Faits déjà acquis : ${uniqueStrings((params.extractedFacts ?? []).map((item) => truncate(item, 170)), 4).join(" | ") || "aucun"}`,
     `Angles déjà couverts : ${uniqueStrings(params.coveredAngles ?? []).join(", ") || "aucun"}`,
     `Angles à éviter : ${uniqueStrings(params.rejectedAngles ?? []).join(", ") || "aucun"}`,
-  ].join("\n");
+  ]
+    .filter(Boolean)
+    .join("\n");
 
   try {
     const response = await client.chat.completions.create({
       model: modelName(),
-      temperature: 0.5,
+      temperature: 0.4,
+      response_format: { type: "json_object" },
       messages: [
         {
           role: "system",
           content:
-            "Tu rédiges des questions de diagnostic dirigeant. Une seule question. Français professionnel naturel. Aucune liste. Aucun commentaire.",
+            "Tu rédiges des questions de diagnostic dirigeant. Tu décides d'abord si le sujet est fort, faible, rassurant ou simplement à vérifier. Tu ne fabriques pas de faux risque. Tu réponds uniquement en JSON valide.",
         },
         { role: "user", content: prompt },
       ],
     });
 
-    return normalizeQuestionOutput(response.choices[0]?.message?.content, fallback);
+    const raw = normalizeText(response.choices[0]?.message?.content);
+    const parsed = jsonParse<QuestionDecisionShape>(raw);
+
+    if (!parsed?.question) {
+      return fallback;
+    }
+
+    return normalizeQuestionOutput(parsed.question, fallback);
   } catch {
     return fallback;
   }

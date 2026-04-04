@@ -99,7 +99,227 @@ function latestFactAnchor(
   const fact = latest?.extractedFacts?.[0];
   if (!fact) return "";
 
-  return ` Vous avez déjà indiqué par exemple : "${shorten(fact)}".`;
+  return ` Vous avez déjà indiqué par exemple : "${shorten(fact, 110)}".`;
+}
+
+function wordCount(value: string): number {
+  return normalizeText(value)
+    .split(/\s+/)
+    .filter(Boolean).length;
+}
+
+function countStructuredEt(value: string): number {
+  return (normalizeText(value).match(/\set\s/gi) ?? []).length;
+}
+
+function hasAbstractOverload(value: string): boolean {
+  const text = normalizeForMatch(value);
+  const bannedPatterns = [
+    "comment decrivez-vous",
+    "comment décrivez-vous",
+    "dans quelle mesure",
+    "a quel moment precis",
+    "à quel moment précis",
+    "mecanisme actuel",
+    "mécanisme actuel",
+    "interactions concretes",
+    "interactions concrètes",
+    "effets en chaine",
+    "effets en chaîne",
+    "coherence globale",
+    "cohérence globale",
+    "articulation",
+    "logique sous-jacente",
+    "selon quel enchainement",
+    "selon quel enchaînement",
+    "avec quel effet visible",
+    "repartons du bon angle",
+  ];
+
+  return bannedPatterns.some((pattern) => text.includes(normalizeForMatch(pattern)));
+}
+
+function hasMultipleControlAngles(value: string): boolean {
+  const text = normalizeForMatch(value);
+
+  let count = 0;
+  if (/(qui arbitre|qui valide|qui decide|qui décide)/.test(text)) count += 1;
+  if (/(sur quels criteres|sur quels critères|quel critere|quel critère)/.test(text)) count += 1;
+  if (/(a quelle frequence|à quelle fréquence|rythme|cadence)/.test(text)) count += 1;
+  if (/(formalise|formalisé|formalisee|formalisée|cas par cas)/.test(text)) count += 1;
+  if (/(cause principale|cause racine|qu est-ce qui explique|qu'est-ce qui explique)/.test(text)) count += 1;
+  if (/(risque concret|impact economique|impact économique)/.test(text)) count += 1;
+  if (/(depend|dépend|personne cle|personne clé|relais)/.test(text)) count += 1;
+
+  return count >= 2;
+}
+
+function isQuestionTooComplex(question: string): boolean {
+  const text = normalizeText(question);
+  if (!text) return true;
+  if (wordCount(text) > 28) return true;
+  if (countStructuredEt(text) > 1) return true;
+  if (hasAbstractOverload(text)) return true;
+  if (hasMultipleControlAngles(text)) return true;
+  if ((text.match(/,/g) ?? []).length >= 3) return true;
+  return false;
+}
+
+function buildShortQuestion(params: {
+  theme: string;
+  angle: EntryAngle | null | undefined;
+  iteration: IterationNumber | null | undefined;
+}): string {
+  const { theme, angle, iteration } = params;
+
+  switch (angle) {
+    case "causality":
+      return `Sur "${theme}", quelle est selon vous la cause principale de la difficulté ?`;
+
+    case "arbitration":
+      return iteration === 1
+        ? `Sur "${theme}", qui décide concrètement aujourd'hui ?`
+        : `Sur "${theme}", qui arbitre réellement ce point aujourd'hui ?`;
+
+    case "economics":
+      return `Sur "${theme}", quel impact économique concret voyez-vous aujourd'hui ?`;
+
+    case "formalization":
+      return `Sur "${theme}", est-ce formalisé ou géré au cas par cas ?`;
+
+    case "dependency":
+      return `Sur "${theme}", ce sujet dépend-il encore trop de quelques personnes ?`;
+
+    case "mechanism":
+    default:
+      return iteration === 3
+        ? `Sur "${theme}", quel est aujourd'hui le principal point faible ?`
+        : `Sur "${theme}", comment cela fonctionne-t-il concrètement aujourd'hui ?`;
+  }
+}
+
+function simplifyQuestion(params: {
+  question: string;
+  theme: string;
+  angle: EntryAngle | null | undefined;
+  iteration: IterationNumber | null | undefined;
+  anchor?: string;
+}): string {
+  const { question, theme, angle, iteration, anchor = "" } = params;
+  const text = normalizeText(question);
+
+  if (!text) {
+    return `${buildShortQuestion({ theme, angle, iteration })}${anchor}`;
+  }
+
+  const normalized = normalizeForMatch(text);
+
+  if (
+    normalized.includes("formal") ||
+    normalized.includes("cadre") ||
+    normalized.includes("rituel") ||
+    normalized.includes("cas par cas")
+  ) {
+    return `Sur "${theme}", est-ce formalisé ou géré au cas par cas ?${anchor}`;
+  }
+
+  if (
+    normalized.includes("arbitr") ||
+    normalized.includes("valid") ||
+    normalized.includes("decid") ||
+    normalized.includes("décid")
+  ) {
+    return `Sur "${theme}", qui arbitre réellement ce point aujourd'hui ?${anchor}`;
+  }
+
+  if (
+    normalized.includes("marge") ||
+    normalized.includes("cash") ||
+    normalized.includes("rentabil") ||
+    normalized.includes("cout") ||
+    normalized.includes("coût")
+  ) {
+    return `Sur "${theme}", quel impact économique concret voyez-vous aujourd'hui ?${anchor}`;
+  }
+
+  if (
+    normalized.includes("depend") ||
+    normalized.includes("dépend") ||
+    normalized.includes("personne cle") ||
+    normalized.includes("personne clé") ||
+    normalized.includes("relais")
+  ) {
+    return `Sur "${theme}", ce sujet dépend-il encore trop de quelques personnes ?${anchor}`;
+  }
+
+  if (
+    normalized.includes("cause") ||
+    normalized.includes("explique") ||
+    normalized.includes("produit la difficulte") ||
+    normalized.includes("produit la difficulté")
+  ) {
+    return `Sur "${theme}", quelle est selon vous la cause principale de la difficulté ?${anchor}`;
+  }
+
+  if (
+    iteration === 3 &&
+    (normalized.includes("risque") ||
+      normalized.includes("moins pilote") ||
+      normalized.includes("moins piloté") ||
+      normalized.includes("non suivi"))
+  ) {
+    return `Sur "${theme}", quel est aujourd'hui le principal point faible ?${anchor}`;
+  }
+
+  return `${buildShortQuestion({ theme, angle, iteration })}${anchor}`;
+}
+
+function cleanQuestionStyle(question: string): string {
+  let out = normalizeText(question);
+
+  out = out.replace(/^vous contestez le postulat initial\.?\s*/i, "");
+  out = out.replace(/^reprenons donc\s*/i, "");
+  out = out.replace(/^je reformule simplement\.?\s*/i, "");
+  out = out.replace(/^restons sur\s*/i, "Sur ");
+  out = out.replace(/\s+/g, " ").trim();
+
+  if (!out.endsWith("?")) {
+    out = `${out.replace(/[.]+$/, "")}?`;
+  }
+
+  return out;
+}
+
+function finalizeQuestion(params: {
+  draft: string;
+  theme: string;
+  angle: EntryAngle | null | undefined;
+  iteration: IterationNumber | null | undefined;
+  anchor?: string;
+}): string {
+  const { draft, theme, angle, iteration, anchor = "" } = params;
+
+  let question = cleanQuestionStyle(draft);
+
+  if (isQuestionTooComplex(question)) {
+    question = simplifyQuestion({
+      question,
+      theme,
+      angle,
+      iteration,
+      anchor,
+    });
+  }
+
+  question = cleanQuestionStyle(question);
+
+  if (isQuestionTooComplex(question)) {
+    question = cleanQuestionStyle(
+      `${buildShortQuestion({ theme, angle, iteration })}${anchor}`
+    );
+  }
+
+  return question;
 }
 
 function buildAngleQuestion(params: {
@@ -112,26 +332,27 @@ function buildAngleQuestion(params: {
 
   switch (angle) {
     case "causality":
-      if (iteration === 1) {
-        return `Restons sur "${theme}", mais repartons du bon angle : qu'est-ce qui produit réellement la difficulté aujourd'hui, et qu'est-ce qui l'explique dans le fonctionnement concret ?${anchor}`;
-      }
-      return `Sur "${theme}", si vous remontez à la cause racine, est-ce surtout un sujet de compétences, d'expérience, de décisions prises, d'arbitrages ou d'organisation mal posée ?${anchor}`;
+      return `Sur "${theme}", quelle est selon vous la cause principale de la difficulté ?${anchor}`;
 
     case "arbitration":
-      return `Sur "${theme}", qui arbitre réellement, qui valide, où la décision se bloque-t-elle, et en quoi cette chaîne d'arbitrage entretient-elle la situation actuelle ?${anchor}`;
+      return iteration === 1
+        ? `Sur "${theme}", qui décide concrètement aujourd'hui ?${anchor}`
+        : `Sur "${theme}", qui arbitre réellement ce point aujourd'hui ?${anchor}`;
 
     case "economics":
-      return `Sur "${theme}", quel est l'impact économique réellement subi aujourd'hui : marge, coût réel, cash, rentabilité ou sélectivité d'affaires ? Et comment cet impact se matérialise-t-il ?${anchor}`;
+      return `Sur "${theme}", quel impact économique concret voyez-vous aujourd'hui ?${anchor}`;
 
     case "formalization":
-      return `Sur "${theme}", qu'est-ce qui relève surtout d'un manque de cadre, de rôles clairs, de méthode, de rituel ou de pilotage formalisé ?${anchor}`;
+      return `Sur "${theme}", est-ce formalisé ou géré au cas par cas ?${anchor}`;
 
     case "dependency":
-      return `Sur "${theme}", où se situe la dépendance la plus pénalisante aujourd'hui : une personne clé, un validateur, une ressource rare, un passage obligé ou une zone sans relais ?${anchor}`;
+      return `Sur "${theme}", ce sujet dépend-il encore trop de quelques personnes ?${anchor}`;
 
     case "mechanism":
     default:
-      return `Sur "${theme}", comment le problème se produit-il concrètement dans le fonctionnement réel : à quel moment, avec quels acteurs, selon quel enchaînement, et avec quel effet visible ?${anchor}`;
+      return iteration === 3
+        ? `Sur "${theme}", quel est aujourd'hui le principal point faible ?${anchor}`
+        : `Sur "${theme}", comment cela fonctionne-t-il concrètement aujourd'hui ?${anchor}`;
   }
 }
 
@@ -163,7 +384,7 @@ export async function rewriteQuestionFromAnalysis(params: {
   let fallback = question.questionOuverte;
 
   if (analysis.intent === "clarification_request") {
-    fallback = `Je reformule simplement. Sur "${question.theme}", quel est aujourd'hui le problème concret observé, qui est impliqué, comment cela fonctionne réellement, et qu'est-ce que cela fait courir comme risque managérial ?${anchor}`;
+    fallback = `Sur "${question.theme}", quel est aujourd'hui le problème concret observé ?${anchor}`;
   } else if (analysis.shouldPivotAngle && analysis.suggestedAngle) {
     fallback = buildAngleQuestion({
       theme: question.theme,
@@ -173,17 +394,17 @@ export async function rewriteQuestionFromAnalysis(params: {
     });
   } else if (analysis.intent === "challenge") {
     const fallbackAngle = analysis.suggestedAngle ?? currentAngle ?? "mechanism";
-    fallback = `Vous contestez le postulat initial. Reprenons donc "${question.theme}" sans présupposé : ${buildAngleQuestion({
+    fallback = buildAngleQuestion({
       theme: question.theme,
       angle: fallbackAngle,
       iteration,
-      anchor: "",
-    })}${anchor}`;
+      anchor,
+    });
   } else if (analysis.intent === "noise") {
     if (coverage?.confirmedAngles.includes("mechanism")) {
-      fallback = `Restons sur "${question.theme}". Donnez-moi un exemple précis, récent et observable qui montre où le sujet se dérègle réellement aujourd'hui et ce que cela produit concrètement.${anchor}`;
+      fallback = `Sur "${question.theme}", donnez-moi un exemple concret et récent.${anchor}`;
     } else {
-      fallback = `Restons sur "${question.theme}". Décrivez-moi un cas concret, récent, vécu, qui montre comment le sujet fonctionne réellement aujourd'hui, avec quels acteurs et quel point de friction.${anchor}`;
+      fallback = `Sur "${question.theme}", comment cela se passe-t-il concrètement aujourd'hui ?${anchor}`;
     }
   } else {
     const rewritten = buildRephrasedQuestionFromAnalysis({
@@ -200,7 +421,13 @@ export async function rewriteQuestionFromAnalysis(params: {
   }
 
   if (dimensionId == null || iteration == null) {
-    return fallback;
+    return finalizeQuestion({
+      draft: fallback,
+      theme: question.theme,
+      angle: analysis.suggestedAngle ?? currentAngle,
+      iteration,
+      anchor,
+    });
   }
 
   const normalizedConstat = normalizeForMatch(question.constat);
@@ -233,13 +460,30 @@ export async function rewriteQuestionFromAnalysis(params: {
     theme: question.theme,
     constat: question.constat,
     managerialRisk: question.risqueManagerial,
-    entryAngle: analysis.suggestedAngle ?? currentAngle ?? linkedSignal?.entryAngle ?? "mechanism",
-    trameEvidence: linkedSignal?.sourceExcerpt ?? linkedSignal?.constat ?? question.constat,
+    entryAngle:
+      analysis.suggestedAngle ??
+      currentAngle ??
+      linkedSignal?.entryAngle ??
+      "mechanism",
+    trameEvidence:
+      linkedSignal?.sourceExcerpt ?? linkedSignal?.constat ?? question.constat,
     extractedFacts,
     coveredAngles: coverage?.confirmedAngles ?? [],
     rejectedAngles: coverage?.rejectedAngles ?? [],
     isAbsence,
   });
 
-  return normalizeText(llmQuestion) || fallback;
+  const draft = normalizeText(llmQuestion) || fallback;
+
+  return finalizeQuestion({
+    draft,
+    theme: question.theme,
+    angle:
+      analysis.suggestedAngle ??
+      currentAngle ??
+      linkedSignal?.entryAngle ??
+      "mechanism",
+    iteration,
+    anchor,
+  });
 }
