@@ -43,7 +43,7 @@ export type QuestionIntent =
   | "confirm_strength"
   | "validate_priority";
 
-export type SessionPhase =
+export type EnginePhase =
   | "awaiting_trame"
   | "dimension_iteration"
   | "iteration_validation"
@@ -104,12 +104,10 @@ export interface StructuredQuestion {
 }
 
 export interface DriverAnswer {
-  id: string;
   questionId: string;
   dimensionId: DimensionId;
   iteration: IterationNumber;
   answerText: string;
-  createdAt: string;
 }
 
 export interface QuestionBatch {
@@ -127,15 +125,17 @@ export interface IterationCoverage {
   weakMatterMode: boolean;
 }
 
-export interface SignalRegistry {
-  signals: DiagnosticSignal[];
-  investigationObjects: InvestigationObject[];
+export interface IterationValidationTrace {
+  dimensionId: DimensionId;
+  iteration: IterationNumber;
+  decision: IterationValidationDecision;
+  note?: string;
+  decidedAt: string;
 }
 
 export interface FrozenIterationSummary {
   iteration: IterationNumber;
   questionIds: string[];
-  answerIds: string[];
   exploredObjectIds: string[];
   summary: string;
 }
@@ -162,29 +162,32 @@ export interface ActiveIterationState {
   validationStatus: "in_progress" | "awaiting_validation" | "validated";
 }
 
-export interface IterationValidationTrace {
-  dimensionId: DimensionId;
-  iteration: IterationNumber;
-  decision: IterationValidationDecision;
-  note?: string;
-  decidedAt: string;
+export interface SignalRegistry {
+  signals: DiagnosticSignal[];
+  investigationObjects: InvestigationObject[];
 }
 
 export interface DiagnosticSessionState {
   sessionId: string;
   protocolVersion: string;
-  phase: SessionPhase;
+
+  phase: EnginePhase;
+
   signals: DiagnosticSignal[];
   investigationObjects: InvestigationObject[];
   questions: StructuredQuestion[];
   answers: DriverAnswer[];
   coverage: IterationCoverage[];
+
   currentDimensionId: DimensionId | null;
   currentIteration: IterationNumber | null;
+
   currentBatch: QuestionBatch | null;
   currentIterationState: ActiveIterationState | null;
+
   frozenDimensions: FrozenDimensionSnapshot[];
-  validationTraces: IterationValidationTrace[];
+  validationHistory: IterationValidationTrace[];
+
   createdAt: string;
   updatedAt: string;
 }
@@ -230,96 +233,11 @@ export function buildCanonicalObjectKey(input: {
 export function getBestEvidenceStrength(
   values: EvidenceStrength[]
 ): EvidenceStrength {
-  if (values.includes("strong")) return "strong";
-  if (values.includes("medium")) return "medium";
+  if (values.includes("strong")) {
+    return "strong";
+  }
+  if (values.includes("medium")) {
+    return "medium";
+  }
   return "weak";
-}
-
-export function createEmptySessionState(input: {
-  sessionId: string;
-  protocolVersion: string;
-}): DiagnosticSessionState {
-  const now = new Date().toISOString();
-
-  return {
-    sessionId: input.sessionId,
-    protocolVersion: input.protocolVersion,
-    phase: "awaiting_trame",
-    signals: [],
-    investigationObjects: [],
-    questions: [],
-    answers: [],
-    coverage: [],
-    currentDimensionId: null,
-    currentIteration: null,
-    currentBatch: null,
-    currentIterationState: null,
-    frozenDimensions: [],
-    validationTraces: [],
-    createdAt: now,
-    updatedAt: now,
-  };
-}
-
-export function touchSession(
-  session: DiagnosticSessionState
-): DiagnosticSessionState {
-  return {
-    ...session,
-    updatedAt: new Date().toISOString(),
-  };
-}
-
-export function cloneQuestionBatch(
-  batch: QuestionBatch | null
-): QuestionBatch | null {
-  if (!batch) return null;
-  return {
-    ...batch,
-    questions: [...batch.questions],
-  };
-}
-
-export function cloneActiveIterationState(
-  state: ActiveIterationState | null
-): ActiveIterationState | null {
-  if (!state) return null;
-  return {
-    ...state,
-    selectedObjectIds: [...state.selectedObjectIds],
-    questionBatch: cloneQuestionBatch(state.questionBatch) as QuestionBatch,
-  };
-}
-
-export function cloneSessionState(
-  session: DiagnosticSessionState
-): DiagnosticSessionState {
-  return {
-    ...session,
-    signals: [...session.signals],
-    investigationObjects: [...session.investigationObjects],
-    questions: [...session.questions],
-    answers: [...session.answers],
-    coverage: [...session.coverage],
-    currentBatch: cloneQuestionBatch(session.currentBatch),
-    currentIterationState: cloneActiveIterationState(session.currentIterationState),
-    frozenDimensions: [...session.frozenDimensions],
-    validationTraces: [...session.validationTraces],
-  };
-}
-
-export function answeredQuestionIds(session: DiagnosticSessionState): Set<string> {
-  return new Set(session.answers.map((item) => item.questionId));
-}
-
-export function answersForCurrentIteration(
-  session: DiagnosticSessionState
-): DriverAnswer[] {
-  if (!session.currentDimensionId || !session.currentIteration) return [];
-
-  return session.answers.filter(
-    (item) =>
-      item.dimensionId === session.currentDimensionId &&
-      item.iteration === session.currentIteration
-  );
 }

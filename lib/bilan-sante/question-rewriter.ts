@@ -1,20 +1,27 @@
-import {
-  buildRephrasedQuestionFromAnalysis,
-  type AnswerAnalysis,
-} from "@/lib/bilan-sante/answer-analyzer";
 import type {
-  DiagnosticSessionAggregate,
   DiagnosticSignal,
-  EntryAngle,
+  DiagnosticSessionState,
+  DimensionId,
+  IterationNumber,
+  QuestionIntent,
   StructuredQuestion,
 } from "@/lib/bilan-sante/session-model";
-import {
-  dimensionTitle,
-  type DimensionId,
-  type IterationNumber,
-} from "@/lib/bilan-sante/protocol";
-import { getThemeCoverage } from "@/lib/bilan-sante/coverage-tracker";
-import { composeQuestionWithLlm } from "@/lib/bilan-sante/llm-diagnostic-writer";
+import { getDimensionDefinition } from "@/lib/bilan-sante/protocol";
+
+export type AnswerAnalysisIntent =
+  | "clarification_request"
+  | "challenge"
+  | "noise"
+  | "partial_answer"
+  | "usable_answer";
+
+export interface AnswerAnalysis {
+  intent: AnswerAnalysisIntent;
+  summary?: string;
+  shouldPivotIntent?: boolean;
+  suggestedIntent?: QuestionIntent | null;
+  extractedFacts?: string[];
+}
 
 function normalizeText(value: string | null | undefined): string {
   return String(value ?? "").replace(/\s+/g, " ").trim();
@@ -34,13 +41,6 @@ function shorten(value: string | null | undefined, max = 160): string {
   return `${text.slice(0, max - 1).trim()}…`;
 }
 
-function sameTheme(
-  left: string | null | undefined,
-  right: string | null | undefined
-): boolean {
-  return normalizeForMatch(left) === normalizeForMatch(right);
-}
-
 function uniqueStrings(values: Array<string | null | undefined>, max?: number): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
@@ -58,50 +58,6 @@ function uniqueStrings(values: Array<string | null | undefined>, max?: number): 
   return out;
 }
 
-function allSignals(session: DiagnosticSessionAggregate): DiagnosticSignal[] {
-  const registry = session.signalRegistry;
-  if (!registry) return [];
-  if ("all" in registry && Array.isArray(registry.all)) return registry.all;
-  if ("allSignals" in registry && Array.isArray(registry.allSignals)) return registry.allSignals;
-  return [
-    ...registry.byDimension.d1,
-    ...registry.byDimension.d2,
-    ...registry.byDimension.d3,
-    ...registry.byDimension.d4,
-  ];
-}
-
-function findSignal(
-  session: DiagnosticSessionAggregate,
-  question: StructuredQuestion
-): DiagnosticSignal | undefined {
-  return allSignals(session).find((item) => item.id === question.signalId);
-}
-
-function latestFactAnchor(
-  session: DiagnosticSessionAggregate,
-  dimensionId: DimensionId | null | undefined,
-  theme: string | null | undefined
-): string {
-  const normalizedTheme = normalizeText(theme);
-  if (!normalizedTheme) return "";
-
-  const latest = [...(session.analysisMemory ?? [])]
-    .reverse()
-    .find(
-      (item) =>
-        sameTheme(item.theme, normalizedTheme) &&
-        (dimensionId == null || item.dimensionId === dimensionId) &&
-        item.isUsableBusinessMatter &&
-        (item.extractedFacts?.length ?? 0) > 0
-    );
-
-  const fact = latest?.extractedFacts?.[0];
-  if (!fact) return "";
-
-  return ` Vous avez déjà indiqué par exemple : "${shorten(fact, 110)}".`;
-}
-
 function wordCount(value: string): number {
   return normalizeText(value)
     .split(/\s+/)
@@ -112,174 +68,133 @@ function countStructuredEt(value: string): number {
   return (normalizeText(value).match(/\set\s/gi) ?? []).length;
 }
 
-function hasAbstractOverload(value: string): boolean {
-  const text = normalizeForMatch(value);
-  const bannedPatterns = [
-    "comment decrivez-vous",
-    "comment décrivez-vous",
-    "dans quelle mesure",
-    "a quel moment precis",
-    "à quel moment précis",
-    "mecanisme actuel",
-    "mécanisme actuel",
-    "interactions concretes",
-    "interactions concrètes",
-    "effets en chaine",
-    "effets en chaîne",
-    "coherence globale",
-    "cohérence globale",
-    "articulation",
-    "logique sous-jacente",
-    "selon quel enchainement",
-    "selon quel enchaînement",
-    "avec quel effet visible",
-    "repartons du bon angle",
-  ];
-
-  return bannedPatterns.some((pattern) => text.includes(normalizeForMatch(pattern)));
-}
-
-function hasMultipleControlAngles(value: string): boolean {
-  const text = normalizeForMatch(value);
-
-  let count = 0;
-  if (/(qui arbitre|qui valide|qui decide|qui décide)/.test(text)) count += 1;
-  if (/(sur quels criteres|sur quels critères|quel critere|quel critère)/.test(text)) count += 1;
-  if (/(a quelle frequence|à quelle fréquence|rythme|cadence)/.test(text)) count += 1;
-  if (/(formalise|formalisé|formalisee|formalisée|cas par cas)/.test(text)) count += 1;
-  if (/(cause principale|cause racine|qu est-ce qui explique|qu'est-ce qui explique)/.test(text)) count += 1;
-  if (/(risque concret|impact economique|impact économique)/.test(text)) count += 1;
-  if (/(depend|dépend|personne cle|personne clé|relais)/.test(text)) count += 1;
-
-  return count >= 2;
-}
-
 function isQuestionTooComplex(question: string): boolean {
   const text = normalizeText(question);
   if (!text) return true;
   if (wordCount(text) > 28) return true;
   if (countStructuredEt(text) > 1) return true;
-  if (hasAbstractOverload(text)) return true;
-  if (hasMultipleControlAngles(text)) return true;
   if ((text.match(/,/g) ?? []).length >= 3) return true;
   return false;
 }
 
+function latestFactAnchor(
+  session: DiagnosticSessionState,
+  question: StructuredQuestion
+): string {
+  const signalIds = new Set(question.supportSignalIds ?? []);
+
+  const facts = session.signals
+    .filter((signal) => signalIds.has(signal.id))
+    .map((signal) => signal.factAtomic)
+    .filter(Boolean);
+
+  const firstFact = facts[0];
+  if (!firstFact) return "";
+
+  return ` Vous avez déjà indiqué par exemple : "${shorten(firstFact, 110)}".`;
+}
+
+function findLinkedSignals(
+  session: DiagnosticSessionState,
+  question: StructuredQuestion
+): DiagnosticSignal[] {
+  const signalIds = new Set(question.supportSignalIds ?? []);
+  return session.signals.filter((signal) => signalIds.has(signal.id));
+}
+
 function buildShortQuestion(params: {
-  theme: string;
-  angle: EntryAngle | null | undefined;
+  objectLabel: string;
+  intent: QuestionIntent;
   iteration: IterationNumber | null | undefined;
 }): string {
-  const { theme, angle, iteration } = params;
+  const { objectLabel, intent, iteration } = params;
 
-  switch (angle) {
-    case "causality":
-      return `Sur "${theme}", quelle est selon vous la cause principale de la difficulté ?`;
+  switch (intent) {
+    case "open_core":
+      return `Sur ${objectLabel}, comment cela se passe-t-il concrètement aujourd'hui ?`;
 
-    case "arbitration":
-      return iteration === 1
-        ? `Sur "${theme}", qui décide concrètement aujourd'hui ?`
-        : `Sur "${theme}", qui arbitre réellement ce point aujourd'hui ?`;
+    case "clarify_mechanism":
+      return `Sur ${objectLabel}, par quel mécanisme la situation se produit-elle réellement ?`;
 
-    case "economics":
-      return `Sur "${theme}", quel impact économique concret voyez-vous aujourd'hui ?`;
+    case "identify_threshold":
+      return `Sur ${objectLabel}, à partir de quel seuil ou de quelle situation cela se tend-il réellement ?`;
 
-    case "formalization":
-      return `Sur "${theme}", est-ce formalisé ou géré au cas par cas ?`;
+    case "test_formalization":
+      return `Sur ${objectLabel}, qu'est-ce qui est formalisé et qu'est-ce qui repose encore surtout sur les usages ?`;
 
-    case "dependency":
-      return `Sur "${theme}", ce sujet dépend-il encore trop de quelques personnes ?`;
+    case "identify_dependency":
+      return `Sur ${objectLabel}, de qui ou de quoi dépend-on le plus pour que cela tienne ?`;
 
-    case "mechanism":
-    default:
+    case "test_anticipation":
+      return `Sur ${objectLabel}, comment ce point est-il anticipé en amont lorsqu'il commence à dériver ?`;
+
+    case "confirm_strength":
+      return `Sur ${objectLabel}, qu'est-ce qui fonctionne bien de manière réellement fiable ?`;
+
+    case "validate_priority":
       return iteration === 3
-        ? `Sur "${theme}", quel est aujourd'hui le principal point faible ?`
-        : `Sur "${theme}", comment cela fonctionne-t-il concrètement aujourd'hui ?`;
+        ? `Sur ${objectLabel}, quel est aujourd'hui le principal point à sécuriser en priorité ?`
+        : `Sur ${objectLabel}, quel est aujourd'hui le point prioritaire à traiter ?`;
+
+    default:
+      return `Pouvez-vous préciser concrètement ce point : ${objectLabel} ?`;
   }
 }
 
 function simplifyQuestion(params: {
   question: string;
-  theme: string;
-  angle: EntryAngle | null | undefined;
+  objectLabel: string;
+  intent: QuestionIntent;
   iteration: IterationNumber | null | undefined;
   anchor?: string;
 }): string {
-  const { question, theme, angle, iteration, anchor = "" } = params;
-  const text = normalizeText(question);
-
-  if (!text) {
-    return `${buildShortQuestion({ theme, angle, iteration })}${anchor}`;
-  }
-
-  const normalized = normalizeForMatch(text);
+  const { question, objectLabel, intent, iteration, anchor = "" } = params;
+  const text = normalizeForMatch(question);
 
   if (
-    normalized.includes("formal") ||
-    normalized.includes("cadre") ||
-    normalized.includes("rituel") ||
-    normalized.includes("cas par cas")
+    text.includes("formal") ||
+    text.includes("cadre") ||
+    text.includes("rituel") ||
+    text.includes("cas par cas")
   ) {
-    return `Sur "${theme}", est-ce formalisé ou géré au cas par cas ?${anchor}`;
+    return `Sur ${objectLabel}, qu'est-ce qui est formalisé et qu'est-ce qui repose encore surtout sur les usages ?${anchor}`;
   }
 
   if (
-    normalized.includes("arbitr") ||
-    normalized.includes("valid") ||
-    normalized.includes("decid") ||
-    normalized.includes("décid")
+    text.includes("depend") ||
+    text.includes("dépend") ||
+    text.includes("personne cle") ||
+    text.includes("personne clé") ||
+    text.includes("relais")
   ) {
-    return `Sur "${theme}", qui arbitre réellement ce point aujourd'hui ?${anchor}`;
+    return `Sur ${objectLabel}, de qui ou de quoi dépend-on le plus pour que cela tienne ?${anchor}`;
   }
 
   if (
-    normalized.includes("marge") ||
-    normalized.includes("cash") ||
-    normalized.includes("rentabil") ||
-    normalized.includes("cout") ||
-    normalized.includes("coût")
+    text.includes("seuil") ||
+    text.includes("a partir de quand") ||
+    text.includes("à partir de quand") ||
+    text.includes("bascule")
   ) {
-    return `Sur "${theme}", quel impact économique concret voyez-vous aujourd'hui ?${anchor}`;
+    return `Sur ${objectLabel}, à partir de quel seuil ou de quelle situation cela se tend-il réellement ?${anchor}`;
   }
 
   if (
-    normalized.includes("depend") ||
-    normalized.includes("dépend") ||
-    normalized.includes("personne cle") ||
-    normalized.includes("personne clé") ||
-    normalized.includes("relais")
+    text.includes("anticip") ||
+    text.includes("amont") ||
+    text.includes("avant que")
   ) {
-    return `Sur "${theme}", ce sujet dépend-il encore trop de quelques personnes ?${anchor}`;
+    return `Sur ${objectLabel}, comment ce point est-il anticipé en amont lorsqu'il commence à dériver ?${anchor}`;
   }
 
-  if (
-    normalized.includes("cause") ||
-    normalized.includes("explique") ||
-    normalized.includes("produit la difficulte") ||
-    normalized.includes("produit la difficulté")
-  ) {
-    return `Sur "${theme}", quelle est selon vous la cause principale de la difficulté ?${anchor}`;
-  }
-
-  if (
-    iteration === 3 &&
-    (normalized.includes("risque") ||
-      normalized.includes("moins pilote") ||
-      normalized.includes("moins piloté") ||
-      normalized.includes("non suivi"))
-  ) {
-    return `Sur "${theme}", quel est aujourd'hui le principal point faible ?${anchor}`;
-  }
-
-  return `${buildShortQuestion({ theme, angle, iteration })}${anchor}`;
+  return `${buildShortQuestion({ objectLabel, intent, iteration })}${anchor}`;
 }
 
 function cleanQuestionStyle(question: string): string {
   let out = normalizeText(question);
 
-  out = out.replace(/^vous contestez le postulat initial\.?\s*/i, "");
-  out = out.replace(/^reprenons donc\s*/i, "");
   out = out.replace(/^je reformule simplement\.?\s*/i, "");
+  out = out.replace(/^reprenons\s*/i, "");
   out = out.replace(/^restons sur\s*/i, "Sur ");
   out = out.replace(/\s+/g, " ").trim();
 
@@ -292,20 +207,20 @@ function cleanQuestionStyle(question: string): string {
 
 function finalizeQuestion(params: {
   draft: string;
-  theme: string;
-  angle: EntryAngle | null | undefined;
+  objectLabel: string;
+  intent: QuestionIntent;
   iteration: IterationNumber | null | undefined;
   anchor?: string;
 }): string {
-  const { draft, theme, angle, iteration, anchor = "" } = params;
+  const { draft, objectLabel, intent, iteration, anchor = "" } = params;
 
   let question = cleanQuestionStyle(draft);
 
   if (isQuestionTooComplex(question)) {
     question = simplifyQuestion({
       question,
-      theme,
-      angle,
+      objectLabel,
+      intent,
       iteration,
       anchor,
     });
@@ -315,175 +230,128 @@ function finalizeQuestion(params: {
 
   if (isQuestionTooComplex(question)) {
     question = cleanQuestionStyle(
-      `${buildShortQuestion({ theme, angle, iteration })}${anchor}`
+      `${buildShortQuestion({ objectLabel, intent, iteration })}${anchor}`
     );
   }
 
   return question;
 }
 
-function buildAngleQuestion(params: {
-  theme: string;
-  angle: EntryAngle;
-  iteration: IterationNumber | null | undefined;
-  anchor: string;
-}): string {
-  const { theme, angle, iteration, anchor } = params;
-
-  switch (angle) {
-    case "causality":
-      return `Sur "${theme}", quelle est selon vous la cause principale de la difficulté ?${anchor}`;
-
-    case "arbitration":
-      return iteration === 1
-        ? `Sur "${theme}", qui décide concrètement aujourd'hui ?${anchor}`
-        : `Sur "${theme}", qui arbitre réellement ce point aujourd'hui ?${anchor}`;
-
-    case "economics":
-      return `Sur "${theme}", quel impact économique concret voyez-vous aujourd'hui ?${anchor}`;
-
-    case "formalization":
-      return `Sur "${theme}", est-ce formalisé ou géré au cas par cas ?${anchor}`;
-
-    case "dependency":
-      return `Sur "${theme}", ce sujet dépend-il encore trop de quelques personnes ?${anchor}`;
-
-    case "mechanism":
-    default:
-      return iteration === 3
-        ? `Sur "${theme}", quel est aujourd'hui le principal point faible ?${anchor}`
-        : `Sur "${theme}", comment cela fonctionne-t-il concrètement aujourd'hui ?${anchor}`;
+function chooseIntent(params: {
+  question: StructuredQuestion;
+  analysis: AnswerAnalysis;
+}): QuestionIntent {
+  if (params.analysis.shouldPivotIntent && params.analysis.suggestedIntent) {
+    return params.analysis.suggestedIntent;
   }
+
+  if (params.analysis.intent === "clarification_request") {
+    return "open_core";
+  }
+
+  if (params.analysis.intent === "challenge") {
+    return params.analysis.suggestedIntent ?? "clarify_mechanism";
+  }
+
+  if (params.analysis.intent === "noise") {
+    return "open_core";
+  }
+
+  return params.question.questionIntent;
+}
+
+function buildFallbackQuestion(params: {
+  session: DiagnosticSessionState;
+  question: StructuredQuestion;
+  analysis: AnswerAnalysis;
+  dimensionId: DimensionId | null | undefined;
+  iteration: IterationNumber | null | undefined;
+}): string {
+  const { session, question, analysis, iteration } = params;
+  const objectLabel = question.objectLabel;
+  const nextIntent = chooseIntent({ question, analysis });
+  const anchor = latestFactAnchor(session, question);
+
+  if (analysis.intent === "clarification_request") {
+    return `Sur ${objectLabel}, quel est aujourd'hui le problème concret observé ?${anchor}`;
+  }
+
+  if (analysis.intent === "noise") {
+    return `Sur ${objectLabel}, donnez-moi un exemple concret et récent.${anchor}`;
+  }
+
+  if (analysis.intent === "challenge") {
+    return `${buildShortQuestion({
+      objectLabel,
+      intent: nextIntent,
+      iteration,
+    })}${anchor}`;
+  }
+
+  const extractedFacts = uniqueStrings(
+    [...(analysis.extractedFacts ?? []), analysis.summary],
+    3
+  );
+
+  if (extractedFacts.length > 0) {
+    return `Sur ${objectLabel}, en repartant de "${shorten(
+      extractedFacts[0],
+      90
+    )}", pouvez-vous préciser concrètement ce point ?${anchor}`;
+  }
+
+  return `${buildShortQuestion({
+    objectLabel,
+    intent: nextIntent,
+    iteration,
+  })}${anchor}`;
 }
 
 export async function rewriteQuestionFromAnalysis(params: {
-  session: DiagnosticSessionAggregate;
+  session: DiagnosticSessionState;
   question: StructuredQuestion;
   rawMessage: string;
   analysis: AnswerAnalysis;
   dimensionId: DimensionId | null | undefined;
   iteration: IterationNumber | null | undefined;
-  currentAngle: EntryAngle | null;
 }): Promise<string> {
-  const {
-    session,
-    question,
-    analysis,
-    dimensionId,
-    iteration,
-    currentAngle,
-  } = params;
+  const { session, question, analysis, dimensionId, iteration } = params;
 
-  const anchor = latestFactAnchor(session, dimensionId, question.theme);
-  const coverage =
-    dimensionId != null
-      ? getThemeCoverage(session, dimensionId, question.theme)
-      : null;
-  const linkedSignal = findSignal(session, question);
+  const dimensionLabel =
+    dimensionId != null ? getDimensionDefinition(dimensionId).label : "";
 
-  let fallback = question.questionOuverte;
-
-  if (analysis.intent === "clarification_request") {
-    fallback = `Sur "${question.theme}", quel est aujourd'hui le problème concret observé ?${anchor}`;
-  } else if (analysis.shouldPivotAngle && analysis.suggestedAngle) {
-    fallback = buildAngleQuestion({
-      theme: question.theme,
-      angle: analysis.suggestedAngle,
-      iteration,
-      anchor,
-    });
-  } else if (analysis.intent === "challenge") {
-    const fallbackAngle = analysis.suggestedAngle ?? currentAngle ?? "mechanism";
-    fallback = buildAngleQuestion({
-      theme: question.theme,
-      angle: fallbackAngle,
-      iteration,
-      anchor,
-    });
-  } else if (analysis.intent === "noise") {
-    if (coverage?.confirmedAngles.includes("mechanism")) {
-      fallback = `Sur "${question.theme}", donnez-moi un exemple concret et récent.${anchor}`;
-    } else {
-      fallback = `Sur "${question.theme}", comment cela se passe-t-il concrètement aujourd'hui ?${anchor}`;
-    }
-  } else {
-    const rewritten = buildRephrasedQuestionFromAnalysis({
-      analysis,
-      currentQuestion: {
-        theme: question.theme,
-        constat: question.constat,
-        questionOuverte: question.questionOuverte,
-        entryAngle: analysis.suggestedAngle ?? currentAngle,
-      },
-    });
-
-    fallback = normalizeText(rewritten) || question.questionOuverte;
-  }
-
-  if (dimensionId == null || iteration == null) {
-    return finalizeQuestion({
-      draft: fallback,
-      theme: question.theme,
-      angle: analysis.suggestedAngle ?? currentAngle,
-      iteration,
-      anchor,
-    });
-  }
-
-  const normalizedConstat = normalizeForMatch(question.constat);
-  const isAbsence =
-    normalizedConstat.includes("no_evidence") ||
-    normalizedConstat.includes("no evidence") ||
-    normalizedConstat.includes("insuffisamment etaye") ||
-    normalizedConstat.includes("insuffisamment étaye") ||
-    normalizedConstat.includes("non documente") ||
-    normalizedConstat.includes("non documenté");
-
-  const extractedFacts = uniqueStrings(
+  const linkedSignals = findLinkedSignals(session, question);
+  const linkedFacts = uniqueStrings(
     [
-      ...(session.analysisMemory ?? [])
-        .filter(
-          (item) =>
-            sameTheme(item.theme, question.theme) &&
-            item.isUsableBusinessMatter
-        )
-        .flatMap((item) => item.extractedFacts ?? []),
+      ...linkedSignals.map((signal) => signal.factAtomic),
+      ...(analysis.extractedFacts ?? []),
       analysis.summary,
     ],
     4
   );
 
-  const llmQuestion = await composeQuestionWithLlm({
+  let draft = buildFallbackQuestion({
+    session,
+    question,
+    analysis,
     dimensionId,
-    dimensionTitle: dimensionTitle(dimensionId),
     iteration,
-    theme: question.theme,
-    constat: question.constat,
-    managerialRisk: question.risqueManagerial,
-    entryAngle:
-      analysis.suggestedAngle ??
-      currentAngle ??
-      linkedSignal?.entryAngle ??
-      "mechanism",
-    trameEvidence:
-      linkedSignal?.sourceExcerpt ?? linkedSignal?.constat ?? question.constat,
-    extractedFacts,
-    coveredAngles: coverage?.confirmedAngles ?? [],
-    rejectedAngles: coverage?.rejectedAngles ?? [],
-    isAbsence,
   });
 
-  const draft = normalizeText(llmQuestion) || fallback;
+  if (
+    analysis.intent === "usable_answer" &&
+    linkedFacts.length > 0
+  ) {
+    draft = `Sur ${question.objectLabel}, à partir de ce que vous venez de préciser${
+      dimensionLabel ? ` pour la dimension ${dimensionLabel}` : ""
+    }, quel est maintenant le point le plus important à comprendre concrètement ?`;
+  }
 
   return finalizeQuestion({
     draft,
-    theme: question.theme,
-    angle:
-      analysis.suggestedAngle ??
-      currentAngle ??
-      linkedSignal?.entryAngle ??
-      "mechanism",
+    objectLabel: question.objectLabel,
+    intent: chooseIntent({ question, analysis }),
     iteration,
-    anchor,
+    anchor: latestFactAnchor(session, question),
   });
 }
