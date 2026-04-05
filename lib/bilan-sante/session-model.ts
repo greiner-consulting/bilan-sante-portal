@@ -1,550 +1,325 @@
-import type { DimensionId, IterationNumber } from "@/lib/bilan-sante/protocol";
+export type DimensionId =
+  | "organisation"
+  | "commerce"
+  | "production"
+  | "financier";
 
-export type SignalKind = "explicit" | "absence";
-export type SignalSourceType = "trame" | "user_answer" | "derived";
+export type IterationNumber = 1 | 2 | 3;
 
-export type EntryAngle =
-  | "causality"
-  | "arbitration"
-  | "economics"
-  | "formalization"
+export type EvidenceStrength = "strong" | "medium" | "weak";
+
+export type SignalOrigin = "trame" | "dirigeant_memory";
+
+export type FactType =
+  | "current_state"
+  | "difficulty"
+  | "tension"
   | "dependency"
-  | "mechanism";
+  | "capacity"
+  | "threshold"
+  | "future_need"
+  | "commercial_gap"
+  | "organizational_point"
+  | "unstructured_practice"
+  | "positive_point"
+  | "clarification"
+  | "arbitration"
+  | "trigger"
+  | "lack_of_formalization";
 
-export type DimensionFactNature =
-  | "fact"
-  | "verbatim"
-  | "signal"
-  | "risk"
-  | "strength"
-  | "weakness"
-  | "opportunity"
-  | "threat"
-  | "objective"
-  | "hypothesis"
-  | "cause"
-  | "gap"
-  | "impact"
-  | "practice"
-  | "other";
-
-export type InputIntent =
-  | "answer"
-  | "clarification_request"
-  | "challenge"
-  | "validation_yes"
-  | "validation_no"
-  | "objective_feedback"
-  | "unknown"
-  | "off_topic_or_noise"
-  | "iteration_validation_yes"
-  | "iteration_validation_no"
-  | "question_challenge"
-  | "business_answer";
+export type InvestigationObjectStatus =
+  | "new"
+  | "in_progress"
+  | "sufficiently_explored"
+  | "closed";
 
 export type QuestionIntent =
-  | "exploration"
-  | "causality"
-  | "impact"
-  | "clarification"
-  | "reframing"
-  | "challenge"
-  | "describe_mechanism"
-  | "locate_bottleneck"
+  | "open_core"
+  | "clarify_mechanism"
+  | "identify_threshold"
+  | "test_formalization"
   | "identify_dependency"
-  | "identify_missing_rule"
-  | "identify_missing_metric"
-  | "clarify_cause"
-  | "clarify_arbitration"
-  | "test_formalization";
-
-export interface QualityFlag {
-  severity: "info" | "warning" | "error";
-  level?: "info" | "warning" | "error";
-  message: string;
-  code?: string;
-}
-
-export interface BaseTrameSection {
-  id: string;
-  heading: string;
-  content: string;
-  title?: string;
-  sectionNumber?: string;
-  qualityFlags?: QualityFlag[];
-  missingFields?: MissingFieldHint[];
-}
-
-export interface MissingFieldHint {
-  dimensionId: DimensionId;
-  label: string;
-  sourceText: string;
-  field?: string;
-  severity?: "low" | "medium" | "high";
-  message?: string;
-}
-
-export type TrameSection = BaseTrameSection;
-export type MissingFieldSignal = MissingFieldHint;
-
-export interface BaseTrameSnapshot {
-  sections: BaseTrameSection[];
-  missingFields: MissingFieldHint[];
-  rawText?: string;
-  extractedAt?: string;
-  qualityFlags: QualityFlag[];
-  dimensionBlueprints?: Array<{
-    dimensionId: DimensionId;
-    label: string;
-    detectedSectionIds: string[];
-    detectedHeadings: string[];
-    isPresent: boolean;
-    expressedThemes: string[];
-    inferredThemes: string[];
-    selectedThemes: string[];
-    weakSignalThemes: string[];
-  }>;
-  structureValidation?: {
-    isValid: boolean;
-    missingDimensionIds: DimensionId[];
-    missingDimensionLabels: string[];
-    message: string;
-  };
-}
-
-export type BaseTrame = BaseTrameSnapshot;
-
-export interface DiagnosticSignal {
-  id: string;
-  dimensionId: DimensionId;
-  theme: string;
-  signalKind: SignalKind;
-  sourceType: SignalSourceType;
-  sourceSection: string | null;
-  sourceSectionId?: string | null;
-  sourceExcerpt: string;
-  constat: string;
-  managerialRisk: string;
-  probableConsequence: string;
-  entryAngle: EntryAngle;
-  confidenceScore: number;
-  criticalityScore: number;
-}
-
-export interface SignalRegistry {
-  all: DiagnosticSignal[];
-  allSignals: DiagnosticSignal[];
-  byDimension: {
-    d1: DiagnosticSignal[];
-    d2: DiagnosticSignal[];
-    d3: DiagnosticSignal[];
-    d4: DiagnosticSignal[];
-  };
-}
-
-export interface StructuredQuestion {
-  id: string;
-  signalId: string;
-  theme: string;
-  constat: string;
-  risqueManagerial: string;
-  questionOuverte: string;
-}
-
-export interface AnswerRecord {
-  questionId: string;
-  answerText: string;
-  answeredAt: string;
-}
-
-export type PlanningDiagnostic = {
-  signalId: string;
-  theme: string;
-  entryAngle: EntryAngle;
-  score: number;
-  rationale: string[];
-};
-
-export type WorksetPlanningDiagnostics = {
-  generatedAt: string;
-  strategy: string;
-  selectedQuestionIds: string[];
-  candidateDiagnostics: PlanningDiagnostic[];
-  notes: string[];
-};
-
-export type WorksetClosureDiagnostics = {
-  decidedAt?: string;
-  qualityStop: boolean;
-  remainingLowValue: boolean;
-  uncoveredMandatoryAngles: EntryAngle[];
-  highValueRemainderQuestionIds: string[];
-  reasonCodes: string[];
-  notes: string[];
-};
-
-export interface IterationWorkset {
-  dimensionId: DimensionId;
-  iteration: IterationNumber;
-  header: string;
-  questions: StructuredQuestion[];
-  answers: AnswerRecord[];
-  closurePrompt: string;
-  closureAskedAt?: string;
-  targetQuestionCount: number;
-  minimumRequiredCount: number;
-  sourceIterationQuestionCount?: number | null;
-  planningDiagnostics?: WorksetPlanningDiagnostics | null;
-  closureDiagnostics?: WorksetClosureDiagnostics | null;
-}
-
-export interface DimensionFact {
-  id: string;
-  theme: string;
-  nature: DimensionFactNature;
-  statement: string;
-  evidence?: string;
-  confidence?: number;
-  confidenceScore?: number;
-  priorityScore?: number;
-  sourceQuestionId?: string | null;
-  sourceSignalId?: string | null;
-  sources?: string[];
-  supportingFactIds?: string[];
-  tags?: string[];
-  quadrant?: "strength" | "weakness" | "opportunity" | "threat";
-  label?: string;
-  detail?: string;
-  rationale?: string;
-}
-
-export interface RootCauseHypothesis {
-  id?: string;
-  label: string;
-  rationale: string;
-  confidence?: number;
-  confidenceScore?: number;
-  evidence?: string[];
-  supportingFactIds?: string[];
-  opposingFactIds?: string[];
-}
-
-export interface SwotItem {
-  id?: string;
-  quadrant?: "strength" | "weakness" | "opportunity" | "threat";
-  label: string;
-  detail?: string;
-  rationale?: string;
-  evidence?: string;
-  confidence?: number;
-  confidenceScore?: number;
-  supportingFactIds?: string[];
-  priorityScore?: number;
-}
-
-export interface SwotSnapshot {
-  strengths: SwotItem[];
-  weaknesses: SwotItem[];
-  opportunities: SwotItem[];
-  threats: SwotItem[];
-}
-
-export interface ObjectiveSeed {
-  id?: string;
-  label: string;
-  rationale?: string;
-  ownerHint?: string;
-  indicatorHint?: string;
-  priority?: "high" | "medium" | "low";
-  dueDateHint?: string;
-  indicator?: string;
-  suggestedDueDate?: string;
-  potentialGain?: string;
-  quickWin?: string;
-  linkedFactIds?: string[];
-  priorityScore?: number;
-
-  // lot 4
-  objectiveFamily?: string;
-  knowledgeActionIds?: string[];
-  knowledgeIndicatorIds?: string[];
-  quantificationNotes?: string[];
-}
-
-export interface ZoneNonPilotee {
-  constat: string;
-  risqueManagerial: string;
-  consequence: string;
-}
-
-export interface DimensionAnalysisSnapshot {
-  dimensionId: DimensionId;
-  score?: 1 | 2 | 3 | 4 | 5;
-  summary: string;
-  facts: DimensionFact[];
-  rootCauseHypotheses: RootCauseHypothesis[];
-  swot: SwotSnapshot;
-  objectiveSeeds: ObjectiveSeed[];
-  evidenceSummary?: string[];
-  keyFindings?: string[];
-  nonPilotedAreas?: ZoneNonPilotee[];
-  generatedAt?: string;
-}
-
-export interface FrozenDimensionDiagnosis {
-  dimensionId: DimensionId;
-  score: 1 | 2 | 3 | 4 | 5;
-  consolidatedFindings: [string, string, string];
-  dominantRootCause: string;
-  unmanagedZones: ZoneNonPilotee[];
-  frozenAt: string;
-  exploredThemes?: string[];
-  exploredSignalIds?: string[];
-  analysisSnapshot?: DimensionAnalysisSnapshot;
-  summary?: string;
-  evidenceSummary?: string[];
-  facts?: DimensionFact[];
-  rootCauseHypotheses?: RootCauseHypothesis[];
-  swot?: SwotSnapshot;
-  objectiveSeeds?: ObjectiveSeed[];
-  keyFindings?: string[];
-  nonPilotedAreas?: ZoneNonPilotee[];
-  keyFactIds?: string[];
-}
-
-export type FinalObjectiveProposalSource =
-  | "initial_seed"
-  | "alternative_seed"
-  | "adjusted_feedback"
-  | "fallback";
-
-export interface FinalObjectiveDecisionTrace {
-  at: string;
-  status: "validated" | "adjusted" | "refused";
-  previousLabel: string;
-  nextLabel: string;
-  previousSourceSeedId?: string | null;
-  nextSourceSeedId?: string | null;
-}
-
-export interface FinalObjective {
-  id: string;
-  dimensionId: DimensionId;
-  objectiveLabel: string;
-  owner: string;
-  keyIndicator: string;
-  dueDate: string;
-  potentialGain: string;
-  gainHypotheses: string[];
-  validationStatus: "proposed" | "validated" | "adjusted" | "refused";
-  quickWin: string;
-  proposalRevision?: number;
-  sourceSeedId?: string | null;
-  proposalSource?: FinalObjectiveProposalSource;
-  decisionHistory?: FinalObjectiveDecisionTrace[];
-}
-
-export interface FinalObjectiveSet {
-  header: string;
-  objectives: FinalObjective[];
-  decisionsCapturedAt?: string;
-}
+  | "test_anticipation"
+  | "confirm_strength"
+  | "validate_priority";
 
 export type SessionPhase =
   | "awaiting_trame"
   | "dimension_iteration"
   | "iteration_validation"
-  | "final_objectives_validation"
-  | "report_ready"
-  | "completed";
+  | "final_review"
+  | "report_ready";
 
-export type MemoryIntent =
-  | "business_answer"
-  | "reframing"
-  | "clarification_request"
-  | "challenge"
-  | "mixed"
-  | "noise";
+export type IterationValidationDecision = "validate" | "reopen";
 
-export type MemoryAction =
-  | "store_answer"
-  | "store_and_pivot"
-  | "rephrase_question"
-  | "ask_for_examples"
-  | "challenge_same_topic";
+export interface SourceReference {
+  sectionId: string;
+  sectionTitle?: string;
+  excerptExact: string;
+}
 
-export type MemoryRootCauseCategory =
-  | "skills"
-  | "experience"
-  | "decision"
-  | "arbitration"
-  | "organization"
-  | "resources"
-  | "pricing"
-  | "commercial"
-  | "execution"
-  | "quality"
-  | "cash";
-
-export type MemoryInsight = {
+export interface DiagnosticSignal {
   id: string;
-  createdAt: string;
-  dimensionId: DimensionId | null;
-  iteration: IterationNumber | null;
-  questionId: string | null;
-  signalId: string | null;
-  theme: string | null;
-  intent: MemoryIntent;
-  action: MemoryAction;
-  confidence: number;
-  summary: string;
-  rationale: string;
-  rawMessage: string;
-  extractedFacts: string[];
-  detectedRootCauses: MemoryRootCauseCategory[];
-  reframingSignals: string[];
-  contradictionSignals: string[];
-  suggestedAngle: EntryAngle | null;
-  shouldStoreAsAnswer: boolean;
-  shouldRephraseQuestion: boolean;
-  shouldPivotAngle: boolean;
-  isUsableBusinessMatter: boolean;
-};
+  dimensionId: DimensionId;
+  sourceOrigin: SignalOrigin;
+  linkedTurnId?: string;
+  source: SourceReference;
+  factAtomic: string;
+  factType: FactType;
+  themeCandidates: string[];
+  objectCandidate: string;
+  evidenceStrength: EvidenceStrength;
+  tags?: string[];
+}
 
-export interface IterationHistoryRecord {
+export interface DriverMemorySignal extends DiagnosticSignal {
+  sourceOrigin: "dirigeant_memory";
+  linkedTurnId: string;
+}
+
+export interface InvestigationObject {
+  id: string;
+  dimensionId: DimensionId;
+  label: string;
+  canonicalKey: string;
+  supportingSignalIds: string[];
+  supportSummary: string;
+  evidenceStrength: EvidenceStrength;
+  status: InvestigationObjectStatus;
+  coveredInIterations: IterationNumber[];
+  explorationAxes: string[];
+}
+
+export interface StructuredQuestion {
+  id: string;
   dimensionId: DimensionId;
   iteration: IterationNumber;
-  questionCount: number;
-  answeredCount: number;
-  closedAt?: string;
+  objectId: string;
+  objectLabel: string;
+  supportSignalIds: string[];
+  supportFacts: string[];
+  questionIntent: QuestionIntent;
+  questionText: string;
+  askedBecause: string;
 }
 
-export type ThemeCoverageStatus = "open" | "saturated" | "closed";
-
-export type ThemeCoverageMarkStatus = "asked" | "confirmed" | "rejected";
-
-export type ThemeCoverageMark = {
-  angle: EntryAngle;
-  iteration: IterationNumber | null;
-  questionId: string | null;
-  status: ThemeCoverageMarkStatus;
-};
-
-export type ThemeCoverageRecord = {
+export interface DriverAnswer {
   id: string;
+  questionId: string;
   dimensionId: DimensionId;
-  theme: string;
-  askedAngles: EntryAngle[];
-  confirmedAngles: EntryAngle[];
-  rejectedAngles: EntryAngle[];
-  askedQuestionIds: string[];
-  confirmedQuestionIds: string[];
-  lastQuestionId: string | null;
-  lastQuestionText: string | null;
-  lastIteration: IterationNumber | null;
-  factDensity: number;
-  closureStatus: ThemeCoverageStatus;
-  angleHistory: ThemeCoverageMark[];
-  notes: string[];
-  updatedAt: string;
-};
-
-export type ConversationTurnRole = "assistant" | "user" | "question" | "system";
-
-export type ConversationTurn = {
-  id: string;
+  iteration: IterationNumber;
+  answerText: string;
   createdAt: string;
-  role: ConversationTurnRole;
-  text: string;
-  kind?: string | null;
-  phase?: SessionPhase | null;
-  dimensionId?: DimensionId | null;
-  iteration?: IterationNumber | null;
-  questionId?: string | null;
-  signalId?: string | null;
-  theme?: string | null;
-  ordinal?: number | null;
-  total?: number | null;
-};
+}
 
-export interface DiagnosticSessionAggregate {
+export interface QuestionBatch {
+  dimensionId: DimensionId;
+  iteration: IterationNumber;
+  questions: StructuredQuestion[];
+}
+
+export interface IterationCoverage {
+  dimensionId: DimensionId;
+  iteration: IterationNumber;
+  targetCount: number;
+  minimumCount: number;
+  actualCount: number;
+  weakMatterMode: boolean;
+}
+
+export interface SignalRegistry {
+  signals: DiagnosticSignal[];
+  investigationObjects: InvestigationObject[];
+}
+
+export interface FrozenIterationSummary {
+  iteration: IterationNumber;
+  questionIds: string[];
+  answerIds: string[];
+  exploredObjectIds: string[];
+  summary: string;
+}
+
+export interface FrozenDimensionSnapshot {
+  dimensionId: DimensionId;
+  frozenAt: string;
+  iterationSummaries: FrozenIterationSummary[];
+  salientSignalIds: string[];
+  retainedObjectIds: string[];
+  keyFindings: string[];
+  nonPilotedAreas: string[];
+  driverValidationNote?: string;
+}
+
+export interface ActiveIterationState {
+  dimensionId: DimensionId;
+  iteration: IterationNumber;
+  selectedObjectIds: string[];
+  questionBatch: QuestionBatch;
+  openedAt: string;
+  closureRequestedAt?: string;
+  validatedAt?: string;
+  validationStatus: "in_progress" | "awaiting_validation" | "validated";
+}
+
+export interface IterationValidationTrace {
+  dimensionId: DimensionId;
+  iteration: IterationNumber;
+  decision: IterationValidationDecision;
+  note?: string;
+  decidedAt: string;
+}
+
+export interface DiagnosticSessionState {
   sessionId: string;
+  protocolVersion: string;
   phase: SessionPhase;
-  trame: BaseTrameSnapshot | null;
-  signalRegistry: SignalRegistry | null;
+  signals: DiagnosticSignal[];
+  investigationObjects: InvestigationObject[];
+  questions: StructuredQuestion[];
+  answers: DriverAnswer[];
+  coverage: IterationCoverage[];
   currentDimensionId: DimensionId | null;
   currentIteration: IterationNumber | null;
-  currentWorkset: IterationWorkset | null;
-  frozenDimensions: FrozenDimensionDiagnosis[];
-  finalObjectives: FinalObjectiveSet | null;
+  currentBatch: QuestionBatch | null;
+  currentIterationState: ActiveIterationState | null;
+  frozenDimensions: FrozenDimensionSnapshot[];
+  validationTraces: IterationValidationTrace[];
   createdAt: string;
   updatedAt: string;
-  analysisMemory?: MemoryInsight[];
-  iterationHistory?: IterationHistoryRecord[];
-  themeCoverage?: ThemeCoverageRecord[];
-  conversationHistory?: ConversationTurn[];
 }
 
-function deepClone<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T;
+export function isDriverMemorySignal(
+  signal: DiagnosticSignal
+): signal is DriverMemorySignal {
+  return (
+    signal.sourceOrigin === "dirigeant_memory" &&
+    typeof signal.linkedTurnId === "string" &&
+    signal.linkedTurnId.length > 0
+  );
 }
 
-export function createEmptySessionAggregate(
-  sessionId: string
-): DiagnosticSessionAggregate {
+export function buildSourceReference(input: {
+  sectionId: string;
+  sectionTitle?: string;
+  excerptExact: string;
+}): SourceReference {
+  return {
+    sectionId: input.sectionId,
+    sectionTitle: input.sectionTitle,
+    excerptExact: input.excerptExact.trim(),
+  };
+}
+
+export function normalizeFreeText(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+export function buildCanonicalObjectKey(input: {
+  dimensionId: DimensionId;
+  objectCandidate: string;
+}): string {
+  return `${input.dimensionId}::${normalizeFreeText(input.objectCandidate)}`;
+}
+
+export function getBestEvidenceStrength(
+  values: EvidenceStrength[]
+): EvidenceStrength {
+  if (values.includes("strong")) return "strong";
+  if (values.includes("medium")) return "medium";
+  return "weak";
+}
+
+export function createEmptySessionState(input: {
+  sessionId: string;
+  protocolVersion: string;
+}): DiagnosticSessionState {
   const now = new Date().toISOString();
 
   return {
-    sessionId,
+    sessionId: input.sessionId,
+    protocolVersion: input.protocolVersion,
     phase: "awaiting_trame",
-    trame: null,
-    signalRegistry: null,
+    signals: [],
+    investigationObjects: [],
+    questions: [],
+    answers: [],
+    coverage: [],
     currentDimensionId: null,
     currentIteration: null,
-    currentWorkset: null,
+    currentBatch: null,
+    currentIterationState: null,
     frozenDimensions: [],
-    finalObjectives: null,
+    validationTraces: [],
     createdAt: now,
     updatedAt: now,
-    analysisMemory: [],
-    iterationHistory: [],
-    themeCoverage: [],
-    conversationHistory: [],
   };
 }
 
 export function touchSession(
-  session: DiagnosticSessionAggregate
-): DiagnosticSessionAggregate {
+  session: DiagnosticSessionState
+): DiagnosticSessionState {
   return {
     ...session,
     updatedAt: new Date().toISOString(),
-    analysisMemory: session.analysisMemory ?? [],
-    iterationHistory: session.iterationHistory ?? [],
-    themeCoverage: session.themeCoverage ?? [],
-    conversationHistory: session.conversationHistory ?? [],
   };
 }
 
-export function cloneRegistry(registry: SignalRegistry): SignalRegistry {
-  return deepClone(registry);
+export function cloneQuestionBatch(
+  batch: QuestionBatch | null
+): QuestionBatch | null {
+  if (!batch) return null;
+  return {
+    ...batch,
+    questions: [...batch.questions],
+  };
 }
 
-export function cloneWorkset(
-  workset: IterationWorkset | null
-): IterationWorkset | null {
-  if (!workset) return null;
-  return deepClone(workset);
+export function cloneActiveIterationState(
+  state: ActiveIterationState | null
+): ActiveIterationState | null {
+  if (!state) return null;
+  return {
+    ...state,
+    selectedObjectIds: [...state.selectedObjectIds],
+    questionBatch: cloneQuestionBatch(state.questionBatch) as QuestionBatch,
+  };
 }
 
-export function answeredQuestionIds(
-  workset: IterationWorkset | null | undefined
-): Set<string> {
-  if (!workset) return new Set<string>();
-  return new Set(workset.answers.map((answer) => answer.questionId));
+export function cloneSessionState(
+  session: DiagnosticSessionState
+): DiagnosticSessionState {
+  return {
+    ...session,
+    signals: [...session.signals],
+    investigationObjects: [...session.investigationObjects],
+    questions: [...session.questions],
+    answers: [...session.answers],
+    coverage: [...session.coverage],
+    currentBatch: cloneQuestionBatch(session.currentBatch),
+    currentIterationState: cloneActiveIterationState(session.currentIterationState),
+    frozenDimensions: [...session.frozenDimensions],
+    validationTraces: [...session.validationTraces],
+  };
 }
 
-export function isWorksetFullyAnswered(workset: IterationWorkset): boolean {
-  const answeredIds = answeredQuestionIds(workset);
-  return workset.questions.every((question) => answeredIds.has(question.id));
+export function answeredQuestionIds(session: DiagnosticSessionState): Set<string> {
+  return new Set(session.answers.map((item) => item.questionId));
+}
+
+export function answersForCurrentIteration(
+  session: DiagnosticSessionState
+): DriverAnswer[] {
+  if (!session.currentDimensionId || !session.currentIteration) return [];
+
+  return session.answers.filter(
+    (item) =>
+      item.dimensionId === session.currentDimensionId &&
+      item.iteration === session.currentIteration
+  );
 }

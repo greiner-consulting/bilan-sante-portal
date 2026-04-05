@@ -486,16 +486,6 @@ function findAllPositions(haystack: string, needle: string): number[] {
   return positions;
 }
 
-function humanizeList(values: string[]): string {
-  const items = uniqueStrings(values).slice(0, 3);
-
-  if (items.length === 0) return "des éléments de la trame à préciser";
-  if (items.length === 1) return `"${items[0]}"`;
-  if (items.length === 2) return `"${items[0]}" et "${items[1]}"`;
-
-  return `"${items[0]}", "${items[1]}" et "${items[2]}"`;
-}
-
 function makeSignalId(
   dimensionId: DimensionId,
   theme: string,
@@ -737,7 +727,6 @@ function pickEntryAngle(
     [theme, sectionHeading, excerpt, ...matchedKeywords].join(" | ")
   );
 
-  // Simple hint faible, pas angle métier fort
   if (looksLikeGrowthStaffingCase(text)) {
     if (looksLikeAdvanceStructureCase(text) || looksLikeEconomicJustificationCase(text)) {
       return "economics";
@@ -769,55 +758,99 @@ function buildExplicitConstat(params: {
   sectionHeading: string;
   matchedKeywords: string[];
   headingHitCount: number;
+  excerpt?: string;
 }): string {
-  const { theme, sectionHeading, matchedKeywords, headingHitCount } = params;
-  const support = humanizeList(matchedKeywords);
+  const excerpt = String(params.excerpt ?? "").replace(/\s+/g, " ").trim();
+  const heading = String(params.sectionHeading ?? "").replace(/\s+/g, " ").trim();
 
-  if (headingHitCount > 0) {
-    return `La trame traite explicitement le thème "${theme}" dans la section "${sectionHeading}", avec un appui textuel sur ${support}.`;
+  if (excerpt.length > 0) {
+    if (excerpt.length <= 180) {
+      return excerpt;
+    }
+    return `${excerpt.slice(0, 177).trim()}...`;
   }
 
-  if (matchedKeywords.length > 0) {
-    return `Le meilleur support trouvé pour le thème "${theme}" se situe dans la section "${sectionHeading}", avec une matière reliée à ${support}.`;
+  if (heading.length > 0) {
+    return `Point mentionné dans la section "${heading}".`;
   }
 
-  return `La section "${sectionHeading}" constitue le meilleur appui disponible pour instruire le thème "${theme}".`;
+  return `Point mentionné dans la trame sur le thème "${params.theme}".`;
 }
 
-function buildMinimalRisk(
-  theme: string,
-  isAbsence: boolean
-): string {
+function buildMinimalRisk(theme: string, isAbsence: boolean): string {
+  const lower = normalizeText(theme);
+
   if (isAbsence) {
-    return `Le thème "${theme}" apparaît insuffisamment documenté ou objectivé dans la trame.`;
+    return `Le thème "${theme}" reste peu documenté dans la trame et doit être vérifié avant conclusion.`;
   }
 
-  return `La matière disponible sur le thème "${theme}" invite à clarifier ce sujet avant d'en tirer une conclusion plus structurée.`;
+  if (
+    lower.includes("prix") ||
+    lower.includes("chiffrage") ||
+    lower.includes("marge") ||
+    lower.includes("cash") ||
+    lower.includes("resultat")
+  ) {
+    return `Point économique à clarifier avant d'apprécier le niveau réel de maîtrise sur "${theme}".`;
+  }
+
+  if (
+    lower.includes("equipe") ||
+    lower.includes("roles") ||
+    lower.includes("role") ||
+    lower.includes("recrutement") ||
+    lower.includes("charge") ||
+    lower.includes("capacite")
+  ) {
+    return `Point d'organisation ou de dimensionnement à clarifier sur "${theme}".`;
+  }
+
+  if (
+    lower.includes("commercial") ||
+    lower.includes("croissance") ||
+    lower.includes("funnel") ||
+    lower.includes("transformation")
+  ) {
+    return `Point commercial à clarifier avant d'en mesurer la robustesse réelle sur "${theme}".`;
+  }
+
+  return `Point à clarifier ou à sécuriser selon la réalité de fonctionnement sur "${theme}".`;
 }
 
-function buildProbableConsequence(theme: string): string {
-  const lower = theme.toLowerCase();
+function buildProbableConsequence(theme: string, isAbsence = false): string {
+  const lower = normalizeText(theme);
+
+  if (isAbsence) {
+    return "En l'état, la trame ne permet pas d'apprécier clairement ce point.";
+  }
 
   if (lower.includes("prix") || lower.includes("chiffrage")) {
     return "Point à vérifier sur les effets possibles sur la marge ou la rentabilité.";
   }
 
-  if (lower.includes("commercial") || lower.includes("croissance")) {
+  if (
+    lower.includes("commercial") ||
+    lower.includes("croissance") ||
+    lower.includes("funnel")
+  ) {
     return "Point à vérifier sur la capacité à soutenir une croissance réellement maîtrisée.";
   }
 
   if (
     lower.includes("cash") ||
     lower.includes("marge") ||
-    lower.includes("résultat")
+    lower.includes("resultat")
   ) {
     return "Point à vérifier sur les effets possibles sur la visibilité économique.";
   }
 
   if (
-    lower.includes("rôle") ||
-    lower.includes("équipe") ||
-    lower.includes("recrutement")
+    lower.includes("role") ||
+    lower.includes("roles") ||
+    lower.includes("equipe") ||
+    lower.includes("recrutement") ||
+    lower.includes("charge") ||
+    lower.includes("capacite")
   ) {
     return "Point à vérifier sur la solidité de l'organisation ou du dimensionnement.";
   }
@@ -841,31 +874,33 @@ function scoreCriticality(
   isAbsence: boolean,
   entryAngle?: DiagnosticSignal["entryAngle"]
 ): number {
-  const lower = theme.toLowerCase();
+  const lower = normalizeText(theme);
 
-  let base = 72;
+  let base = isAbsence ? 52 : 72;
 
-  if (isAbsence) base = 78;
   if (
     lower.includes("cash") ||
     lower.includes("marge") ||
-    lower.includes("prix")
+    lower.includes("prix") ||
+    lower.includes("chiffrage")
   ) {
-    base = 90;
+    base = isAbsence ? 58 : 86;
   }
+
   if (
-    lower.includes("rôle") ||
-    lower.includes("équipe") ||
-    lower.includes("sécurité")
+    lower.includes("role") ||
+    lower.includes("roles") ||
+    lower.includes("equipe") ||
+    lower.includes("securite")
   ) {
-    base = 84;
+    base = isAbsence ? 56 : 80;
   }
 
   if (!isAbsence && (entryAngle === "economics" || entryAngle === "causality")) {
-    base += 4;
+    base += 2;
   }
 
-  return clamp(base, 60, 94);
+  return clamp(base, 45, 92);
 }
 
 function overlapCount(tokens: string[], tokenSet: Set<string>): number {
@@ -951,6 +986,7 @@ function buildThemeCandidate(params: {
     sectionHeading: indexedSection.heading,
     matchedKeywords,
     headingHitCount,
+    excerpt,
   });
 
   return {
@@ -1112,7 +1148,7 @@ function buildExplicitSignalsDeterministic(snapshot: BaseTrameSnapshot): Diagnos
           sourceExcerpt: selected.excerpt || "",
           constat: selected.constat,
           managerialRisk: buildMinimalRisk(bucket.theme, false),
-          probableConsequence: buildProbableConsequence(bucket.theme),
+          probableConsequence: buildProbableConsequence(bucket.theme, false),
           entryAngle: selected.entryAngle,
           confidenceScore: scoreConfidenceFromCandidate(selected),
           criticalityScore: scoreCriticality(bucket.theme, false, selected.entryAngle),
@@ -1231,12 +1267,12 @@ function buildAbsenceSignals(
         sourceExcerpt: sourceExcerpt || "",
         constat,
         managerialRisk: buildMinimalRisk(theme, true),
-        probableConsequence: buildProbableConsequence(theme),
+        probableConsequence: buildProbableConsequence(theme, true),
         entryAngle: "formalization",
         confidenceScore: clamp(
-          llmMissing?.confidenceScore ?? (missingFieldHit ? 82 : 78),
-          55,
-          92
+          llmMissing?.confidenceScore ?? (missingFieldHit ? 58 : 52),
+          45,
+          72
         ),
         criticalityScore: scoreCriticality(theme, true),
       });
@@ -1540,11 +1576,14 @@ function buildExplicitSignalsFromLlm(params: {
         sourceExcerpt: normalizeExtractionText(selected.sourceExcerpt),
         constat:
           normalizeExtractionText(selected.constat) ||
-          `La trame fournit un appui exploitable sur le thème "${selected.theme}".`,
-        managerialRisk: buildMinimalRisk(selected.theme, false),
+          normalizeExtractionText(selected.sourceExcerpt) ||
+          `Point mentionné dans la trame sur le thème "${selected.theme}".`,
+        managerialRisk:
+          normalizeExtractionText(selected.managerialRisk) ||
+          buildMinimalRisk(selected.theme, false),
         probableConsequence:
           normalizeExtractionText(selected.probableConsequence) ||
-          buildProbableConsequence(selected.theme),
+          buildProbableConsequence(selected.theme, false),
         entryAngle: selected.entryAngle,
         confidenceScore: clamp(Math.max(selected.confidenceScore, 50), 50, 95),
         criticalityScore: clamp(Math.max(selected.criticalityScore, 60), 60, 95),

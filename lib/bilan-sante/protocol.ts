@@ -1,183 +1,213 @@
-export type DimensionId = 1 | 2 | 3 | 4;
-export type IterationNumber = 1 | 2 | 3;
-export type ValidationDecision = "yes" | "no";
-export type DimensionKey = "d1" | "d2" | "d3" | "d4";
+import type {
+  DimensionId,
+  IterationCoverage,
+  IterationNumber,
+} from "./session-model";
 
-export type DiagnosticDimensionDefinition = {
+export interface IterationRule {
+  iteration: IterationNumber;
+  targetCount: number;
+  minimumCount: number;
+}
+
+export interface DimensionDefinition {
   id: DimensionId;
-  key: DimensionKey;
-  title: string;
-  shortTitle: string;
+  label: string;
+  description: string;
   requiredThemes: string[];
-};
+}
 
-export const FINAL_OBJECTIVES_HEADER =
-  "Itération finale — validation dirigeant (objectifs & gains)";
+export interface DiagnosticProtocol {
+  version: string;
+  dimensions: DimensionDefinition[];
+  nominalIterationRules: IterationRule[];
+  weakMatterIterationRules: IterationRule[];
+  constraints: {
+    iterationsPerDimension: 3;
+    forbidUnsupportedQuestion: boolean;
+    forbidSemanticDuplicatesWithinIteration: boolean;
+    requireSourceTraceability: boolean;
+    prioritizeStrongMatterInIteration1: boolean;
+    useDriverMemoryForIterations2And3: boolean;
+    preservePdfCompatibility: boolean;
+  };
+}
 
-export const DIAGNOSTIC_DIMENSIONS: DiagnosticDimensionDefinition[] = [
+export const DIAGNOSTIC_DIMENSIONS: DimensionDefinition[] = [
   {
-    id: 1,
-    key: "d1",
-    title: "Organisation & Ressources Humaines",
-    shortTitle: "Organisation & RH",
+    id: "organisation",
+    label: "Organisation",
+    description:
+      "Organisation, roles, encadrement, coordination, postes cles et capacite de fonctionnement collectif.",
     requiredThemes: [
-      "qualité et adéquation des équipes",
+      "qualite et adequation des equipes",
       "ressources vs charge",
-      "turnover absentéisme stabilité",
-      "recrutement et intégration",
-      "clarté des rôles",
+      "recrutement et integration",
+      "clarte des roles",
+      "stabilite des equipes",
     ],
   },
   {
-    id: 2,
-    key: "d2",
-    title: "Commercial & Marchés",
-    shortTitle: "Commercial & Marchés",
+    id: "commerce",
+    label: "Commerce",
+    description:
+      "Positionnement, deploiement commercial, ciblage, transformation, dependances relationnelles et logique de croissance.",
     requiredThemes: [
-      "stratégie commerciale",
-      "portage managérial et déploiement réel",
-      "indicateurs funnel / taux de succès",
-      "capacité à générer une croissance rentable",
+      "strategie commerciale",
+      "deploiement commercial reel",
+      "pipeline et transformation",
+      "croissance rentable",
     ],
   },
   {
-    id: 3,
-    key: "d3",
-    title: "Cycle de vente, offres & prix",
-    shortTitle: "Cycle de vente & Prix",
+    id: "production",
+    label: "Production",
+    description:
+      "Execution, adequation des ressources, capacite, productivite, qualite de realisation et anticipation operationnelle.",
     requiredThemes: [
-      "construction du prix et hypothèses",
-      "délégation et arbitrage",
-      "fiabilité du chiffrage",
-      "taux de succès et critères",
-      "maîtrise des écarts prix vendu / coût réel",
+      "construction du prix et hypotheses",
+      "delegation et arbitrage",
+      "fiabilite du chiffrage",
+      "maitrise des ecarts",
     ],
   },
   {
-    id: 4,
-    key: "d4",
-    title: "Exécution & Performance opérationnelle",
-    shortTitle: "Exécution & Performance opérationnelle",
+    id: "financier",
+    label: "Financier",
+    description:
+      "Performance economique, rentabilite, structure des marges, tensions de pilotage et soutenabilite.",
     requiredThemes: [
-      "sécurité qualité performance économique",
-      "indicateurs et rituels managériaux",
-      "productivité et gestion des effectifs",
-      "pilotage cash résultat marges",
+      "indicateurs et rituels manageriaux",
+      "pilotage cash resultat marges",
+      "productivite et gestion des effectifs",
+      "performance economique",
     ],
   },
 ];
 
-export function getDimensionDefinition(
-  dimensionId: DimensionId
-): DiagnosticDimensionDefinition {
-  const found = DIAGNOSTIC_DIMENSIONS.find((d) => d.id === dimensionId);
+export const NOMINAL_ITERATION_RULES: IterationRule[] = [
+  { iteration: 1, targetCount: 5, minimumCount: 5 },
+  { iteration: 2, targetCount: 5, minimumCount: 5 },
+  { iteration: 3, targetCount: 4, minimumCount: 4 },
+];
 
-  if (!found) {
-    throw new Error(`Unknown dimension id: ${dimensionId}`);
+export const WEAK_MATTER_ITERATION_RULES: IterationRule[] = [
+  { iteration: 1, targetCount: 4, minimumCount: 4 },
+  { iteration: 2, targetCount: 4, minimumCount: 4 },
+  { iteration: 3, targetCount: 3, minimumCount: 3 },
+];
+
+export const DIAGNOSTIC_PROTOCOL: DiagnosticProtocol = {
+  version: "2.0.0",
+  dimensions: DIAGNOSTIC_DIMENSIONS,
+  nominalIterationRules: NOMINAL_ITERATION_RULES,
+  weakMatterIterationRules: WEAK_MATTER_ITERATION_RULES,
+  constraints: {
+    iterationsPerDimension: 3,
+    forbidUnsupportedQuestion: true,
+    forbidSemanticDuplicatesWithinIteration: true,
+    requireSourceTraceability: true,
+    prioritizeStrongMatterInIteration1: true,
+    useDriverMemoryForIterations2And3: true,
+    preservePdfCompatibility: true,
+  },
+};
+
+export function getIterationRule(
+  iteration: IterationNumber,
+  weakMatterMode: boolean
+): IterationRule {
+  const rules = weakMatterMode
+    ? DIAGNOSTIC_PROTOCOL.weakMatterIterationRules
+    : DIAGNOSTIC_PROTOCOL.nominalIterationRules;
+
+  const rule = rules.find((item) => item.iteration === iteration);
+
+  if (!rule) {
+    throw new Error(`No iteration rule found for iteration ${iteration}`);
   }
 
-  return found;
+  return rule;
 }
 
-export function dimensionKey(dimensionId: DimensionId): DimensionKey {
-  return getDimensionDefinition(dimensionId).key;
+export function buildIterationCoverage(input: {
+  dimensionId: DimensionId;
+  iteration: IterationNumber;
+  actualCount: number;
+  weakMatterMode: boolean;
+}): IterationCoverage {
+  const rule = getIterationRule(input.iteration, input.weakMatterMode);
+
+  return {
+    dimensionId: input.dimensionId,
+    iteration: input.iteration,
+    targetCount: rule.targetCount,
+    minimumCount: rule.minimumCount,
+    actualCount: input.actualCount,
+    weakMatterMode: input.weakMatterMode,
+  };
 }
 
-export function dimensionTitle(dimensionId: DimensionId): string {
-  return getDimensionDefinition(dimensionId).shortTitle;
+export function isCoverageSufficient(coverage: IterationCoverage): boolean {
+  return coverage.actualCount >= coverage.minimumCount;
+}
+
+export function getDimensionDefinition(
+  dimensionId: DimensionId
+): DimensionDefinition {
+  const dimension = DIAGNOSTIC_PROTOCOL.dimensions.find(
+    (item) => item.id === dimensionId
+  );
+
+  if (!dimension) {
+    throw new Error(`Unknown dimension: ${dimensionId}`);
+  }
+
+  return dimension;
+}
+
+export function orderedDimensionIds(): DimensionId[] {
+  return DIAGNOSTIC_PROTOCOL.dimensions.map((item) => item.id);
+}
+
+export function nextDimensionId(
+  current: DimensionId
+): DimensionId | null {
+  const ordered = orderedDimensionIds();
+  const index = ordered.indexOf(current);
+  if (index < 0 || index >= ordered.length - 1) return null;
+  return ordered[index + 1];
+}
+
+export function nextIterationNumber(
+  current: IterationNumber
+): IterationNumber | null {
+  if (current === 1) return 2;
+  if (current === 2) return 3;
+  return null;
+}
+
+export function isLastIteration(iteration: IterationNumber): boolean {
+  return iteration === 3;
+}
+
+export function isLastDimension(dimensionId: DimensionId): boolean {
+  const ordered = orderedDimensionIds();
+  return ordered[ordered.length - 1] === dimensionId;
 }
 
 export function buildIterationHeader(
   dimensionId: DimensionId,
   iteration: IterationNumber
 ): string {
-  return `Dimension ${dimensionId} — Itération ${iteration}/3 — ${dimensionTitle(
-    dimensionId
-  )}`;
+  const dimension = getDimensionDefinition(dimensionId);
+  return `${dimension.label} - Iteration ${iteration}/3`;
 }
 
 export function buildIterationClosurePrompt(
   dimensionId: DimensionId,
   iteration: IterationNumber
 ): string {
-  const scope = `Clôturez-vous l’itération ${iteration}/3 de la dimension ${dimensionId} (${dimensionTitle(
-    dimensionId
-  )}) sur la base des réponses enregistrées ?`;
-
-  return `${scope} Merci de répondre uniquement par "oui" ou "non".`;
-}
-
-/**
- * Nouveau cadre cible : 5 / 5 / 4.
- * On réduit la pression de remplissage en fin d’itération,
- * sans remettre en cause les 3 itérations obligatoires.
- */
-export function maxQuestionsForIteration(
-  iteration: IterationNumber
-): number {
-  switch (iteration) {
-    case 1:
-      return 5;
-    case 2:
-      return 5;
-    case 3:
-      return 4;
-    default:
-      return 5;
-  }
-}
-
-/**
- * Plancher qualitatif : on accepte une fermeture anticipée seulement
- * si le reliquat est faible ET si le moteur a déjà produit suffisamment
- * de matière exploitable. Le plancher reste légèrement inférieur au cap.
- */
-export function minimumFloorForIteration(
-  iteration: IterationNumber
-): number {
-  switch (iteration) {
-    case 1:
-      return 4;
-    case 2:
-      return 4;
-    case 3:
-      return 3;
-    default:
-      return 4;
-  }
-}
-
-export function minQuestionsForIteration(
-  iteration: IterationNumber
-): number {
-  return minimumFloorForIteration(iteration);
-}
-
-export function isLastIteration(
-  iteration: IterationNumber
-): boolean {
-  return iteration === 3;
-}
-
-export function nextIterationNumber(
-  iteration: IterationNumber
-): IterationNumber | null {
-  if (iteration === 1) return 2;
-  if (iteration === 2) return 3;
-  return null;
-}
-
-export function isLastDimension(
-  dimensionId: DimensionId
-): boolean {
-  return dimensionId === 4;
-}
-
-export function nextDimensionId(
-  dimensionId: DimensionId
-): DimensionId | null {
-  if (dimensionId === 1) return 2;
-  if (dimensionId === 2) return 3;
-  if (dimensionId === 3) return 4;
-  return null;
+  const dimension = getDimensionDefinition(dimensionId);
+  return `Merci de confirmer la cloture de l'iteration ${iteration} pour la dimension ${dimension.label}. Repondez par une validation ou une demande de reouverture motivee.`;
 }
