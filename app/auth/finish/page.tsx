@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { createClient } from "@supabase/supabase-js";
 
@@ -42,7 +42,7 @@ function buildCanonicalCallbackUrl(next: string, searchParams: URLSearchParams):
   return url.toString();
 }
 
-export default function AuthFinishPage() {
+function AuthFinishPageClient() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [step, setStep] = useState<Step>("redirecting");
@@ -113,9 +113,7 @@ export default function AuthFinishPage() {
         const syncData = await syncRes.json().catch(() => null);
 
         if (!syncRes.ok || !syncData?.ok) {
-          throw new Error(
-            syncData?.error || "Impossible de finaliser votre accès client."
-          );
+          throw new Error(syncData?.error || "Impossible de finaliser votre accès client.");
         }
 
         if (!syncData.isAdmin && !syncData.hasEntitlement) {
@@ -130,9 +128,7 @@ export default function AuthFinishPage() {
       } catch (error: any) {
         if (!cancelled) {
           setStep("error");
-          setErrorMessage(
-            error?.message || "Impossible de finaliser la connexion."
-          );
+          setErrorMessage(error?.message || "Impossible de finaliser la connexion.");
         }
       }
     }
@@ -180,5 +176,28 @@ export default function AuthFinishPage() {
         )}
       </div>
     </main>
+  );
+}
+
+export default function AuthFinishPage() {
+  return (
+    <Suspense
+      fallback={
+        <main className="min-h-screen bg-slate-50 px-6 py-10">
+          <div className="mx-auto max-w-2xl rounded-3xl border bg-white p-10 shadow-sm">
+            <div className="space-y-4">
+              <h1 className="text-2xl font-semibold text-slate-900">
+                Finalisation de la connexion
+              </h1>
+              <p className="text-sm leading-6 text-slate-700">
+                Redirection en cours...
+              </p>
+            </div>
+          </div>
+        </main>
+      }
+    >
+      <AuthFinishPageClient />
+    </Suspense>
   );
 }
