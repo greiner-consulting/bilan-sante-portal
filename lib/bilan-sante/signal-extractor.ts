@@ -694,24 +694,126 @@ function pickEntryAngle(
   return "mechanism";
 }
 
+function inferConstatFromExcerpt(params: {
+  theme: string;
+  excerpt: string;
+  matchedKeywords: string[];
+}): string {
+  const theme = params.theme;
+  const text = normalizeText(
+    [params.excerpt, ...params.matchedKeywords].join(" | ")
+  );
+
+  const hasGrowthProjection =
+    text.includes("croissance") ||
+    text.includes("montee en charge") ||
+    text.includes("montée en charge") ||
+    text.includes("si la croissance") ||
+    text.includes("aura besoin") ||
+    text.includes("aurons besoin") ||
+    text.includes("besoin de recruter") ||
+    text.includes("si on gagne") ||
+    text.includes("si nous gagnons");
+
+  const hasRecruitmentTension =
+    text.includes("recrut") ||
+    text.includes("embauche") ||
+    text.includes("integration") ||
+    text.includes("intégration") ||
+    text.includes("apprentissage") ||
+    text.includes("montee en competence") ||
+    text.includes("montée en compétence");
+
+  const hasLoadTension =
+    text.includes("charge") ||
+    text.includes("ressource") ||
+    text.includes("capacite") ||
+    text.includes("capacité") ||
+    text.includes("planning") ||
+    text.includes("surcharge") ||
+    text.includes("disponibilite") ||
+    text.includes("disponibilité");
+
+  const hasRoleTension =
+    text.includes("role") ||
+    text.includes("rôle") ||
+    text.includes("responsabilite") ||
+    text.includes("responsabilité") ||
+    text.includes("delegation") ||
+    text.includes("délégation") ||
+    text.includes("qui decide") ||
+    text.includes("qui décide");
+
+  const hasFragilitySignal =
+    text.includes("peu") ||
+    text.includes("manque") ||
+    text.includes("difficile") ||
+    text.includes("fragile") ||
+    text.includes("pas suffisamment") ||
+    text.includes("insuffisant") ||
+    text.includes("insuffisante") ||
+    text.includes("tension");
+
+  if (theme === "qualité et adéquation des équipes") {
+    if (hasGrowthProjection || hasRecruitmentTension) {
+      return `Les équipes paraissent adaptées au niveau d’activité actuel, mais la capacité à suivre une montée en charge ou à recruter au bon niveau n’est pas encore sécurisée.`;
+    }
+    if (hasFragilitySignal) {
+      return `L’adéquation actuelle des équipes repose sur un équilibre encore fragile en cas d’évolution de l’activité ou des besoins.`;
+    }
+    return `Le niveau actuel des équipes semble tenir l’activité présente, sans visibilité encore solide sur leur capacité à absorber une évolution du besoin.`;
+  }
+
+  if (theme === "ressources vs charge") {
+    if (hasLoadTension) {
+      return `L’ajustement entre charge et ressources existe, mais il semble reposer sur des arbitrages rapprochés plus que sur un pilotage stabilisé.`;
+    }
+    return `La capacité à ajuster durablement les ressources à la charge reste encore peu objectivée.`;
+  }
+
+  if (theme === "recrutement et intégration") {
+    if (hasRecruitmentTension || hasGrowthProjection) {
+      return `Le recrutement et l’intégration apparaissent comme un point sensible dès qu’il faut renforcer rapidement les équipes ou préparer une montée en charge.`;
+    }
+    return `Le processus de recrutement et d’intégration n’apparaît pas encore suffisamment robuste pour sécuriser les besoins futurs.`;
+  }
+
+  if (theme === "clarté des rôles") {
+    if (hasRoleTension) {
+      return `La répartition des rôles semble fonctionner au quotidien, mais certains arbitrages ou zones de responsabilité restent potentiellement sensibles.`;
+    }
+    return `La clarté réelle des rôles et des responsabilités n’est pas encore suffisamment objectivée dans le fonctionnement décrit.`;
+  }
+
+  if (theme === "turnover absentéisme stabilité") {
+    return `La stabilité de fonctionnement peut être fragilisée dès que surviennent des absences, des départs ou des tensions de disponibilité.`;
+  }
+
+  if (hasGrowthProjection) {
+    return `Le fonctionnement actuel semble tenir, mais sa robustesse n’est pas démontrée en cas d’accélération de l’activité ou de changement d’échelle.`;
+  }
+
+  if (hasFragilitySignal) {
+    return `Le fonctionnement décrit sur "${theme}" repose sur des équilibres encore fragiles ou peu sécurisés.`;
+  }
+
+  return `Le fonctionnement réel sur "${theme}" n’est pas encore assez objectivé pour apprécier sa robustesse dans la durée.`;
+}
+
 function buildExplicitConstat(params: {
   theme: string;
   sectionHeading: string;
   matchedKeywords: string[];
   headingHitCount: number;
+  excerpt?: string;
 }): string {
-  const { theme, sectionHeading, matchedKeywords, headingHitCount } = params;
-  const support = humanizeList(matchedKeywords);
+  const { theme, excerpt, matchedKeywords } = params;
 
-  if (headingHitCount > 0) {
-    return `La trame traite explicitement le thème "${theme}" dans la section "${sectionHeading}", avec un appui textuel sur ${support}.`;
-  }
-
-  if (matchedKeywords.length > 0) {
-    return `Le meilleur support trouvé pour le thème "${theme}" se situe dans la section "${sectionHeading}", avec une matière reliée à ${support}.`;
-  }
-
-  return `La section "${sectionHeading}" constitue le meilleur appui disponible pour instruire le thème "${theme}".`;
+  return inferConstatFromExcerpt({
+    theme,
+    excerpt: excerpt ?? "",
+    matchedKeywords,
+  });
 }
 
 function buildManagerialRisk(
@@ -719,23 +821,42 @@ function buildManagerialRisk(
   isAbsence: boolean,
   entryAngle?: DiagnosticSignal["entryAngle"]
 ): string {
+  const t = theme.toLowerCase();
+
   if (isAbsence) {
-    return `Le thème "${theme}" apparaît insuffisamment objectivé ou non suivi, ce qui expose l’entreprise à un pilotage managérial insuffisamment fondé.`;
+    return `Vous pilotez aujourd’hui le sujet "${theme}" sans base réellement objectivée, ce qui signifie que vos décisions reposent davantage sur des ajustements empiriques que sur des repères fiables, avec un risque direct de dérive non anticipée.`;
   }
 
   switch (entryAngle) {
     case "causality":
-      return `Le signal rattaché au thème "${theme}" suggère une cause racine non traitée ou insuffisamment nommée dans le pilotage.`;
+      return `La situation sur "${theme}" semble aujourd’hui produite par des mécanismes que vous ne maîtrisez pas complètement, ce qui signifie que vous corrigez les effets sans traiter la cause réelle, avec un risque de reproduction continue des mêmes déséquilibres.`;
+
     case "arbitration":
-      return `Le signal rattaché au thème "${theme}" suggère une chaîne d’arbitrage ou de décision insuffisamment clarifiée.`;
+      return `Les décisions liées à "${theme}" reposent sur une chaîne d’arbitrage qui n’est pas clairement structurée, ce qui vous expose à des choix tardifs, incohérents ou dépendants de personnes clés, avec un impact direct sur la qualité d’exécution.`;
+
     case "dependency":
-      return `Le signal rattaché au thème "${theme}" suggère une dépendance excessive à des personnes, relais ou séquences critiques.`;
+      return `Le fonctionnement sur "${theme}" dépend fortement de quelques personnes ou points de passage clés, ce qui crée une fragilité structurelle : à la moindre indisponibilité ou surcharge, l’ensemble du système peut se désorganiser.`;
+
     case "economics":
-      return `Le signal rattaché au thème "${theme}" suggère des décisions insuffisamment reliées à l’impact économique réel.`;
+      return `Les décisions prises sur "${theme}" ne semblent pas suffisamment reliées à leur impact économique réel, ce qui vous expose à des écarts non maîtrisés entre ce que vous pensez gagner et ce que vous produisez effectivement.`;
+
     case "formalization":
-      return `Le signal rattaché au thème "${theme}" suggère un cadre de pilotage ou des pratiques insuffisamment formalisés.`;
+      return `Le sujet "${theme}" repose aujourd’hui davantage sur des pratiques implicites que sur un cadre structuré, ce qui vous oblige à réintervenir régulièrement et empêche toute montée en charge sécurisée.`;
+
     default:
-      return `Le signal rattaché au thème "${theme}" suggère un risque de pilotage incomplet, de dépendance excessive ou d’arbitrage insuffisamment maîtrisé.`;
+      if (t.includes("charge") || t.includes("ressource")) {
+        return `L’ajustement entre charge et ressources semble aujourd’hui reposer sur des arbitrages rapprochés plutôt que sur un pilotage stabilisé, ce qui vous expose à des déséquilibres rapides dès que l’activité évolue.`;
+      }
+
+      if (t.includes("recrutement") || t.includes("équipe")) {
+        return `Le fonctionnement autour de "${theme}" tient aujourd’hui, mais sans sécurisation réelle de la montée en charge, ce qui vous expose à un décalage rapide entre les besoins et la capacité réelle des équipes.`;
+      }
+
+      if (t.includes("rôle")) {
+        return `Le manque de clarté opérationnelle sur "${theme}" vous expose à des zones de flou dans la prise de décision, avec un risque de dilution des responsabilités et de reprises managériales fréquentes.`;
+      }
+
+      return `Le fonctionnement observé sur "${theme}" repose sur des équilibres qui ne sont pas totalement maîtrisés, ce qui vous expose à des pertes de contrôle dès que les conditions d’activité évoluent.`;
   }
 }
 
@@ -895,6 +1016,7 @@ function buildThemeCandidate(params: {
     sectionHeading: indexedSection.heading,
     matchedKeywords,
     headingHitCount,
+    excerpt,
   });
 
   return {
@@ -974,7 +1096,10 @@ function selectCandidatesForTheme(
   if (!primary) return [];
 
   const selected: ThemeCandidate[] = [];
-  if (primary.adjustedScore >= MIN_EXPLICIT_SCORE || primary.candidate.score >= STRONG_EXPLICIT_SCORE) {
+  if (
+    primary.adjustedScore >= MIN_EXPLICIT_SCORE ||
+    primary.candidate.score >= STRONG_EXPLICIT_SCORE
+  ) {
     selected.push(primary.candidate);
   }
 
@@ -993,7 +1118,8 @@ function selectCandidatesForTheme(
     }
 
     const strongEnough =
-      adjustedScore >= Math.max(MIN_EXPLICIT_SCORE - 2, primary.adjustedScore - SECONDARY_DETERMINISTIC_GAP) ||
+      adjustedScore >=
+        Math.max(MIN_EXPLICIT_SCORE - 2, primary.adjustedScore - SECONDARY_DETERMINISTIC_GAP) ||
       candidate.score >= STRONG_EXPLICIT_SCORE + 4;
 
     if (!strongEnough) continue;
@@ -1047,7 +1173,12 @@ function buildExplicitSignalsDeterministic(snapshot: BaseTrameSnapshot): Diagnos
         );
 
         signals.push({
-          id: makeSignalId(dimension.id, bucket.theme, `${selected.section.id}-${selected.entryAngle}`, runningIndex++),
+          id: makeSignalId(
+            dimension.id,
+            bucket.theme,
+            `${selected.section.id}-${selected.entryAngle}`,
+            runningIndex++
+          ),
           dimensionId: dimension.id,
           theme: bucket.theme,
           signalKind: "explicit",
@@ -1104,7 +1235,11 @@ function findBestMissingFieldHit(
   return candidates[0]?.field;
 }
 
-function buildAbsenceConstat(theme: string, llmMissing?: { reason: LlmUncoveredTheme["reason"]; whyMissing: string }, missingFieldHit?: MissingField): string {
+function buildAbsenceConstat(
+  theme: string,
+  llmMissing?: { reason: LlmUncoveredTheme["reason"]; whyMissing: string },
+  missingFieldHit?: MissingField
+): string {
   if (llmMissing?.reason === "only_illustrative" || llmMissing?.reason === "too_weak") {
     return `Le thème "${theme}" reste insuffisamment consolidé dans la trame : la matière disponible existe mais demeure trop partielle pour établir un pilotage clairement objectivé.`;
   }

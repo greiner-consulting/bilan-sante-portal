@@ -58,6 +58,45 @@ function uniqueStrings(values: Array<string | null | undefined>, max?: number): 
   return out;
 }
 
+function stripTheoreticalLeadIns(value: string): string {
+  return normalizeText(value)
+    .replace(/^dans un contexte ou\s+/i, "")
+    .replace(/^dans un contexte où\s+/i, "")
+    .replace(/^afin de\s+/i, "")
+    .replace(/^en tenant compte de\s+/i, "")
+    .replace(/^si l'on creuse\s+/i, "")
+    .replace(/^si l’on creuse\s+/i, "");
+}
+
+function simplifyQuestionSurface(value: string, theme: string): string {
+  let text = normalizeText(value);
+  if (!text) return `Sur "${theme}", comment cela se passe-t-il concrètement aujourd’hui ?`;
+
+  text = stripTheoreticalLeadIns(text);
+
+  const lower = normalizeForMatch(text);
+
+  if (
+    lower.includes("dans un contexte ou") ||
+    lower.includes("dans un contexte où") ||
+    lower.includes("afin de") ||
+    lower.includes("en tenant compte de")
+  ) {
+    return `Sur "${theme}", comment cela se passe-t-il concrètement aujourd’hui ?`;
+  }
+
+  if (text.length > 220) {
+    const firstSentence = text.match(/^(.+?[?!.])(?:\s|$)/)?.[1];
+    text = normalizeText(firstSentence ?? text);
+  }
+
+  if (text.length > 170) {
+    return `Sur "${theme}", pouvez-vous me décrire concrètement ce qui se passe aujourd’hui ?`;
+  }
+
+  return text;
+}
+
 function allSignals(session: DiagnosticSessionAggregate): DiagnosticSignal[] {
   const registry = session.signalRegistry;
   if (!registry) return [];
@@ -108,30 +147,27 @@ function buildAngleQuestion(params: {
   iteration: IterationNumber | null | undefined;
   anchor: string;
 }): string {
-  const { theme, angle, iteration, anchor } = params;
+  const { theme, angle, anchor } = params;
 
   switch (angle) {
     case "causality":
-      if (iteration === 1) {
-        return `Restons sur "${theme}", mais repartons du bon angle : qu'est-ce qui produit réellement la difficulté aujourd'hui, et qu'est-ce qui l'explique dans le fonctionnement concret ?${anchor}`;
-      }
-      return `Sur "${theme}", si vous remontez à la cause racine, est-ce surtout un sujet de compétences, d'expérience, de décisions prises, d'arbitrages ou d'organisation mal posée ?${anchor}`;
+      return `Sur "${theme}", qu’est-ce qui explique surtout la situation actuelle ?${anchor}`;
 
     case "arbitration":
-      return `Sur "${theme}", qui arbitre réellement, qui valide, où la décision se bloque-t-elle, et en quoi cette chaîne d'arbitrage entretient-elle la situation actuelle ?${anchor}`;
+      return `Sur "${theme}", qui tranche réellement quand il faut décider ?${anchor}`;
 
     case "economics":
-      return `Sur "${theme}", quel est l'impact économique réellement subi aujourd'hui : marge, coût réel, cash, rentabilité ou sélectivité d'affaires ? Et comment cet impact se matérialise-t-il ?${anchor}`;
+      return `Sur "${theme}", quel impact concret cela a-t-il aujourd’hui sur la marge, le coût ou le cash ?${anchor}`;
 
     case "formalization":
-      return `Sur "${theme}", qu'est-ce qui relève surtout d'un manque de cadre, de rôles clairs, de méthode, de rituel ou de pilotage formalisé ?${anchor}`;
+      return `Sur "${theme}", qu’est-ce qui n’est pas assez cadré aujourd’hui ?${anchor}`;
 
     case "dependency":
-      return `Sur "${theme}", où se situe la dépendance la plus pénalisante aujourd'hui : une personne clé, un validateur, une ressource rare, un passage obligé ou une zone sans relais ?${anchor}`;
+      return `Sur "${theme}", de qui ou de quoi dépendez-vous trop aujourd’hui ?${anchor}`;
 
     case "mechanism":
     default:
-      return `Sur "${theme}", comment le problème se produit-il concrètement dans le fonctionnement réel : à quel moment, avec quels acteurs, selon quel enchaînement, et avec quel effet visible ?${anchor}`;
+      return `Sur "${theme}", comment cela se passe-t-il concrètement aujourd’hui ?${anchor}`;
   }
 }
 
@@ -163,7 +199,7 @@ export async function rewriteQuestionFromAnalysis(params: {
   let fallback = question.questionOuverte;
 
   if (analysis.intent === "clarification_request") {
-    fallback = `Je reformule simplement. Sur "${question.theme}", quel est aujourd'hui le problème concret observé, qui est impliqué, comment cela fonctionne réellement, et qu'est-ce que cela fait courir comme risque managérial ?${anchor}`;
+    fallback = `Je reformule simplement. Sur "${question.theme}", qu’est-ce qui se passe concrètement aujourd’hui ?${anchor}`;
   } else if (analysis.shouldPivotAngle && analysis.suggestedAngle) {
     fallback = buildAngleQuestion({
       theme: question.theme,
@@ -173,7 +209,7 @@ export async function rewriteQuestionFromAnalysis(params: {
     });
   } else if (analysis.intent === "challenge") {
     const fallbackAngle = analysis.suggestedAngle ?? currentAngle ?? "mechanism";
-    fallback = `Vous contestez le postulat initial. Reprenons donc "${question.theme}" sans présupposé : ${buildAngleQuestion({
+    fallback = `Reprenons "${question.theme}" sans présupposé. ${buildAngleQuestion({
       theme: question.theme,
       angle: fallbackAngle,
       iteration,
@@ -181,9 +217,9 @@ export async function rewriteQuestionFromAnalysis(params: {
     })}${anchor}`;
   } else if (analysis.intent === "noise") {
     if (coverage?.confirmedAngles.includes("mechanism")) {
-      fallback = `Restons sur "${question.theme}". Donnez-moi un exemple précis, récent et observable qui montre où le sujet se dérègle réellement aujourd'hui et ce que cela produit concrètement.${anchor}`;
+      fallback = `Restons sur "${question.theme}". Pouvez-vous me donner un exemple concret et récent ?${anchor}`;
     } else {
-      fallback = `Restons sur "${question.theme}". Décrivez-moi un cas concret, récent, vécu, qui montre comment le sujet fonctionne réellement aujourd'hui, avec quels acteurs et quel point de friction.${anchor}`;
+      fallback = `Restons sur "${question.theme}". Comment cela se passe-t-il concrètement aujourd’hui ?${anchor}`;
     }
   } else {
     const rewritten = buildRephrasedQuestionFromAnalysis({
@@ -200,7 +236,7 @@ export async function rewriteQuestionFromAnalysis(params: {
   }
 
   if (dimensionId == null || iteration == null) {
-    return fallback;
+    return simplifyQuestionSurface(fallback, question.theme);
   }
 
   const normalizedConstat = normalizeForMatch(question.constat);
@@ -241,5 +277,5 @@ export async function rewriteQuestionFromAnalysis(params: {
     isAbsence,
   });
 
-  return normalizeText(llmQuestion) || fallback;
+  return simplifyQuestionSurface(normalizeText(llmQuestion) || fallback, question.theme);
 }

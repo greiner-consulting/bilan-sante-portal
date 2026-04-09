@@ -1,4 +1,3 @@
-
 import type { DimensionId, IterationNumber } from "@/lib/bilan-sante/protocol";
 import {
   DIAGNOSTIC_DIMENSIONS,
@@ -100,6 +99,66 @@ function uniqueStrings(values: string[]): string[] {
   }
 
   return out;
+}
+
+function stripTheoreticalLeadIns(value: string): string {
+  return normalizeText(value)
+    .replace(/^dans un contexte ou\s+/i, "")
+    .replace(/^dans un contexte où\s+/i, "")
+    .replace(/^afin de\s+/i, "")
+    .replace(/^en tenant compte de\s+/i, "")
+    .replace(/^si l'on creuse\s+/i, "")
+    .replace(/^si l’on creuse\s+/i, "");
+}
+
+function simplifyQuestionSurface(value: string, theme: string): string {
+  let text = normalizeText(value);
+  if (!text) return `Sur "${theme}", comment cela se passe-t-il concrètement aujourd’hui ?`;
+
+  text = stripTheoreticalLeadIns(text);
+
+  const lower = normalizeForMatch(text);
+
+  if (
+    lower.includes("dans un contexte ou") ||
+    lower.includes("dans un contexte où") ||
+    lower.includes("afin de") ||
+    lower.includes("en tenant compte de")
+  ) {
+    return `Sur "${theme}", comment cela se passe-t-il concrètement aujourd’hui ?`;
+  }
+
+  if (text.length > 220) {
+    const firstSentence = text.match(/^(.+?[?!.])(?:\s|$)/)?.[1];
+    text = normalizeText(firstSentence ?? text);
+  }
+
+  if (text.length > 170) {
+    return `Sur "${theme}", pouvez-vous me décrire concrètement comment cela se passe aujourd’hui ?`;
+  }
+
+  return text;
+}
+
+function buildConcreteFallbackQuestion(params: {
+  signal: DiagnosticSignal;
+  iteration: IterationNumber;
+}): string {
+  const { signal, iteration } = params;
+  const theme = signal.theme;
+
+  if (iteration === 1) {
+    if (signal.signalKind === "absence") {
+      return `Sur "${theme}", comment cela se passe-t-il concrètement aujourd’hui ?`;
+    }
+    return `Sur "${theme}", qu’est-ce qui se passe réellement aujourd’hui sur le terrain ?`;
+  }
+
+  if (iteration === 2) {
+    return `Sur "${theme}", qu’est-ce qui explique surtout la situation actuelle ?`;
+  }
+
+  return `Sur "${theme}", quel est aujourd’hui le point le moins maîtrisé ?`;
 }
 
 function buildQuestionId(
@@ -541,12 +600,15 @@ async function buildStructuredQuestion(
     isAbsence: signal.signalKind === "absence",
   });
 
-  const fallbackQuestion =
-    iteration === 1
-      ? `Sur le thème "${signal.theme}", comment ce sujet fonctionne-t-il réellement aujourd’hui dans l’entreprise, avec quels repères concrets et quels points de fragilité éventuels ?`
-      : iteration === 2
-      ? `Si l’on creuse le thème "${signal.theme}", quelles sont selon vous les causes principales de la situation observée et quels arbitrages la maintiennent ?`
-      : `Sur le thème "${signal.theme}", quel point reste aujourd’hui le moins piloté et quel risque concret cela crée-t-il pour l’entreprise ?`;
+  const fallbackQuestion = buildConcreteFallbackQuestion({
+    signal,
+    iteration,
+  });
+
+  const questionOuverte = simplifyQuestionSurface(
+    normalizeText(llmQuestion) || fallbackQuestion,
+    signal.theme
+  );
 
   return {
     id: buildQuestionId(signal, iteration, index),
@@ -554,7 +616,7 @@ async function buildStructuredQuestion(
     theme: signal.theme,
     constat: signal.constat,
     risqueManagerial: signal.managerialRisk,
-    questionOuverte: normalizeText(llmQuestion) || fallbackQuestion,
+    questionOuverte,
   };
 }
 
@@ -572,7 +634,7 @@ function hasStrongReasonToKeep(item: ScoredSignal, iteration: IterationNumber): 
 function maxPerThemeForIteration(iteration: IterationNumber): number {
   switch (iteration) {
     case 1:
-      return 3;
+      return 2;
     case 2:
       return 3;
     case 3:
@@ -587,10 +649,49 @@ function distributionForAvailableThemeCount(
   availableThemeCount: number
 ): number[] {
   const target = maxQuestionsForIteration(iteration);
+
+  if (availableThemeCount <= 0) return [];
+
+  if (iteration === 1) {
+    const themeCount = Math.min(availableThemeCount, target);
+    const distribution = Array.from({ length: themeCount }, () => 1);
+    let remaining = target - themeCount;
+    let cursor = 0;
+    const cap = maxPerThemeForIteration(iteration);
+
+    while (remaining > 0 && distribution.length > 0) {
+      if (distribution[cursor] < cap) {
+        distribution[cursor] += 1;
+        remaining -= 1;
+      }
+
+      cursor = (cursor + 1) % distribution.length;
+
+      if (distribution.every((value) => value >= cap)) {
+        break;
+      }
+    }
+
+    return distribution;
+  }
+
   if (availableThemeCount >= 3) return iteration === 3 ? [2, 1, 1] : [2, 2, 1];
   if (availableThemeCount === 2) return iteration === 3 ? [2, 2] : [3, 2];
   if (availableThemeCount === 1) return [target];
   return [];
+}
+
+function priorityThemeCountForIteration(
+  iteration: IterationNumber,
+  availableThemeCount: number
+): number {
+  if (availableThemeCount <= 0) return 0;
+
+  if (iteration === 1) {
+    return Math.min(maxQuestionsForIteration(iteration), availableThemeCount);
+  }
+
+  return Math.min(3, availableThemeCount);
 }
 
 function groupCandidatesByTheme(
@@ -684,6 +785,71 @@ function seedByThemeDistribution(params: {
   return selected;
 }
 
+function consolidateSeedSelection(params: {
+  selected: ScoredSignal[];
+  scoredSignals: ScoredSignal[];
+  iteration: IterationNumber;
+  targetThemes: string[];
+}): ScoredSignal[] {
+  if (params.iteration !== 1) {
+    return params.selected;
+  }
+
+  const out = [...params.selected];
+  const targetThemeKeys = params.targetThemes.map((item) => normalizeForMatch(item));
+  const representedThemeKeys = new Set(
+    out.map((item) => normalizeForMatch(item.signal.theme))
+  );
+
+  for (const themeKey of targetThemeKeys) {
+    if (representedThemeKeys.has(themeKey)) continue;
+
+    const replacement = params.scoredSignals.find((candidate) => {
+      if (out.some((existing) => existing.signal.id === candidate.signal.id)) return false;
+      if (normalizeForMatch(candidate.signal.theme) !== themeKey) return false;
+      if (
+        candidate.score < ABSOLUTE_MIN_SCORE[params.iteration] &&
+        !hasStrongReasonToKeep(candidate, params.iteration)
+      ) {
+        return false;
+      }
+      return true;
+    });
+
+    if (!replacement) continue;
+
+    if (out.length < maxQuestionsForIteration(params.iteration)) {
+      out.push(replacement);
+      representedThemeKeys.add(themeKey);
+      continue;
+    }
+
+    let replaceIndex = -1;
+    let weakestScore = Number.POSITIVE_INFINITY;
+
+    for (let i = 0; i < out.length; i += 1) {
+      const existing = out[i];
+      const existingThemeKey = normalizeForMatch(existing.signal.theme);
+      const existingThemeCount = out.filter(
+        (item) => normalizeForMatch(item.signal.theme) === existingThemeKey
+      ).length;
+
+      if (existingThemeCount <= 1) continue;
+      if (existing.score >= weakestScore) continue;
+
+      weakestScore = existing.score;
+      replaceIndex = i;
+    }
+
+    if (replaceIndex >= 0) {
+      out[replaceIndex] = replacement;
+      representedThemeKeys.add(themeKey);
+    }
+  }
+
+  return out;
+}
+
 function fillRemainingCapacity(params: {
   selected: ScoredSignal[];
   scoredSignals: ScoredSignal[];
@@ -726,16 +892,26 @@ function selectHighQualitySignals(params: {
   targetThemes: string[];
 }): ScoredSignal[] {
   if (params.scoredSignals.length === 0) return [];
+
   const seeded = seedByThemeDistribution({
     scoredSignals: params.scoredSignals,
     iteration: params.iteration,
     targetThemes: params.targetThemes,
   });
-  const completed = fillRemainingCapacity({
+
+  const consolidated = consolidateSeedSelection({
     selected: seeded,
     scoredSignals: params.scoredSignals,
     iteration: params.iteration,
+    targetThemes: params.targetThemes,
   });
+
+  const completed = fillRemainingCapacity({
+    selected: consolidated,
+    scoredSignals: params.scoredSignals,
+    iteration: params.iteration,
+  });
+
   return forceFillToTarget({
     selected: completed,
     scoredSignals: params.scoredSignals,
@@ -823,10 +999,14 @@ export async function planIterationQuestionsWithDiagnostics(params: PlanParams):
     .sort((a, b) => b.score - a.score)
     .slice(0, CANDIDATE_POOL_SIZE[iteration]);
 
+  const availableThemeCount = new Set(
+    candidates.map((item) => normalizeForMatch(item.signal.theme))
+  ).size;
+
   const priorityThemes = selectPriorityThemes({
     scoredSignals: candidates,
     selectedThemes,
-    maxThemeCount: 3,
+    maxThemeCount: priorityThemeCountForIteration(iteration, availableThemeCount),
   });
 
   const selected = selectHighQualitySignals({
@@ -862,7 +1042,7 @@ export async function planIterationQuestionsWithDiagnostics(params: PlanParams):
     `Cap cible itération : ${maxQuestionsForIteration(iteration)} question(s).`,
     `Thèmes réellement alimentés dans le workset : ${activeThemeKeys.size}.`,
     `Cap max par thème sur cette itération : ${maxPerThemeForIteration(iteration)}.`,
-    "Le planner couvre d’abord les meilleurs thèmes disponibles, puis remplit de manière contrôlée pour tenir 5/5/4.",
+    "L’itération 1 ouvre d’abord les thèmes disponibles, consolide cette ouverture, puis complète de manière contrôlée pour tenir 5/5/4.",
   ];
 
   return { questions, diagnostics, notes };

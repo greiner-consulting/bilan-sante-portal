@@ -1,4 +1,4 @@
-import {
+﻿import {
   FINAL_OBJECTIVES_HEADER,
   buildIterationClosurePrompt,
   buildIterationHeader,
@@ -168,24 +168,24 @@ function buildLegacyQuestion(
   iteration: IterationNumber,
   index: number
 ): StructuredQuestion {
-  const excerpt = shortenText(signal.sourceExcerpt, 160);
-  let questionOuverte = `Pouvez-vous préciser ce point sur le thème "${signal.theme}" ?`;
+  const excerpt = shortenText(signal.sourceExcerpt, 100);
+  let questionOuverte = `Pouvez-vous préciser ce point sur "${signal.theme}" ?`;
 
   if (iteration === 1) {
     questionOuverte =
       signal.signalKind === "absence"
-        ? `Sur le thème "${signal.theme}", la trame ne permet pas de voir clairement comment le sujet est piloté. Comment ce sujet fonctionne-t-il réellement aujourd’hui, qui intervient, et où se situent les principaux points de fragilité ?`
+        ? `Sur "${signal.theme}", comment cela fonctionne-t-il aujourd’hui ?`
         : excerpt
-          ? `Sur le thème "${signal.theme}", la trame mentionne : "${excerpt}". Concrètement, comment ce sujet est-il géré aujourd’hui dans le fonctionnement réel de l’entreprise ?`
-          : `Sur le thème "${signal.theme}", comment ce sujet est-il géré aujourd’hui dans le fonctionnement réel de l’entreprise ?`;
+          ? `Sur "${signal.theme}", la trame évoque "${excerpt}". Comment cela se passe-t-il en réalité ?`
+          : `Sur "${signal.theme}", comment cela se passe-t-il concrètement aujourd’hui ?`;
   }
 
   if (iteration === 2) {
-    questionOuverte = `Si l’on creuse ce point sur "${signal.theme}" : ${signal.constat} Quelles sont, selon vous, les causes principales de cette situation, et quels arbitrages ou dépendances la maintiennent ?`;
+    questionOuverte = `Sur "${signal.theme}", qu’est-ce qui explique surtout la situation actuelle ?`;
   }
 
   if (iteration === 3) {
-    questionOuverte = `Sur le sujet "${signal.theme}", quel point reste aujourd’hui le moins piloté ou le moins sécurisé, et quel risque concret cela crée-t-il pour l’entreprise ?`;
+    questionOuverte = `Sur "${signal.theme}", quel est aujourd’hui le point le moins maîtrisé ?`;
   }
 
   return {
@@ -197,6 +197,7 @@ function buildLegacyQuestion(
     questionOuverte,
   };
 }
+
 
 function buildLegacyQuestions(
   session: DiagnosticSessionAggregate,

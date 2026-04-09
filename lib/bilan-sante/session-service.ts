@@ -1,4 +1,3 @@
-
 import {
   answeredCount,
   bootstrapSessionFromTrameWithLlm,
@@ -59,6 +58,29 @@ function normalizeForMatch(value: string | null | undefined): string {
     .toLowerCase();
 }
 
+function shortenText(value: string | null | undefined, max = 140): string {
+  const text = normalizeText(value);
+  if (!text) return "";
+  if (text.length <= max) return text;
+  return `${text.slice(0, max - 1).trim()}…`;
+}
+
+function uniqueBusinessFacts(values: Array<string | null | undefined>): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+
+  for (const value of values) {
+    const text = normalizeText(value);
+    if (!text) continue;
+    const key = normalizeForMatch(text);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(text);
+  }
+
+  return out;
+}
+
 function isYes(value: string): boolean {
   return ["oui", "ok", "valide", "validé", "yes"].includes(
     normalizeText(value).toLowerCase()
@@ -67,6 +89,65 @@ function isYes(value: string): boolean {
 
 function isNo(value: string): boolean {
   return ["non", "no"].includes(normalizeText(value).toLowerCase());
+}
+
+function parseIterationValidationDecision(value: string): {
+  decision: "yes" | "no" | null;
+  nuance: boolean;
+} {
+  const raw = normalizeText(value);
+  const normalized = normalizeForMatch(raw);
+
+  if (!normalized) {
+    return { decision: null, nuance: false };
+  }
+
+  const yesOnly = /^(oui|ok|yes|valide|validee?)$/i.test(normalized);
+  if (yesOnly) {
+    return { decision: "yes", nuance: false };
+  }
+
+  const noOnly = /^(non|no)$/i.test(normalized);
+  if (noOnly) {
+    return { decision: "no", nuance: false };
+  }
+
+  const yesNuancedPatterns = [
+    /^oui\b.+/i,
+    /^ok\b.+/i,
+    /^yes\b.+/i,
+    /^valide\b.+/i,
+    /^validee?\b.+/i,
+    /^oui\s+mais\b/i,
+    /^ok\s+mais\b/i,
+    /^oui\s+pas\b/i,
+    /^oui\s+il\b/i,
+    /^oui\s+reste\b/i,
+    /^oui\s+manque\b/i,
+    /^presque\b/i,
+    /^pas\s+complet/i,
+    /^pas\s+completement/i,
+    /^pas\s+complètement/i,
+  ];
+
+  if (yesNuancedPatterns.some((pattern) => pattern.test(raw) || pattern.test(normalized))) {
+    return { decision: "no", nuance: true };
+  }
+
+  const noNuancedPatterns = [
+    /^non\b.+/i,
+    /^pas\s+encore\b/i,
+    /^pas\s+vraiment\b/i,
+    /^pas\s+tout\s+a\s+fait\b/i,
+    /^il\s+manque\b/i,
+    /^reste\b.+/i,
+  ];
+
+  if (noNuancedPatterns.some((pattern) => pattern.test(raw) || pattern.test(normalized))) {
+    return { decision: "no", nuance: true };
+  }
+
+  return { decision: null, nuance: false };
 }
 
 function mapSessionStatus(session: DiagnosticSessionAggregate): string {
@@ -402,6 +483,102 @@ function appendAnswerAnalysisToMemory(params: {
   return nextSession;
 }
 
+function buildPrimaryAnswerText(params: {
+  rawMessage: string;
+  analysis: ReturnType<typeof analyzeUserAnswer>;
+}): string {
+  const { rawMessage, analysis } = params;
+
+  const cleaned = normalizeText(analysis.cleanedMessage);
+  const facts = uniqueBusinessFacts(analysis.extractedFacts);
+
+  if (analysis.shouldStoreAsAnswer && cleaned.length >= 12) {
+    return cleaned;
+  }
+
+  if (facts.length === 1) {
+    return facts[0];
+  }
+
+  if (facts.length >= 2) {
+    return facts.slice(0, 2).join(" | ");
+  }
+
+  return normalizeText(rawMessage);
+}
+
+function shortAcknowledgementFact(value: string): string {
+  const text = normalizeText(value).replace(/[.!?]+$/, "");
+  return shortenText(text, 140);
+}
+
+function renderRootCauseLabel(value: string): string {
+  switch (value) {
+    case "skills":
+      return "un problème de compétences ou d’expérience";
+    case "experience":
+      return "un manque d’expérience";
+    case "decision":
+      return "des décisions tardives ou insuffisamment sécurisées";
+    case "arbitration":
+      return "des arbitrages insuffisamment clarifiés";
+    case "organization":
+      return "un sujet d’organisation ou de répartition des rôles";
+    case "resources":
+      return "une tension de ressources ou de capacité";
+    case "pricing":
+      return "un sujet de prix ou de rentabilité";
+    case "cash":
+      return "un sujet de trésorerie ou d’impact économique";
+    default:
+      return "un facteur structurel à préciser";
+  }
+}
+
+function buildFollowUpAcknowledgement(params: {
+  analysis: ReturnType<typeof analyzeUserAnswer>;
+  question: StructuredQuestion;
+}): string | null {
+  const { analysis, question } = params;
+  const facts = uniqueBusinessFacts(analysis.extractedFacts);
+
+  if (facts.length > 0) {
+    return `Je retiens notamment ceci sur "${question.theme}" : ${shortAcknowledgementFact(
+      facts[0]
+    )}.`;
+  }
+
+  if (analysis.summary && normalizeText(analysis.summary).length >= 12) {
+    return `Je retiens sur "${question.theme}" : ${shortAcknowledgementFact(
+      analysis.summary
+    )}.`;
+  }
+
+  if (analysis.detectedRootCauses.length > 0) {
+    return `Je note que sur "${question.theme}", le sujet semble surtout lié à ${renderRootCauseLabel(
+      analysis.detectedRootCauses[0]
+    )}.`;
+  }
+
+  return null;
+}
+
+function mergeAcknowledgementIntoPayload(params: {
+  payload: SessionViewPayload;
+  acknowledgement: string | null;
+}): SessionViewPayload {
+  const { payload, acknowledgement } = params;
+  if (!acknowledgement) return payload;
+
+  const assistantMessage = normalizeText(payload.assistant_message);
+  if (!assistantMessage) return payload;
+
+  return {
+    ...payload,
+    assistant_message: `${acknowledgement}\n\n${assistantMessage}`,
+  };
+}
+
 function turnId(prefix: string, parts: Array<string | number | null | undefined>): string {
   const raw = parts.map((item) => normalizeText(String(item ?? ""))).join("|");
   const normalized = normalizeForMatch(raw)
@@ -631,11 +808,14 @@ export async function processSessionInput(params: {
   }
 
   if (aggregate.phase === "iteration_validation") {
-    if (!isYes(rawMessage) && !isNo(rawMessage)) {
+    const validation = parseIterationValidationDecision(rawMessage);
+
+    if (!validation.decision) {
       const payload: SessionViewPayload = {
         ...toSessionView(aggregate),
         assistant_message:
-          'Merci de répondre uniquement par "oui" ou "non" pour valider l’itération en cours.',
+          "J’ai besoin de savoir si cette itération peut être considérée comme validée. " +
+          'Vous pouvez répondre par "oui" ou "non". Si certains points manquent encore, dites-le librement et je poursuivrai l’exploration.',
         questions: [],
         needs_validation: true,
       };
@@ -657,10 +837,20 @@ export async function processSessionInput(params: {
 
     aggregate = await submitIterationClosure({
       session: aggregate,
-      decision: isYes(rawMessage) ? "yes" : "no",
+      decision: validation.decision,
     });
 
     let payload = toSessionView(aggregate);
+
+    if (validation.nuance && validation.decision === "no") {
+      payload = {
+        ...payload,
+        assistant_message:
+          "Je comprends qu’il reste des points à compléter sur cette itération. " +
+          "Je poursuis donc l’exploration avant clôture.",
+      };
+    }
+
     aggregate = syncAssistantPayloadIntoConversation({
       session: aggregate,
       payload,
@@ -673,7 +863,12 @@ export async function processSessionInput(params: {
       sessionId: params.sessionId,
       userId: params.userId,
       kind: "CHAT_ASSISTANT",
-      payload: { ...payload, kind: "iteration_closure_reply" },
+      payload: {
+        ...payload,
+        kind: "iteration_closure_reply",
+        validation_decision: validation.decision,
+        validation_nuance: validation.nuance,
+      },
     });
     return payload;
   }
@@ -806,8 +1001,28 @@ export async function processSessionInput(params: {
     return payload;
   }
 
-  aggregate = registerAnswer({ session: aggregate, questionId, answerText: rawMessage });
+  const primaryAnswerText = buildPrimaryAnswerText({
+    rawMessage,
+    analysis,
+  });
+
+  const acknowledgement = buildFollowUpAcknowledgement({
+    analysis,
+    question: currentQuestion,
+  });
+
+  aggregate = registerAnswer({
+    session: aggregate,
+    questionId,
+    answerText: primaryAnswerText,
+  });
+
   let payload = toSessionView(aggregate);
+  payload = mergeAcknowledgementIntoPayload({
+    payload,
+    acknowledgement,
+  });
+
   aggregate = syncAssistantPayloadIntoConversation({
     session: aggregate,
     payload,
@@ -830,6 +1045,7 @@ export async function processSessionInput(params: {
       detected_root_causes: analysis.detectedRootCauses,
       suggested_angle: analysis.suggestedAngle,
       memory_written: true,
+      stored_answer_text: primaryAnswerText,
     },
   });
 

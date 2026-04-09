@@ -152,12 +152,16 @@ function signalForTheme(
 function fallbackRiskFromTheme(theme: string): string {
   const lower = normalizeText(theme);
 
-  if (lower.includes("prix") || lower.includes("marge") || lower.includes("cash")) {
-    return "Risque de décisions économiques insuffisamment maîtrisées et de dérive de rentabilité.";
+  if (lower.includes("prix") || lower.includes("marge")) {
+    return "Risque de décisions de prix ou de marge prises sans cadre assez robuste, avec dérive silencieuse de rentabilité.";
+  }
+
+  if (lower.includes("cash")) {
+    return "Risque de pilotage économique trop tardif ou incomplet, avec tension de trésorerie ou dérive non anticipée.";
   }
 
   if (lower.includes("commercial") || lower.includes("marche")) {
-    return "Risque de perte d’efficacité commerciale et de croissance peu rentable.";
+    return "Risque de développement commercial insuffisamment piloté, avec sélectivité faible ou croissance peu rentable.";
   }
 
   if (
@@ -166,28 +170,46 @@ function fallbackRiskFromTheme(theme: string): string {
     lower.includes("equipe") ||
     lower.includes("rh")
   ) {
-    return "Risque de dépendance, de flou de responsabilités ou de fragilité d’exécution.";
+    return "Risque de fonctionnement trop dépendant des personnes, de responsabilités floues ou de chaîne managériale insuffisamment tenue.";
   }
 
-  return "Risque de pilotage incomplet, de coordination instable ou d’arbitrages insuffisamment structurés.";
+  if (
+    lower.includes("indicateur") ||
+    lower.includes("tableau de bord") ||
+    lower.includes("rituel") ||
+    lower.includes("pilotage")
+  ) {
+    return "Risque de dérive non détectée à temps, faute de repères utiles, de rituels tenus ou d’alertes managériales fiables.";
+  }
+
+  return "Risque de pilotage insuffisamment explicite, avec arbitrages tardifs, coordination fragile et dérives peu visibles à temps.";
 }
 
 function fallbackConsequenceFromTheme(theme: string): string {
   const lower = normalizeText(theme);
 
   if (lower.includes("prix") || lower.includes("marge")) {
-    return "Dérive de marge ou décisions commerciales fragiles.";
+    return "Érosion progressive de marge, décisions mal calibrées et difficulté à corriger les dérives une fois les affaires engagées.";
   }
 
   if (lower.includes("cash")) {
-    return "Dégradation de la visibilité économique ou tension de trésorerie.";
+    return "Visibilité économique dégradée, tension de trésorerie et correction tardive des écarts.";
   }
 
   if (lower.includes("commercial") || lower.includes("client")) {
-    return "Visibilité réduite sur le pipeline et exécution commerciale irrégulière.";
+    return "Croissance irrégulière, pipeline peu fiable ou développement commercial insuffisamment sélectif.";
   }
 
-  return "Dégradation progressive de la tenue des engagements ou de la qualité de pilotage.";
+  if (
+    lower.includes("role") ||
+    lower.includes("responsabilite") ||
+    lower.includes("equipe") ||
+    lower.includes("rh")
+  ) {
+    return "Surcharge sur quelques acteurs clés, fragilité d’exécution et difficulté à tenir durablement la trajectoire.";
+  }
+
+  return "Dégradation progressive de la tenue des engagements, de la qualité des arbitrages ou de la robustesse d’exécution.";
 }
 
 function buildZoneFromFact(
@@ -211,28 +233,33 @@ function deterministicConstatFromFact(
 ): string {
   const legacy = asLegacyLikeFact(fact);
   const observed = truncate(legacy.observed_element ?? fact.statement, 180);
+  const supportingSignal = signalForTheme(signals, fact.theme);
   const risk =
     legacy.managerial_risk ??
-    signalForTheme(signals, fact.theme)?.managerialRisk ??
+    supportingSignal?.managerialRisk ??
     fallbackRiskFromTheme(fact.theme);
 
   if (legacy.progress === "stabilized" || legacy.progress === "consolidated") {
-    return `${observed} ; le risque managérial associé apparaît désormais suffisamment étayé pour orienter la priorisation des actions.`;
+    return `${observed} ; ce point met désormais en évidence une zone de pilotage insuffisamment maîtrisée, avec un impact managérial suffisamment établi pour orienter les priorités.`;
   }
 
-  if (legacy.progress === "arbitrated" || legacy.progress === "causalized") {
-    return `${observed} ; les mécanismes ou arbitrages associés sont mieux compris, mais le pilotage reste encore partiellement fragile.`;
+  if (legacy.progress === "arbitrated") {
+    return `${observed} ; la matière recueillie montre que le sujet ne relève pas d’un simple écart ponctuel mais d’un arbitrage insuffisamment tenu ou trop implicite.`;
+  }
+
+  if (legacy.progress === "causalized") {
+    return `${observed} ; les éléments convergent vers un mécanisme de fond insuffisamment maîtrisé plutôt qu’un incident isolé.`;
   }
 
   if (legacy.progress === "quantified" || legacy.progress === "illustrated") {
-    return `${observed} ; le point est désormais mieux objectivé, mais sa stabilisation managériale reste encore incomplète.`;
+    return `${observed} ; le sujet est désormais objectivé et renvoie à un défaut de maîtrise qui dépasse le seul constat opérationnel.`;
   }
 
   if (risk) {
-    return `${observed} ; ce point reste structurant, avec un risque de pilotage encore insuffisamment sécurisé.`;
+    return `${observed} ; le sujet reste structurant car il révèle ${risk.charAt(0).toLowerCase()}${risk.slice(1)}`;
   }
 
-  return `${observed} ; ce point reste structurant mais encore partiellement documenté ou sécurisé à ce stade.`;
+  return `${observed} ; le sujet reste structurant et suggère un défaut de pilotage encore insuffisamment sécurisé.`;
 }
 
 function buildKeyFindings(
@@ -268,6 +295,7 @@ function deterministicCauseFromFacts(
 ): RootCauseHypothesis[] {
   const prioritized = sortFactsForConsolidation(facts);
   const strongest = prioritized[0];
+  const nextFacts = prioritized.slice(1, 3);
 
   if (!strongest) {
     const confidenceScore = 52;
@@ -279,7 +307,7 @@ function deterministicCauseFromFacts(
         ),
         label: "Défaut de pilotage structuré et d’arbitrage explicite",
         rationale:
-          "La matière disponible reste partielle, mais elle suggère avant tout un défaut de structuration du pilotage.",
+          "La matière disponible reste partielle, mais elle suggère avant tout un déficit de structuration du pilotage, de clarification des responsabilités et d’arbitrage explicite.",
         supportingFactIds: [],
         opposingFactIds: [],
         confidence: confidenceScore / 100,
@@ -291,10 +319,13 @@ function deterministicCauseFromFacts(
   const legacy = asLegacyLikeFact(strongest);
   const theme = strongest.theme;
   const observed = legacy.observed_element ?? strongest.statement;
-  const risk =
+  const supportSignal = signalForTheme(signals, strongest.theme);
+  const supportRisk =
     legacy.managerial_risk ??
-    signalForTheme(signals, strongest.theme)?.managerialRisk ??
+    supportSignal?.managerialRisk ??
     fallbackRiskFromTheme(strongest.theme);
+
+  const supportIds = [strongest.id, ...nextFacts.map((fact) => fact.id)];
 
   if (legacy.progress === "arbitrated" || legacy.progress === "stabilized") {
     const confidenceScore = Math.max(62, Math.min(88, strongest.confidenceScore ?? 0));
@@ -302,14 +333,14 @@ function deterministicCauseFromFacts(
       {
         id: makeRootCauseId(
           dimensionId,
-          `Cause dominante autour du thème "${theme}"`
+          `Arbitrages insuffisamment structurés sur "${theme}"`
         ),
-        label: `Cause dominante autour du thème "${theme}"`,
-        rationale: `La matière la plus robuste montre que ${truncate(
+        label: `Arbitrages insuffisamment structurés sur "${theme}"`,
+        rationale: `Les éléments les plus solides montrent que ${truncate(
           observed.toLowerCase(),
           180
-        )} crée un défaut de pilotage ou d’arbitrage désormais visible.`,
-        supportingFactIds: [strongest.id],
+        )} ne relève pas seulement d’un écart d’exécution : la difficulté dominante tient à des arbitrages trop implicites, tardifs ou insuffisamment tenus.`,
+        supportingFactIds: supportIds,
         opposingFactIds: [],
         confidence: confidenceScore / 100,
         confidenceScore,
@@ -323,14 +354,14 @@ function deterministicCauseFromFacts(
       {
         id: makeRootCauseId(
           dimensionId,
-          `Mécanisme de fond insuffisamment maîtrisé sur "${theme}"`
+          `Mécanisme de pilotage insuffisamment maîtrisé sur "${theme}"`
         ),
-        label: `Mécanisme de fond insuffisamment maîtrisé sur "${theme}"`,
+        label: `Mécanisme de pilotage insuffisamment maîtrisé sur "${theme}"`,
         rationale: `La matière consolidée suggère que ${truncate(
           observed.toLowerCase(),
           180
-        )} renvoie à un mécanisme de fond insuffisamment maîtrisé.`,
-        supportingFactIds: [strongest.id],
+        )} renvoie à un mécanisme récurrent de pilotage insuffisamment maîtrisé, plus qu’à un incident ponctuel.`,
+        supportingFactIds: supportIds,
         opposingFactIds: [],
         confidence: confidenceScore / 100,
         confidenceScore,
@@ -338,20 +369,23 @@ function deterministicCauseFromFacts(
     ];
   }
 
-  if (risk) {
+  if (supportRisk) {
     const confidenceScore = Math.max(56, Math.min(78, strongest.confidenceScore ?? 0));
     return [
       {
         id: makeRootCauseId(
           dimensionId,
-          `Pilotage insuffisamment stabilisé sur "${theme}"`
+          `Pilotage insuffisamment tenu sur "${theme}"`
         ),
-        label: `Pilotage insuffisamment stabilisé sur "${theme}"`,
+        label: `Pilotage insuffisamment tenu sur "${theme}"`,
         rationale: truncate(
-          `La cause racine dominante semble liée au thème "${theme}", dans la mesure où ${risk.toLowerCase()}`,
-          220
+          `La cause dominante semble liée au thème "${theme}" : ${truncate(
+            observed.toLowerCase(),
+            140
+          )}. La difficulté principale tient moins à l’absence de sujet qu’à un pilotage insuffisamment explicite, cadré ou tenu dans la durée.`,
+          240
         ),
-        supportingFactIds: [strongest.id],
+        supportingFactIds: supportIds,
         opposingFactIds: [],
         confidence: confidenceScore / 100,
         confidenceScore,
@@ -364,11 +398,12 @@ function deterministicCauseFromFacts(
     {
       id: makeRootCauseId(
         dimensionId,
-        `Thème "${theme}" insuffisamment piloté de manière structurée`
+        `Défaut de structuration du pilotage sur "${theme}"`
       ),
-      label: `Thème "${theme}" insuffisamment piloté de manière structurée`,
-      rationale: `La matière la plus solide converge vers un déficit de structuration du pilotage sur ce thème.`,
-      supportingFactIds: [strongest.id],
+      label: `Défaut de structuration du pilotage sur "${theme}"`,
+      rationale:
+        "La matière la plus solide converge vers un déficit de structuration du pilotage, de clarification des responsabilités ou de tenue des arbitrages sur ce thème.",
+      supportingFactIds: supportIds,
       opposingFactIds: [],
       confidence: confidenceScore / 100,
       confidenceScore,
