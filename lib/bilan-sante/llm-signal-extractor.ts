@@ -67,6 +67,94 @@ function compactJson<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
+function normalizeForMatch(value: string): string {
+  return normalizeExtractionText(value)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+}
+
+function includesAnyNormalized(text: string, patterns: string[]): boolean {
+  const haystack = normalizeForMatch(text);
+  return patterns.some((pattern) => haystack.includes(normalizeForMatch(pattern)));
+}
+
+function isOverInterpretiveSignal(params: {
+  theme: string;
+  sourceExcerpt: string;
+  constat: string;
+  managerialRisk: string;
+}): boolean {
+  const theme = normalizeForMatch(params.theme);
+  const excerpt = normalizeForMatch(params.sourceExcerpt);
+  const generated = normalizeForMatch(`${params.constat} ${params.managerialRisk}`);
+
+  const excerptShowsCapacityBuffer = includesAnyNormalized(excerpt, [
+    "surdimensionne",
+    "surdimensionné",
+    "absorber",
+    "30%",
+    "charges supplementaires",
+    "charges supplémentaires",
+    "pas de manque",
+  ]);
+
+  const excerptShowsFutureConditionalNeed = includesAnyNormalized(excerpt, [
+    "si la croissance",
+    "si un contrat",
+    "aurons besoin",
+    "aura besoin",
+    "besoin de recruter",
+  ]);
+
+  const excerptShowsCurrentInstability = includesAnyNormalized(excerpt, [
+    "arbitrage",
+    "pilotage",
+    "fragile",
+    "instable",
+    "difficile",
+    "sous-effectif",
+    "sous effectif",
+    "surcharge",
+    "blocage",
+  ]);
+
+  const generatedAssertsCurrentInstability = includesAnyNormalized(generated, [
+    "arbitrages rapproches",
+    "arbitrages rapprochés",
+    "pilotage stabilise",
+    "pilotage stabilisé",
+    "pilotage non stabilise",
+    "pilotage non stabilisé",
+    "insuffisamment stabilise",
+    "insuffisamment stabilisé",
+    "fragilite actuelle",
+    "fragilité actuelle",
+    "desequilibre actuel",
+    "déséquilibre actuel",
+  ]);
+
+  if (
+    theme === normalizeForMatch("ressources vs charge") &&
+    excerptShowsCapacityBuffer &&
+    generatedAssertsCurrentInstability &&
+    !excerptShowsCurrentInstability
+  ) {
+    return true;
+  }
+
+  if (
+    theme === normalizeForMatch("qualité et adéquation des équipes") &&
+    excerptShowsFutureConditionalNeed &&
+    generatedAssertsCurrentInstability &&
+    !excerptShowsCurrentInstability
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
 function serializeSections(sections: TrameSection[]): string {
   if (sections.length === 0) return "[]";
   return JSON.stringify(
@@ -105,6 +193,10 @@ function buildPrompt(params: { dimensionId: DimensionId; snapshot: BaseTrameSnap
     "Tu dois extraire uniquement des signaux fiables à partir de la trame fournie.",
     "Tu n'inventes aucun fait.",
     "Tu ne peux utiliser QUE les thèmes autorisés.",
+    "Priorité absolue : le constat doit rester quasi paraphrastique de l’extrait choisi.",
+    "Tu n’introduis pas dans le constat des notions comme 'arbitrages rapprochés', 'pilotage non stabilisé', 'fragilité actuelle' ou 'défaut de maîtrise' si elles ne sont pas explicitement présentes ou directement démontrées par l’extrait.",
+    "Quand l’extrait décrit une capacité disponible, un surdimensionnement, une absence de manque actuel ou un besoin futur conditionnel, le constat doit décrire ce présent ; le risque éventuel doit être formulé comme une vulnérabilité potentielle et non comme une défaillance actuelle.",
+    "En cas de doute entre un constat descriptif fidèle et une interprétation plus forte, choisis toujours la version la plus fidèle à l’extrait.",
     "",
     "Règle clé : ne pas exiger un libellé littéral du thème pour accepter un signal.",
     "Des indices convergents, cohérents et managérialement exploitables suffisent si le texte décrit clairement :",
@@ -224,6 +316,16 @@ function sanitizeExplicitSignals(params: {
     if (!sourceExcerpt || !constat || !managerialRisk || !probableConsequence) continue;
     if (!isEvidenceNature(evidenceNature)) continue;
     if (!isSignalEntryAngle(entryAngle)) continue;
+    if (
+      isOverInterpretiveSignal({
+        theme,
+        sourceExcerpt,
+        constat,
+        managerialRisk,
+      })
+    ) {
+      continue;
+    }
 
     out.push({
       theme,
