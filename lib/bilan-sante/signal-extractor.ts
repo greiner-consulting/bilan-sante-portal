@@ -440,6 +440,11 @@ function uniqueStrings(values: string[]): string[] {
   return out;
 }
 
+function containsAny(text: string, patterns: string[]): boolean {
+  const haystack = normalizeText(text);
+  return patterns.some((pattern) => haystack.includes(normalizeText(pattern)));
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
@@ -665,6 +670,52 @@ function buildContextExcerpt(
   return trimSnippet(clean, start, end);
 }
 
+function cleanExcerptNarrative(excerpt: string, max = 220): string {
+  const clean = normalizeExtractionText(excerpt)
+    .replace(/^…+\s*/, "")
+    .replace(/\s*…+$/, "")
+    .trim();
+
+  if (!clean) return "";
+  if (clean.length <= max) return clean;
+  return `${clean.slice(0, max - 1).trim()}…`;
+}
+
+function excerptSignalsFutureConditional(excerpt: string): boolean {
+  return containsAny(excerpt, [
+    "si la croissance",
+    "si un contrat",
+    "si nous gagnons",
+    "si on gagne",
+    "aura besoin",
+    "aurons besoin",
+    "besoin de recruter",
+    "montée en charge",
+    "montee en charge",
+    "en cas de croissance",
+  ]);
+}
+
+function excerptSignalsCapacityBuffer(excerpt: string): boolean {
+  return containsAny(excerpt, [
+    "surdimensionné",
+    "surdimensionne",
+    "absorber",
+    "30%",
+    "pas de manque",
+    "capacité disponible",
+    "capacite disponible",
+    "marge de capacité",
+    "marge de capacite",
+  ]);
+}
+
+function buildAnchoredConstatFromExcerpt(excerpt: string, fallback: string): string {
+  const cleanExcerpt = cleanExcerptNarrative(excerpt);
+  if (!cleanExcerpt) return fallback;
+  return `La trame indique notamment : « ${cleanExcerpt} ». `;
+}
+
 function pickEntryAngle(
   theme: string,
   sectionHeading: string,
@@ -700,104 +751,94 @@ function inferConstatFromExcerpt(params: {
   matchedKeywords: string[];
 }): string {
   const theme = params.theme;
-  const text = normalizeText(
-    [params.excerpt, ...params.matchedKeywords].join(" | ")
-  );
+  const excerpt = cleanExcerptNarrative(params.excerpt);
+  const text = normalizeText([excerpt, ...params.matchedKeywords].join(" | "));
 
-  const hasGrowthProjection =
-    text.includes("croissance") ||
-    text.includes("montee en charge") ||
-    text.includes("montée en charge") ||
-    text.includes("si la croissance") ||
-    text.includes("aura besoin") ||
-    text.includes("aurons besoin") ||
-    text.includes("besoin de recruter") ||
-    text.includes("si on gagne") ||
-    text.includes("si nous gagnons");
-
-  const hasRecruitmentTension =
-    text.includes("recrut") ||
-    text.includes("embauche") ||
-    text.includes("integration") ||
-    text.includes("intégration") ||
-    text.includes("apprentissage") ||
-    text.includes("montee en competence") ||
-    text.includes("montée en compétence");
-
-  const hasLoadTension =
-    text.includes("charge") ||
-    text.includes("ressource") ||
-    text.includes("capacite") ||
-    text.includes("capacité") ||
-    text.includes("planning") ||
-    text.includes("surcharge") ||
-    text.includes("disponibilite") ||
-    text.includes("disponibilité");
-
-  const hasRoleTension =
-    text.includes("role") ||
-    text.includes("rôle") ||
-    text.includes("responsabilite") ||
-    text.includes("responsabilité") ||
-    text.includes("delegation") ||
-    text.includes("délégation") ||
-    text.includes("qui decide") ||
-    text.includes("qui décide");
-
-  const hasFragilitySignal =
-    text.includes("peu") ||
-    text.includes("manque") ||
-    text.includes("difficile") ||
-    text.includes("fragile") ||
-    text.includes("pas suffisamment") ||
-    text.includes("insuffisant") ||
-    text.includes("insuffisante") ||
-    text.includes("tension");
+  const hasGrowthProjection = excerptSignalsFutureConditional(excerpt);
+  const hasCapacityBuffer = excerptSignalsCapacityBuffer(excerpt);
+  const hasRecruitmentTension = containsAny(text, [
+    "recrut",
+    "embauche",
+    "intégration",
+    "integration",
+    "apprentissage",
+    "montée en compétence",
+    "montee en competence",
+  ]);
+  const hasFragilitySignal = containsAny(text, [
+    "peu",
+    "manque",
+    "difficile",
+    "fragile",
+    "pas suffisamment",
+    "insuffisant",
+    "insuffisante",
+    "tension",
+  ]);
 
   if (theme === "qualité et adéquation des équipes") {
-    if (hasGrowthProjection || hasRecruitmentTension) {
-      return `Les équipes paraissent adaptées au niveau d’activité actuel, mais la capacité à suivre une montée en charge ou à recruter au bon niveau n’est pas encore sécurisée.`;
+    if (hasGrowthProjection) {
+      return "La trame montre que le sujet équipes tient aujourd’hui, avec un besoin de renfort surtout projeté en cas de croissance ou de nouveau contrat.";
     }
-    if (hasFragilitySignal) {
-      return `L’adéquation actuelle des équipes repose sur un équilibre encore fragile en cas d’évolution de l’activité ou des besoins.`;
-    }
-    return `Le niveau actuel des équipes semble tenir l’activité présente, sans visibilité encore solide sur leur capacité à absorber une évolution du besoin.`;
+    return buildAnchoredConstatFromExcerpt(
+      excerpt,
+      "La trame apporte des éléments sur le niveau actuel des équipes, sans point de rupture immédiat clairement établi."
+    );
   }
 
   if (theme === "ressources vs charge") {
-    if (hasLoadTension) {
-      return `L’ajustement entre charge et ressources existe, mais il semble reposer sur des arbitrages rapprochés plus que sur un pilotage stabilisé.`;
+    if (hasCapacityBuffer) {
+      return "La trame indique une capacité disponible permettant d’absorber une hausse de charge à court terme, plutôt qu’une tension actuelle avérée.";
     }
-    return `La capacité à ajuster durablement les ressources à la charge reste encore peu objectivée.`;
+    if (hasGrowthProjection) {
+      return "La trame fait apparaître un sujet charge / ressources surtout en projection de montée en charge, plus qu’un déséquilibre immédiat établi.";
+    }
+    return buildAnchoredConstatFromExcerpt(
+      excerpt,
+      "La trame apporte des éléments sur l’ajustement entre charge et ressources."
+    );
   }
 
   if (theme === "recrutement et intégration") {
-    if (hasRecruitmentTension || hasGrowthProjection) {
-      return `Le recrutement et l’intégration apparaissent comme un point sensible dès qu’il faut renforcer rapidement les équipes ou préparer une montée en charge.`;
+    if (hasGrowthProjection || hasRecruitmentTension) {
+      return "La trame fait apparaître un besoin de recrutement ou d’intégration surtout projeté, lié à une éventuelle montée en charge.";
     }
-    return `Le processus de recrutement et d’intégration n’apparaît pas encore suffisamment robuste pour sécuriser les besoins futurs.`;
+    return buildAnchoredConstatFromExcerpt(
+      excerpt,
+      "La trame apporte une matière partielle sur le recrutement et l’intégration."
+    );
   }
 
   if (theme === "clarté des rôles") {
-    if (hasRoleTension) {
-      return `La répartition des rôles semble fonctionner au quotidien, mais certains arbitrages ou zones de responsabilité restent potentiellement sensibles.`;
-    }
-    return `La clarté réelle des rôles et des responsabilités n’est pas encore suffisamment objectivée dans le fonctionnement décrit.`;
+    return buildAnchoredConstatFromExcerpt(
+      excerpt,
+      "La trame fournit des éléments sur la répartition des rôles, sans permettre d’aller au-delà de ce qui est explicitement décrit."
+    );
   }
 
   if (theme === "turnover absentéisme stabilité") {
-    return `La stabilité de fonctionnement peut être fragilisée dès que surviennent des absences, des départs ou des tensions de disponibilité.`;
+    return buildAnchoredConstatFromExcerpt(
+      excerpt,
+      "La trame fournit une matière limitée sur la stabilité des équipes."
+    );
   }
 
   if (hasGrowthProjection) {
-    return `Le fonctionnement actuel semble tenir, mais sa robustesse n’est pas démontrée en cas d’accélération de l’activité ou de changement d’échelle.`;
+    return `La trame décrit surtout une vulnérabilité potentielle en cas d’accélération de l’activité, plus qu’une rupture actuelle avérée sur "${theme}".`;
   }
 
-  if (hasFragilitySignal) {
-    return `Le fonctionnement décrit sur "${theme}" repose sur des équilibres encore fragiles ou peu sécurisés.`;
+  if (hasCapacityBuffer) {
+    return `La trame indique plutôt une marge de capacité ou un équilibre actuel favorable sur "${theme}".`;
   }
 
-  return `Le fonctionnement réel sur "${theme}" n’est pas encore assez objectivé pour apprécier sa robustesse dans la durée.`;
+  if (hasFragilitySignal && excerpt) {
+    return `La trame fait ressortir un point de vigilance sur "${theme}" à partir de l’extrait suivant : « ${excerpt} ». `;
+  }
+
+  return buildAnchoredConstatFromExcerpt(
+    excerpt,
+    `Le fonctionnement réel sur "${theme}" n’est pas encore assez objectivé pour qualifier plus précisément le constat.`
+  );
 }
 
 function buildExplicitConstat(params: {
@@ -819,12 +860,30 @@ function buildExplicitConstat(params: {
 function buildManagerialRisk(
   theme: string,
   isAbsence: boolean,
-  entryAngle?: DiagnosticSignal["entryAngle"]
+  entryAngle?: DiagnosticSignal["entryAngle"],
+  sourceExcerpt?: string
 ): string {
   const t = theme.toLowerCase();
+  const futureConditional = excerptSignalsFutureConditional(sourceExcerpt ?? "");
+  const capacityBuffer = excerptSignalsCapacityBuffer(sourceExcerpt ?? "");
 
   if (isAbsence) {
     return `Vous pilotez aujourd’hui le sujet "${theme}" sans base réellement objectivée, ce qui signifie que vos décisions reposent davantage sur des ajustements empiriques que sur des repères fiables, avec un risque direct de dérive non anticipée.`;
+  }
+
+  if (
+    futureConditional &&
+    (t.includes("charge") ||
+      t.includes("ressource") ||
+      t.includes("recrutement") ||
+      t.includes("équipe") ||
+      t.includes("equipe"))
+  ) {
+    return `Le sujet ne paraît pas en rupture immédiate, mais il peut devenir sensible rapidement si l’activité accélère plus vite que la capacité à recruter, intégrer ou ajuster les ressources.`;
+  }
+
+  if (capacityBuffer && (t.includes("charge") || t.includes("ressource"))) {
+    return `Le sujet semble aujourd’hui absorbable, mais l’entreprise reste exposée à un retournement rapide si la charge augmente ou si cette marge de capacité disparaît.`;
   }
 
   switch (entryAngle) {
@@ -848,11 +907,11 @@ function buildManagerialRisk(
         return `L’ajustement entre charge et ressources semble aujourd’hui reposer sur des arbitrages rapprochés plutôt que sur un pilotage stabilisé, ce qui vous expose à des déséquilibres rapides dès que l’activité évolue.`;
       }
 
-      if (t.includes("recrutement") || t.includes("équipe")) {
+      if (t.includes("recrutement") || t.includes("équipe") || t.includes("equipe")) {
         return `Le fonctionnement autour de "${theme}" tient aujourd’hui, mais sans sécurisation réelle de la montée en charge, ce qui vous expose à un décalage rapide entre les besoins et la capacité réelle des équipes.`;
       }
 
-      if (t.includes("rôle")) {
+      if (t.includes("rôle") || t.includes("role")) {
         return `Le manque de clarté opérationnelle sur "${theme}" vous expose à des zones de flou dans la prise de décision, avec un risque de dilution des responsabilités et de reprises managériales fréquentes.`;
       }
 
@@ -1186,7 +1245,12 @@ function buildExplicitSignalsDeterministic(snapshot: BaseTrameSnapshot): Diagnos
           sourceSection: selected.section.id,
           sourceExcerpt: selected.excerpt || "",
           constat: selected.constat,
-          managerialRisk: buildManagerialRisk(bucket.theme, false, selected.entryAngle),
+          managerialRisk: buildManagerialRisk(
+            bucket.theme,
+            false,
+            selected.entryAngle,
+            selected.excerpt
+          ),
           probableConsequence: buildProbableConsequence(bucket.theme),
           entryAngle: selected.entryAngle,
           confidenceScore: scoreConfidenceFromCandidate(selected),
@@ -1618,7 +1682,12 @@ function buildExplicitSignalsFromLlm(params: {
           `La trame fournit un appui exploitable sur le thème "${selected.theme}".`,
         managerialRisk:
           normalizeExtractionText(selected.managerialRisk) ||
-          buildManagerialRisk(selected.theme, false, selected.entryAngle),
+          buildManagerialRisk(
+            selected.theme,
+            false,
+            selected.entryAngle,
+            selected.sourceExcerpt
+          ),
         probableConsequence:
           normalizeExtractionText(selected.probableConsequence) ||
           buildProbableConsequence(selected.theme),
