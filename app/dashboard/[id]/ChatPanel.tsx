@@ -1002,11 +1002,7 @@ export default function ChatPanel({ sessionId }: Props) {
     const userText = input.trim();
     if (!userText) return;
 
-    const shouldPushStandaloneUserMessage = !currentQuestion && !awaitingValidation;
-    if (shouldPushStandaloneUserMessage) {
-      pushMessage("user", userText);
-    }
-
+    pushMessage("user", userText);
     setInput("");
     await sendMessage(userText);
   }
