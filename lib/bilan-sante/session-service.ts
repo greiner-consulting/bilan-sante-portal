@@ -14,6 +14,8 @@ import type {
   DiagnosticSessionAggregate,
   DiagnosticSignal,
   EntryAngle,
+  FinalObjectiveSet,
+  FrozenDimensionDiagnosis,
   MemoryInsight,
   StructuredQuestion,
 } from "@/lib/bilan-sante/session-model";
@@ -31,6 +33,8 @@ type LegacyStructuredQuestion = {
   risque_managerial: string;
   question: string;
 };
+
+type AggregateRow = Awaited<ReturnType<typeof loadAggregate>>["row"];
 
 export type SessionViewPayload = {
   assistant_message: string;
@@ -81,14 +85,76 @@ function uniqueBusinessFacts(values: Array<string | null | undefined>): string[]
   return out;
 }
 
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseDimensionId(value: unknown): number | null {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 4) return null;
+  return parsed;
+}
+
+function parseIterationNumber(value: unknown): number | null {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 3) return null;
+  return parsed;
+}
+
+function normalizePhase(value: unknown): DiagnosticSessionAggregate["phase"] {
+  switch (String(value ?? "")) {
+    case "awaiting_trame":
+    case "dimension_iteration":
+    case "iteration_validation":
+    case "final_objectives_validation":
+    case "report_ready":
+    case "completed":
+      return String(value) as DiagnosticSessionAggregate["phase"];
+    default:
+      return "awaiting_trame";
+  }
+}
+
+function emptySignalRegistry(): DiagnosticSessionAggregate["signalRegistry"] {
+  return {
+    all: [],
+    allSignals: [],
+    byDimension: {
+      d1: [],
+      d2: [],
+      d3: [],
+      d4: [],
+    },
+  };
+}
+
+function collapseRepeatedLetters(value: string): string {
+  return value.replace(/([a-z])\1+/g, "$1");
+}
+
+function compactAlphaToken(value: string): string {
+  return normalizeForMatch(value).replace(/[^a-z]/g, "");
+}
+
+function leadingValidationToken(value: string): string {
+  const firstWord = normalizeText(value).split(/\s+/)[0] ?? "";
+  return collapseRepeatedLetters(compactAlphaToken(firstWord));
+}
+
+function isLooseYesToken(token: string): boolean {
+  return ["oui", "ok", "okay", "yes", "valide", "validee"].includes(token);
+}
+
+function isLooseNoToken(token: string): boolean {
+  return ["non", "no"].includes(token);
+}
+
 function isYes(value: string): boolean {
-  return ["oui", "ok", "valide", "validé", "yes"].includes(
-    normalizeText(value).toLowerCase()
-  );
+  return isLooseYesToken(leadingValidationToken(value)) && normalizeText(value).split(/\s+/).length === 1;
 }
 
 function isNo(value: string): boolean {
-  return ["non", "no"].includes(normalizeText(value).toLowerCase());
+  return isLooseNoToken(leadingValidationToken(value)) && normalizeText(value).split(/\s+/).length === 1;
 }
 
 function parseIterationValidationDecision(value: string): {
@@ -102,14 +168,19 @@ function parseIterationValidationDecision(value: string): {
     return { decision: null, nuance: false };
   }
 
-  const yesOnly = /^(oui|ok|yes|valide|validee?)$/i.test(normalized);
-  if (yesOnly) {
+  const token = leadingValidationToken(raw);
+  const wordCount = raw.split(/\s+/).filter(Boolean).length;
+
+  if (isLooseYesToken(token) && wordCount === 1) {
     return { decision: "yes", nuance: false };
   }
 
-  const noOnly = /^(non|no)$/i.test(normalized);
-  if (noOnly) {
+  if (isLooseNoToken(token) && wordCount === 1) {
     return { decision: "no", nuance: false };
+  }
+
+  if (isLooseYesToken(token) && wordCount > 1) {
+    return { decision: "no", nuance: true };
   }
 
   const yesNuancedPatterns = [
@@ -143,7 +214,7 @@ function parseIterationValidationDecision(value: string): {
     /^reste\b.+/i,
   ];
 
-  if (noNuancedPatterns.some((pattern) => pattern.test(raw) || pattern.test(normalized))) {
+  if (isLooseNoToken(token) || noNuancedPatterns.some((pattern) => pattern.test(raw) || pattern.test(normalized))) {
     return { decision: "no", nuance: true };
   }
 
@@ -462,6 +533,197 @@ function ensureAnalysisMemory(
   };
 }
 
+function normalizeMirrorQuestionBatch(value: unknown): StructuredQuestion[] {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .filter((item) => isObject(item))
+    .map((item, index) => {
+      const signalId = normalizeText(String(item.fact_id ?? item.signalId ?? `recovered-signal-${index + 1}`));
+      const theme = normalizeText(String(item.theme ?? `thème ${index + 1}`));
+      const constat = normalizeText(String(item.constat ?? ""));
+      const risque = normalizeText(String(item.risque_managerial ?? item.risqueManagerial ?? ""));
+      const question = normalizeText(String(item.question ?? item.questionOuverte ?? ""));
+
+      if (!signalId || !theme || !question) return null;
+
+      return {
+        id: normalizeText(String(item.id ?? `recovered-q-${index + 1}`)),
+        signalId,
+        theme,
+        constat,
+        risqueManagerial: risque,
+        questionOuverte: question,
+      } satisfies StructuredQuestion;
+    })
+    .filter(Boolean) as StructuredQuestion[];
+}
+
+function normalizeRecoveredAnswers(params: {
+  rawWorkset: Record<string, unknown> | null;
+  questions: StructuredQuestion[];
+  answeredCountHint: number;
+}): Array<{ questionId: string; answerText: string; answeredAt: string }> {
+  const rawAnswers = params.rawWorkset?.answers;
+  if (Array.isArray(rawAnswers)) {
+    const answers = rawAnswers
+      .filter((item) => isObject(item) && typeof item.questionId === "string")
+      .map((item) => ({
+        questionId: String(item.questionId),
+        answerText: normalizeText(String(item.answerText ?? "[RECOVERED_ANSWER]")),
+        answeredAt: normalizeText(String(item.answeredAt ?? new Date().toISOString())),
+      }));
+
+    if (answers.length > 0) return answers;
+  }
+
+  const count = Math.max(0, Math.min(params.answeredCountHint, params.questions.length));
+  return params.questions.slice(0, count).map((question, index) => ({
+    questionId: question.id,
+    answerText: `[RECOVERED_ANSWER_${index + 1}]`,
+    answeredAt: new Date().toISOString(),
+  }));
+}
+
+function normalizeRecoveredFrozenDimensions(value: unknown): FrozenDimensionDiagnosis[] {
+  return Array.isArray(value) ? (value as FrozenDimensionDiagnosis[]) : [];
+}
+
+function normalizeRecoveredFinalObjectives(value: unknown): FinalObjectiveSet | null {
+  return isObject(value) ? (value as FinalObjectiveSet) : null;
+}
+
+function genericWorksetHeader(dimensionId: number | null, iteration: number | null): string {
+  return `Dimension ${dimensionId ?? "?"} — Itération ${iteration ?? "?"}/3`;
+}
+
+function genericClosurePrompt(dimensionId: number | null, iteration: number | null): string {
+  return `Clôturez-vous l’itération ${iteration ?? "?"}/3 de la dimension ${dimensionId ?? "?"} sur la base des réponses enregistrées ? Merci de répondre uniquement par "oui" ou "non".`;
+}
+
+function hasRecoverableProgress(row: AggregateRow): boolean {
+  if (row.phase && row.phase !== "awaiting_trame") return true;
+  if (row.dimension != null || row.iteration != null) return true;
+  if ((row.question_index ?? 0) > 0) return true;
+  if (Array.isArray(row.question_batch_json) && row.question_batch_json.length > 0) return true;
+  if (Array.isArray(row.consolidation_json) && row.consolidation_json.length > 0) return true;
+  if (isObject(row.final_objectives_json)) return true;
+  return false;
+}
+
+function tryRecoverAggregateFromRow(loaded: Awaited<ReturnType<typeof loadAggregate>>): DiagnosticSessionAggregate | null {
+  const { row, aggregate } = loaded;
+  const raw = isObject(row.bilan_state_json) ? row.bilan_state_json : null;
+
+  const phase = normalizePhase(raw?.phase ?? aggregate?.phase ?? row.phase);
+  const currentDimensionId = parseDimensionId(
+    raw?.currentDimensionId ?? aggregate?.currentDimensionId ?? row.dimension
+  );
+  const currentIteration = parseIterationNumber(
+    raw?.currentIteration ?? aggregate?.currentIteration ?? row.iteration
+  );
+
+  const rawWorkset = isObject(raw?.currentWorkset)
+    ? (raw?.currentWorkset as Record<string, unknown>)
+    : null;
+
+  const questions = normalizeMirrorQuestionBatch(
+    rawWorkset?.questions ?? row.question_batch_json ?? aggregate?.currentWorkset?.questions ?? []
+  );
+
+  const answeredCountHint = Number(
+    row.question_index ?? aggregate?.currentWorkset?.answers.length ?? rawWorkset?.answers?.length ?? 0
+  );
+
+  const answers = normalizeRecoveredAnswers({
+    rawWorkset,
+    questions,
+    answeredCountHint: Number.isFinite(answeredCountHint) ? answeredCountHint : 0,
+  });
+
+  const recoveredWorkset =
+    phase === "dimension_iteration" || phase === "iteration_validation"
+      ? {
+          dimensionId: currentDimensionId ?? 1,
+          iteration: currentIteration ?? 1,
+          header: normalizeText(String(rawWorkset?.header ?? genericWorksetHeader(currentDimensionId, currentIteration))),
+          questions,
+          answers,
+          closurePrompt: normalizeText(
+            String(rawWorkset?.closurePrompt ?? genericClosurePrompt(currentDimensionId, currentIteration))
+          ),
+          closureAskedAt: normalizeText(String(rawWorkset?.closureAskedAt ?? "")) || undefined,
+          targetQuestionCount: questions.length,
+          minimumRequiredCount: Math.min(questions.length, 1),
+          sourceIterationQuestionCount: questions.length,
+          planningDiagnostics: null,
+          closureDiagnostics: null,
+        }
+      : null;
+
+  const recovered: DiagnosticSessionAggregate = {
+    sessionId: normalizeText(String(raw?.sessionId ?? aggregate?.sessionId ?? row.id)),
+    phase,
+    trame: isObject(raw?.trame) ? (raw?.trame as DiagnosticSessionAggregate["trame"]) : aggregate?.trame ?? null,
+    signalRegistry: isObject(raw?.signalRegistry)
+      ? (raw?.signalRegistry as DiagnosticSessionAggregate["signalRegistry"])
+      : aggregate?.signalRegistry ?? emptySignalRegistry(),
+    currentDimensionId,
+    currentIteration,
+    currentWorkset: recoveredWorkset,
+    frozenDimensions: normalizeRecoveredFrozenDimensions(
+      raw?.frozenDimensions ?? aggregate?.frozenDimensions ?? row.consolidation_json
+    ),
+    finalObjectives: normalizeRecoveredFinalObjectives(
+      raw?.finalObjectives ?? aggregate?.finalObjectives ?? row.final_objectives_json
+    ),
+    createdAt: normalizeText(String(raw?.createdAt ?? aggregate?.createdAt ?? row.created_at ?? new Date().toISOString())),
+    updatedAt: normalizeText(String(raw?.updatedAt ?? aggregate?.updatedAt ?? row.updated_at ?? new Date().toISOString())),
+    analysisMemory: Array.isArray(raw?.analysisMemory)
+      ? (raw?.analysisMemory as MemoryInsight[])
+      : aggregate?.analysisMemory ?? [],
+    iterationHistory: Array.isArray(raw?.iterationHistory)
+      ? (raw?.iterationHistory as DiagnosticSessionAggregate["iterationHistory"])
+      : aggregate?.iterationHistory ?? [],
+    themeCoverage: Array.isArray(raw?.themeCoverage)
+      ? (raw?.themeCoverage as DiagnosticSessionAggregate["themeCoverage"])
+      : aggregate?.themeCoverage ?? [],
+    conversationHistory: Array.isArray(raw?.conversationHistory)
+      ? (raw?.conversationHistory as ConversationTurn[])
+      : aggregate?.conversationHistory ?? [],
+  };
+
+  if (!recovered.sessionId) return null;
+  return ensureAnalysisMemory(recovered);
+}
+
+function aggregateNeedsRecovery(params: {
+  row: { extracted_text: string | null; phase?: string | null };
+  aggregate: DiagnosticSessionAggregate | null;
+}): boolean {
+  if (!params.row.extracted_text) return false;
+  if (!params.aggregate) return true;
+
+  if (params.aggregate.phase === "awaiting_trame") return true;
+
+  if (
+    params.aggregate.phase === "dimension_iteration" &&
+    (!params.aggregate.currentWorkset ||
+      (params.aggregate.currentWorkset.questions?.length ?? 0) === 0)
+  ) {
+    return true;
+  }
+
+  if (
+    params.aggregate.phase === "iteration_validation" &&
+    !params.aggregate.currentWorkset
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
 function appendAnswerAnalysisToMemory(params: {
   session: DiagnosticSessionAggregate;
   rawMessage: string;
@@ -736,33 +998,6 @@ function syncAssistantPayloadIntoConversation(params: {
   return session;
 }
 
-function aggregateNeedsRecovery(params: {
-  row: { extracted_text: string | null; phase?: string | null };
-  aggregate: DiagnosticSessionAggregate | null;
-}): boolean {
-  if (!params.row.extracted_text) return false;
-  if (!params.aggregate) return true;
-
-  if (params.aggregate.phase === "awaiting_trame") return true;
-
-  if (
-    params.aggregate.phase === "dimension_iteration" &&
-    (!params.aggregate.currentWorkset ||
-      (params.aggregate.currentWorkset.questions?.length ?? 0) === 0)
-  ) {
-    return true;
-  }
-
-  if (
-    params.aggregate.phase === "iteration_validation" &&
-    !params.aggregate.currentWorkset
-  ) {
-    return true;
-  }
-
-  return false;
-}
-
 export async function ensureAggregate(sessionId: string): Promise<{
   row: Awaited<ReturnType<typeof loadAggregate>>["row"];
   aggregate: DiagnosticSessionAggregate;
@@ -773,6 +1008,12 @@ export async function ensureAggregate(sessionId: string): Promise<{
 
   if (!aggregateNeedsRecovery({ row: loaded.row, aggregate: loaded.aggregate })) {
     return { row: loaded.row, aggregate: loaded.aggregate as DiagnosticSessionAggregate };
+  }
+
+  const recovered = tryRecoverAggregateFromRow(loaded);
+  if (recovered && hasRecoverableProgress(loaded.row)) {
+    await saveAggregate(sessionId, recovered);
+    return { row: loaded.row, aggregate: recovered };
   }
 
   const aggregate = await bootstrapSessionFromTrameWithLlm({
@@ -873,7 +1114,7 @@ export async function processSessionInput(params: {
         ...toSessionView(aggregate),
         assistant_message:
           "J’ai besoin de savoir si cette itération peut être considérée comme validée. " +
-          'Vous pouvez répondre par "oui" ou "non". Si certains points manquent encore, dites-le librement et je poursuivrai l’exploration.',
+          'Vous pouvez répondre par "oui" ou "non". Les variantes simples comme "ouii" ou "nonn" sont acceptées. Si certains points manquent encore, dites-le librement et je poursuivrai l’exploration.',
         questions: [],
         needs_validation: true,
       };
