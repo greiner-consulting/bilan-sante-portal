@@ -194,18 +194,6 @@ function normalizeText(value: unknown) {
   return String(value ?? "").replace(/\s+/g, " ").trim();
 }
 
-function cleanPrefixedLabel(value: string, label: string) {
-  const text = String(value || "").trim();
-  const lower = text.toLowerCase();
-  const prefix = `${label.toLowerCase()} :`;
-
-  if (lower.startsWith(prefix)) {
-    return text.slice(prefix.length).trim();
-  }
-
-  return text;
-}
-
 function formatDateTime(value?: string | null): string {
   const text = normalizeText(value);
   if (!text) return "n/a";
@@ -238,12 +226,7 @@ function normalizeQuestions(value: unknown): StructuredQuestion[] {
         question: String(row.question ?? "").trim(),
       };
     })
-    .filter(
-      (item) =>
-        Boolean(item.constat) &&
-        Boolean(item.risque_managerial) &&
-        Boolean(item.question)
-    );
+    .filter((item) => Boolean(item.question));
 }
 
 function mergeSessionState(
@@ -1067,18 +1050,6 @@ export default function ChatPanel({ sessionId }: Props) {
     phase: sessionState?.phase,
   });
 
-  const displayConstat = currentQuestion
-    ? cleanPrefixedLabel(currentQuestion.constat, "Constat")
-    : "";
-
-  const displayRisque = currentQuestion
-    ? cleanPrefixedLabel(currentQuestion.risque_managerial, "Risque managérial")
-    : "";
-
-  const displayQuestion = currentQuestion
-    ? cleanPrefixedLabel(currentQuestion.question, "Question")
-    : "";
-
   const canBuildReport = sessionState?.phase === "report_ready";
 
   return (
@@ -1220,39 +1191,6 @@ export default function ChatPanel({ sessionId }: Props) {
           );
         })}
       </div>
-
-      {currentQuestion && (
-        <div className="space-y-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
-          <div className="flex items-center justify-between text-sm text-slate-700">
-            <div className="font-semibold text-slate-900">
-              Dimension {sessionState?.dimension ?? "?"} — Itération{" "}
-              {sessionState?.iteration ?? "?"}/3
-            </div>
-            <div>
-              Question {Math.min(currentIndex + 1, questions.length)} / {questions.length}
-            </div>
-          </div>
-
-          {currentQuestion.theme && (
-            <div className="text-xs text-slate-500">Thème : {currentQuestion.theme}</div>
-          )}
-
-          <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-4 text-sm leading-6 text-slate-800">
-            <div>
-              <span className="font-semibold text-slate-900">Constat : </span>
-              {displayConstat}
-            </div>
-            <div>
-              <span className="font-semibold text-slate-900">Risque managérial : </span>
-              {displayRisque}
-            </div>
-            <div>
-              <span className="font-semibold text-slate-900">Question : </span>
-              {displayQuestion}
-            </div>
-          </div>
-        </div>
-      )}
 
       {!currentQuestion && awaitingValidation && (
         <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">

@@ -23,6 +23,7 @@ import {
   type AnswerRecord,
   type DiagnosticSessionAggregate,
   type DiagnosticSignal,
+  type EntryAngle,
   type FinalObjectiveSet,
   type FrozenDimensionDiagnosis,
   type ObjectiveSeed,
@@ -58,6 +59,25 @@ export interface EngineView {
   currentDimensionId: DimensionId | null;
   currentIteration: IterationNumber | null;
 }
+
+type ThemeBridgeInsight = {
+  theme: string;
+  normalizedTheme: string;
+  signalIds: string[];
+  askedAngles: EntryAngle[];
+  answeredAngles: EntryAngle[];
+  substantiveAnswerCount: number;
+  answerLengthScore: number;
+  hasConcreteFacts: boolean;
+  shouldDeepen: boolean;
+  shouldConsolidate: boolean;
+};
+
+type IterationBridge = {
+  dimensionId: DimensionId;
+  sourceIteration: IterationNumber;
+  themes: ThemeBridgeInsight[];
+};
 
 function uniqueById<T extends { id: string }>(items: T[]): T[] {
   const seen = new Set<string>();
@@ -198,18 +218,24 @@ function buildLegacyQuestion(
   };
 }
 
-
 function buildLegacyQuestions(
   session: DiagnosticSessionAggregate,
   dimensionId: DimensionId,
   iteration: IterationNumber,
-  targetCount: number
+  targetCount: number,
+  bridge?: IterationBridge | null
 ): StructuredQuestion[] {
+  const bridgeThemeSet = new Set(
+    (bridge?.themes ?? []).map((item) => item.normalizedTheme)
+  );
+
   const selectedSignals = [...getDimensionSignals(session, dimensionId)]
     .sort((a, b) => {
-      const left = a.criticalityScore + a.confidenceScore;
-      const right = b.criticalityScore + b.confidenceScore;
-      return right - left;
+      const leftBase = a.criticalityScore + a.confidenceScore;
+      const rightBase = b.criticalityScore + b.confidenceScore;
+      const leftBonus = bridgeThemeSet.has(normalizeForMatch(a.theme)) ? 40 : 0;
+      const rightBonus = bridgeThemeSet.has(normalizeForMatch(b.theme)) ? 40 : 0;
+      return rightBase + rightBonus - (leftBase + leftBonus);
     })
     .slice(0, Math.max(targetCount, 1) * 2);
 
@@ -239,12 +265,142 @@ function themeCountsFromQuestions(questions: StructuredQuestion[]): Map<string, 
   return out;
 }
 
+function buildIterationBridge(
+  session: DiagnosticSessionAggregate,
+  workset: IterationWorkset
+): IterationBridge {
+  const answersByQuestionId = new Map(
+    workset.answers.map((answer) => [answer.questionId, answer])
+  );
+  const perTheme = new Map<string, ThemeBridgeInsight>();
+
+  for (const question of workset.questions) {
+    const normalizedTheme = normalizeForMatch(question.theme);
+    const signal = findSignalById(session, question.signalId);
+    const answer = answersByQuestionId.get(question.id);
+    const answerText = normalizeText(answer?.answerText);
+    const substantive = answerText.length >= 18 && !answerText.startsWith("[QUESTION_ABANDONNEE]");
+
+    const current = perTheme.get(normalizedTheme) ?? {
+      theme: question.theme,
+      normalizedTheme,
+      signalIds: [],
+      askedAngles: [],
+      answeredAngles: [],
+      substantiveAnswerCount: 0,
+      answerLengthScore: 0,
+      hasConcreteFacts: false,
+      shouldDeepen: false,
+      shouldConsolidate: false,
+    };
+
+    if (question.signalId && !current.signalIds.includes(question.signalId)) {
+      current.signalIds.push(question.signalId);
+    }
+
+    if (signal?.entryAngle && !current.askedAngles.includes(signal.entryAngle)) {
+      current.askedAngles.push(signal.entryAngle);
+    }
+
+    if (substantive) {
+      current.substantiveAnswerCount += 1;
+      current.answerLengthScore += Math.min(answerText.length, 220);
+      if (signal?.entryAngle && !current.answeredAngles.includes(signal.entryAngle)) {
+        current.answeredAngles.push(signal.entryAngle);
+      }
+      if (/[0-9]/.test(answerText) || /(oui|non|car|parce que|notamment|principalement|hebdo|semaine|mois)/i.test(answerText)) {
+        current.hasConcreteFacts = true;
+      }
+    }
+
+    perTheme.set(normalizedTheme, current);
+  }
+
+  const themes = [...perTheme.values()].map((item) => {
+    const shouldDeepen = item.substantiveAnswerCount > 0;
+    const shouldConsolidate =
+      item.substantiveAnswerCount > 0 && item.answeredAngles.length >= 1;
+
+    return {
+      ...item,
+      shouldDeepen,
+      shouldConsolidate,
+    };
+  });
+
+  return {
+    dimensionId: workset.dimensionId,
+    sourceIteration: workset.iteration,
+    themes,
+  };
+}
+
+function bridgeThemeMap(bridge?: IterationBridge | null): Map<string, ThemeBridgeInsight> {
+  const map = new Map<string, ThemeBridgeInsight>();
+  for (const item of bridge?.themes ?? []) {
+    map.set(item.normalizedTheme, item);
+  }
+  return map;
+}
+
+function scoreBridgeContinuity(params: {
+  signal: DiagnosticSignal;
+  iteration: IterationNumber;
+  bridge?: IterationBridge | null;
+  existingThemeCounts: Map<string, number>;
+}): number {
+  const { signal, iteration, bridge, existingThemeCounts } = params;
+  if (!bridge) return 0;
+
+  const themeKey = normalizeForMatch(signal.theme);
+  const insight = bridgeThemeMap(bridge).get(themeKey);
+  const themeCount = existingThemeCounts.get(themeKey) ?? 0;
+
+  if (iteration === 1) return 0;
+
+  if (!insight) {
+    if (iteration === 2) return -80;
+    if (iteration === 3) return -110;
+    return 0;
+  }
+
+  let score = 0;
+
+  if (iteration === 2) {
+    if (insight.shouldDeepen) score += 70;
+    if (insight.hasConcreteFacts) score += 20;
+    if (signal.entryAngle === "causality") score += 28;
+    if (signal.entryAngle === "arbitration") score += 24;
+    if (signal.entryAngle === "dependency") score += 18;
+    if (signal.entryAngle === "economics") score += 10;
+    if (signal.entryAngle === "mechanism" || signal.entryAngle === "formalization") score -= 18;
+    if (insight.answeredAngles.includes(signal.entryAngle)) score -= 34;
+    if (themeCount > 0) score -= 10;
+  }
+
+  if (iteration === 3) {
+    if (insight.shouldConsolidate) score += 85;
+    if (insight.hasConcreteFacts) score += 18;
+    if (signal.entryAngle === "formalization") score += 34;
+    if (signal.entryAngle === "economics") score += 20;
+    if (signal.entryAngle === "dependency") score += 18;
+    if (signal.entryAngle === "arbitration") score += 12;
+    if (signal.entryAngle === "mechanism") score -= 22;
+    if (signal.entryAngle === "causality") score -= 8;
+    if (insight.answeredAngles.includes(signal.entryAngle)) score -= 24;
+    if (themeCount > 0) score -= 8;
+  }
+
+  return score;
+}
+
 function supplementScore(params: {
   signal: DiagnosticSignal;
   iteration: IterationNumber;
   existingThemeCounts: Map<string, number>;
+  bridge?: IterationBridge | null;
 }): number {
-  const { signal, iteration, existingThemeCounts } = params;
+  const { signal, iteration, existingThemeCounts, bridge } = params;
   const themeKey = normalizeForMatch(signal.theme);
   const themeCount = existingThemeCounts.get(themeKey) ?? 0;
 
@@ -267,6 +423,13 @@ function supplementScore(params: {
     if (signal.entryAngle === "dependency") score += 10;
   }
 
+  score += scoreBridgeContinuity({
+    signal,
+    iteration,
+    bridge,
+    existingThemeCounts,
+  });
+
   return score;
 }
 
@@ -276,8 +439,9 @@ function backfillQuestionsToTarget(params: {
   iteration: IterationNumber;
   questions: StructuredQuestion[];
   targetCount: number;
+  bridge?: IterationBridge | null;
 }): StructuredQuestion[] {
-  const { session, dimensionId, iteration, targetCount } = params;
+  const { session, dimensionId, iteration, targetCount, bridge } = params;
   const baseQuestions = uniqueById(params.questions);
 
   if (baseQuestions.length >= targetCount) {
@@ -290,8 +454,18 @@ function backfillQuestionsToTarget(params: {
   const supplements = [...getDimensionSignals(session, dimensionId)]
     .filter((signal) => !existingSignalIds.has(signal.id))
     .sort((a, b) => {
-      const left = supplementScore({ signal: a, iteration, existingThemeCounts: themeCounts });
-      const right = supplementScore({ signal: b, iteration, existingThemeCounts: themeCounts });
+      const left = supplementScore({
+        signal: a,
+        iteration,
+        existingThemeCounts: themeCounts,
+        bridge,
+      });
+      const right = supplementScore({
+        signal: b,
+        iteration,
+        existingThemeCounts: themeCounts,
+        bridge,
+      });
       return right - left;
     });
 
@@ -364,7 +538,8 @@ async function buildWorkset(
   session: DiagnosticSessionAggregate,
   dimensionId: DimensionId,
   iteration: IterationNumber,
-  reopen = false
+  reopen = false,
+  bridge?: IterationBridge | null
 ): Promise<IterationWorkset> {
   const previousQuestionCount = getPreviousIterationQuestionCount(
     session,
@@ -382,11 +557,44 @@ async function buildWorkset(
   let planningNotes: string[] = [];
 
   if (session.signalRegistry) {
+    const sessionForPlanning = bridge
+      ? {
+          ...session,
+          trame: {
+            ...(session.trame ?? {}),
+            dimensionBlueprints: (session.trame as any)?.dimensionBlueprints,
+          },
+          analysisMemory: [...(session.analysisMemory ?? [])],
+        }
+      : session;
+
+    if (bridge && iteration > 1) {
+      const allowedThemes = bridge.themes
+        .filter((item) => (iteration === 2 ? item.shouldDeepen : item.shouldConsolidate))
+        .map((item) => item.theme);
+
+      if (allowedThemes.length > 0) {
+        (sessionForPlanning as any).trame = {
+          ...((sessionForPlanning as any).trame ?? {}),
+          dimensionBlueprints: [
+            ...((((sessionForPlanning as any).trame?.dimensionBlueprints as any[]) ?? []).filter(
+              (item) => Number(item.dimensionId) !== Number(dimensionId)
+            )),
+            {
+              dimensionId,
+              selectedThemes: allowedThemes,
+              inferredThemes: [],
+            },
+          ],
+        };
+      }
+    }
+
     const planned = await planIterationQuestionsWithDiagnostics({
       registry: session.signalRegistry,
       dimensionId,
       iteration,
-      session,
+      session: sessionForPlanning,
     });
 
     questions = planned.questions;
@@ -401,7 +609,7 @@ async function buildWorkset(
   }
 
   if (questions.length === 0) {
-    questions = buildLegacyQuestions(session, dimensionId, iteration, desiredQuestionCount);
+    questions = buildLegacyQuestions(session, dimensionId, iteration, desiredQuestionCount, bridge);
     planningNotes = ["Fallback legacy planner utilisé."];
     planningDiagnostics = {
       generatedAt: new Date().toISOString(),
@@ -420,6 +628,7 @@ async function buildWorkset(
       iteration,
       questions,
       targetCount: desiredQuestionCount,
+      bridge,
     });
     const added = Math.max(0, questions.length - before);
     if (added > 0) {
@@ -455,6 +664,7 @@ async function buildWorkset(
       iteration,
       questions: finalQuestions,
       targetCount: desiredQuestionCount,
+      bridge,
     });
     const added = Math.max(0, finalQuestions.length - before);
     if (added > 0) {
@@ -489,6 +699,9 @@ async function buildWorkset(
           selectedQuestionIds: boundedFinalQuestions.map((item) => item.id),
           notes: [
             ...planningNotes,
+            bridge && iteration > 1
+              ? `Bridge itération ${bridge.sourceIteration}/3 utilisé sur ${bridge.themes.length} thème(s) pour orienter la continuité.`
+              : "",
             `Questions retenues: ${boundedFinalQuestions.length}.`,
             reopen ? "Réouverture sur la même itération sans dépasser le cap protocolaire." : "",
           ].filter(Boolean),
@@ -496,7 +709,6 @@ async function buildWorkset(
       : null,
   };
 }
-
 
 type SignalFreezeState = "active" | "mitigated" | "contradicted";
 
@@ -1385,7 +1597,7 @@ async function createBootstrappedSessionFromRegistry(params: {
     currentIteration: 1,
   });
 
-  const workset = await buildWorkset(session, 1, 1, false);
+  const workset = await buildWorkset(session, 1, 1, false, null);
   session = attachWorkset(session, workset);
   session = applyEmptyWorksetAutoValidation(session);
   return touchSession(withSafeMemory(session));
@@ -1580,16 +1792,20 @@ export async function submitIterationClosure(params: {
   const currentWorkset = requireCurrentWorkset(session);
 
   if (params.decision === "no") {
+    const reopenBridge = buildIterationBridge(session, currentWorkset);
     const workset = await buildWorkset(
       session,
       currentWorkset.dimensionId,
       currentWorkset.iteration,
-      true
+      true,
+      reopenBridge
     );
     session = attachWorkset({ ...session, phase: "dimension_iteration" }, workset);
     session = applyEmptyWorksetAutoValidation(session);
     return touchSession(withSafeMemory(session));
   }
+
+  const bridge = buildIterationBridge(session, currentWorkset);
 
   session = appendIterationHistory(session, {
     dimensionId: currentWorkset.dimensionId,
@@ -1607,7 +1823,13 @@ export async function submitIterationClosure(params: {
 
   if (!isLastIteration(currentWorkset.iteration)) {
     const nextIteration = nextIterationNumber(currentWorkset.iteration)!;
-    const workset = await buildWorkset(session, currentWorkset.dimensionId, nextIteration, false);
+    const workset = await buildWorkset(
+      session,
+      currentWorkset.dimensionId,
+      nextIteration,
+      false,
+      bridge
+    );
     session = attachWorkset(
       { ...session, phase: "dimension_iteration", currentIteration: nextIteration },
       workset
@@ -1627,7 +1849,7 @@ export async function submitIterationClosure(params: {
 
   if (!isLastDimension(currentWorkset.dimensionId)) {
     const nextDimension = nextDimensionId(currentWorkset.dimensionId)!;
-    const workset = await buildWorkset(session, nextDimension, 1, false);
+    const workset = await buildWorkset(session, nextDimension, 1, false, null);
     session = attachWorkset(
       {
         ...session,
