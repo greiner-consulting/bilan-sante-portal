@@ -393,6 +393,64 @@ function buildRewriteAssistantMessage(
   }
 }
 
+const QUESTION_ALREADY_ASKED_PATTERNS = [
+  "question deja posee",
+  "question déjà posée",
+  "deja posee",
+  "déjà posée",
+  "deja repondu",
+  "déjà répondu",
+  "vous l avez deja posee",
+  "vous l'avez déjà posée",
+  "vous me l avez deja posee",
+  "vous me l'avez déjà posée",
+  "on a deja vu cette question",
+  "on a déjà vu cette question",
+];
+
+function countQuestionTurns(
+  session: DiagnosticSessionAggregate,
+  questionId: string
+): number {
+  return (session.conversationHistory ?? []).filter(
+    (turn) => turn.role === "question" && turn.questionId === questionId
+  ).length;
+}
+
+function indicatesAlreadyAskedOrExhausted(message: string): boolean {
+  const normalized = normalizeForMatch(message);
+  return QUESTION_ALREADY_ASKED_PATTERNS.some((pattern) =>
+    normalized.includes(normalizeForMatch(pattern))
+  );
+}
+
+function shouldAbandonCurrentQuestion(params: {
+  session: DiagnosticSessionAggregate;
+  question: StructuredQuestion;
+  rawMessage: string;
+  intent: ReturnType<typeof analyzeUserAnswer>["intent"];
+}): boolean {
+  if (indicatesAlreadyAskedOrExhausted(params.rawMessage)) {
+    return true;
+  }
+
+  const rewriteCount = countQuestionTurns(params.session, params.question.id);
+  if (
+    ["clarification_request", "challenge", "reframing", "noise"].includes(
+      params.intent
+    ) &&
+    rewriteCount >= 2
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+function buildQuestionAbandonAssistantMessage(question: StructuredQuestion): string {
+  return `Je laisse de côté cette question sur "${question.theme}" pour respecter le nombre limité de questions prévu par le protocole. Je la considère comme abandonnée et je passe au point suivant.`;
+}
+
 function ensureAnalysisMemory(
   session: DiagnosticSessionAggregate
 ): DiagnosticSessionAggregate {
@@ -963,6 +1021,49 @@ export async function processSessionInput(params: {
       shouldPivotAngle: analysis.shouldPivotAngle,
     })
   ) {
+    if (
+      shouldAbandonCurrentQuestion({
+        session: aggregate,
+        question: currentQuestion,
+        rawMessage,
+        intent: analysis.intent,
+      })
+    ) {
+      aggregate = registerAnswer({
+        session: aggregate,
+        questionId,
+        answerText: `[QUESTION_ABANDONNEE] ${rawMessage}`,
+      });
+
+      let payload = toSessionView(aggregate);
+      payload = mergeAcknowledgementIntoPayload({
+        payload,
+        acknowledgement: buildQuestionAbandonAssistantMessage(currentQuestion),
+      });
+
+      aggregate = syncAssistantPayloadIntoConversation({
+        session: aggregate,
+        payload,
+        kind: "question_abandoned",
+      });
+      await saveAggregate(params.sessionId, aggregate);
+
+      await appendDiagnosticEvent({
+        sessionId: params.sessionId,
+        userId: params.userId,
+        kind: "CHAT_ASSISTANT",
+        payload: {
+          ...payload,
+          kind: "question_abandoned",
+          analysis_intent: analysis.intent,
+          analysis_summary: analysis.summary,
+          analysis_rationale: analysis.rationale,
+        },
+      });
+
+      return payload;
+    }
+
     aggregate = (await challengeCurrentQuestion({
       session: aggregate,
       rawMessage,
