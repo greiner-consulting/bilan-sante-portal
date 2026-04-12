@@ -225,6 +225,20 @@ function validationStatusLabel(value: FinalObjective["validationStatus"]): strin
   }
 }
 
+function proposalSourceLabel(value: FinalObjective["proposalSource"]): string {
+  switch (value) {
+    case "initial_seed":
+      return "Proposition issue du diagnostic consolidé";
+    case "alternative_seed":
+      return "Proposition alternative issue d’un autre axe du diagnostic";
+    case "adjusted_feedback":
+      return "Proposition ajustée à partir du retour dirigeant";
+    case "fallback":
+    default:
+      return "Proposition de repli structurée à partir de la zone dominante";
+  }
+}
+
 function weakestDimension(
   frozenDimensions: ReadonlyArray<FrozenDimensionDiagnosis>
 ): FrozenDimensionDiagnosis | null {
@@ -310,8 +324,32 @@ function dominantZone(frozen: FrozenDimensionDiagnosis): ZoneNonPilotee | null {
 function dominantZoneLabel(frozen: FrozenDimensionDiagnosis): string {
   const zone = dominantZone(frozen);
   if (!zone) return "Zone dominante non renseignée";
-
   return cleanFragment(zone.constat, 110) || "Zone dominante non renseignée";
+}
+
+function findFrozenByDimension(
+  frozenDimensions: ReadonlyArray<FrozenDimensionDiagnosis>,
+  dimensionId: number
+): FrozenDimensionDiagnosis | null {
+  return frozenDimensions.find((item) => Number(item.dimensionId) === Number(dimensionId)) ?? null;
+}
+
+function objectiveDiagnosticAnchor(frozen: FrozenDimensionDiagnosis | null): string {
+  if (!frozen) {
+    return "Ancrage diagnostique non disponible.";
+  }
+
+  const zone = dominantZone(frozen);
+  const parts = [
+    zone ? `Zone prioritaire : ${cleanFragment(zone.constat, 140)}` : "",
+    frozen.dominantRootCause ? `Cause dominante : ${cleanFragment(frozen.dominantRootCause, 150)}` : "",
+  ].filter(Boolean);
+
+  if (parts.length === 0) {
+    return `Dimension ${dimensionTitle(frozen.dimensionId)} — ancrage diagnostique non disponible.`;
+  }
+
+  return cleanSentence(parts.join(". "), 320);
 }
 
 function supportStatementsForDimension(frozen: FrozenDimensionDiagnosis): string[] {
@@ -344,9 +382,10 @@ function vulnerabilityStatementsForDimension(frozen: FrozenDimensionDiagnosis): 
     [
       zone?.risqueManagerial,
       zone?.constat,
+      zone?.consequence,
       frozen.dominantRootCause,
     ].map((item) => cleanFragment(item, 170)),
-    3
+    4
   );
 }
 
@@ -385,13 +424,13 @@ function buildExecutiveSynthesis(session: DiagnosticSessionAggregate) {
     ? cleanSentence(
         [
           `Le diagnostic 4D fait ressortir un niveau global ${globalLevelFromAverage(avg).toLowerCase()}, avec un score moyen de ${avg}/5.`,
-          `Le point de fragilité principal se situe sur la dimension "${dimensionTitle(weakest.dimensionId)}".`,
-          `La lecture consolidée montre surtout ${cleanFragment(weakest.dominantRootCause, 150)}.`,
+          `La zone de fragilité prioritaire se situe sur la dimension "${dimensionTitle(weakest.dimensionId)}".`,
+          `La lecture consolidée y fait apparaître ${cleanFragment(weakest.dominantRootCause, 150)}.`,
           strongest
             ? `Le principal point d’appui disponible se situe sur "${dimensionTitle(strongest.dimensionId)}", qui peut servir de base pour sécuriser la mise en mouvement du plan d’actions.`
             : "",
         ].join(" "),
-        520
+        540
       )
     : "Le diagnostic 4D a été consolidé, mais aucune dimension gelée n’est disponible.";
 
@@ -408,7 +447,7 @@ function buildExecutiveSynthesis(session: DiagnosticSessionAggregate) {
         ? vulnerabilities
         : ["Aucune vulnérabilité suffisamment consolidée à ce stade."],
     majorIssue: weakest
-      ? cleanSentence(`${dimensionTitle(weakest.dimensionId)} — cause racine dominante : ${weakest.dominantRootCause}`, 210)
+      ? cleanSentence(`${dimensionTitle(weakest.dimensionId)} — cause racine dominante : ${weakest.dominantRootCause}`, 220)
       : "Enjeu majeur non disponible.",
     priorityObjectives:
       objectiveLabels.length > 0
@@ -517,12 +556,26 @@ function buildTransverseZones(session: DiagnosticSessionAggregate) {
   };
 }
 
-function objectiveCard(objective: FinalObjective): ObjectiveCard {
+function objectiveCard(
+  objective: FinalObjective,
+  frozenDimensions: ReadonlyArray<FrozenDimensionDiagnosis>
+): ObjectiveCard {
+  const frozen = findFrozenByDimension(frozenDimensions, Number(objective.dimensionId));
+  const zone = frozen ? dominantZoneLabel(frozen) : "Zone non disponible";
+  const cause = frozen ? cleanSentence(frozen.dominantRootCause, 190) : "Cause dominante non disponible";
+  const evidence = frozen
+    ? uniqueStrings((frozen.evidenceSummary ?? []).map((item) => cleanSentence(item, 150)), 3).join(" | ")
+    : "";
+
   return {
     title: `Carte objectif — ${dimensionTitle(objective.dimensionId)}`,
     rows: [
       { label: "Objectif de résultat", value: cleanSentence(objective.objectiveLabel, 240) },
       { label: "Responsable", value: objective.owner },
+      { label: "Ancrage diagnostic", value: objectiveDiagnosticAnchor(frozen) },
+      { label: "Zone prioritaire visée", value: zone },
+      { label: "Cause dominante visée", value: cause },
+      evidence ? { label: "Éléments d’appui", value: evidence } : null,
       { label: "Indicateur clé", value: cleanSentence(objective.keyIndicator, 220) },
       { label: "Échéance", value: objective.dueDate },
       {
@@ -533,16 +586,20 @@ function objectiveCard(objective: FinalObjective): ObjectiveCard {
         label: "Hypothèses de gain",
         value: uniqueStrings(objective.gainHypotheses.map((item) => cleanSentence(item, 170)), 4).join(" | "),
       },
+      { label: "Origine de la proposition", value: proposalSourceLabel(objective.proposalSource) },
       { label: "Statut validation dirigeant", value: validationStatusLabel(objective.validationStatus) },
       { label: "Quick win", value: cleanSentence(objective.quickWin, 200) },
-    ],
+    ].filter(Boolean) as VisibleTableRow[],
   };
 }
 
 function buildActionPlanCards(session: DiagnosticSessionAggregate) {
+  const frozenDimensions = getFrozenDimensions(session);
   return {
     title: "Plan d’actions — objectifs orientés résultats",
-    cards: getFinalObjectives(session).map(objectiveCard),
+    cards: getFinalObjectives(session).map((objective) =>
+      objectiveCard(objective, frozenDimensions)
+    ),
   };
 }
 
@@ -584,6 +641,12 @@ function buildLeaderConclusion(session: DiagnosticSessionAggregate) {
           240
         )
       );
+      misalignments.push(
+        cleanSentence(
+          `Le risque managérial prioritaire qui en découle est : ${cleanFragment(zone.risqueManagerial, 180)}.`,
+          240
+        )
+      );
     }
   }
 
@@ -619,8 +682,8 @@ function buildLeaderConclusion(session: DiagnosticSessionAggregate) {
   );
   globalImpacts.push(
     cleanSentence(
-      "Le plan d’actions doit donc être lu comme la traduction structurée du diagnostic gelé, et non comme une liste libre de recommandations.",
-      220
+      "Le plan d’actions doit être lu comme la traduction structurée du diagnostic gelé, avec un objectif par dimension directement relié à la zone dominante et à la cause racine associée.",
+      240
     )
   );
 
@@ -631,8 +694,8 @@ function buildLeaderConclusion(session: DiagnosticSessionAggregate) {
     contradictions,
     globalImpacts,
     closingStatement: cleanSentence(
-      "La cohérence globale du diagnostic repose sur la capacité du dirigeant à traiter en parallèle les dimensions les plus exposées, sans rouvrir le diagnostic gelé, mais en transformant ses constats en objectifs de résultat réellement pilotables.",
-      320
+      "La cohérence globale du diagnostic repose sur la capacité du dirigeant à traiter en parallèle les dimensions les plus exposées, sans rouvrir le diagnostic gelé, mais en transformant ses constats en objectifs de résultat réellement pilotables et explicitement ancrés dans les zones non maîtrisées.",
+      340
     ),
   };
 }
@@ -776,12 +839,13 @@ function constatsToPreviewTable(items: [string, string, string]) {
 function objectiveSummaryTable(cards: ObjectiveCard[]) {
   return {
     title: "Synthèse des objectifs de résultat",
-    headers: ["Dimension", "Objectif de résultat", "Indicateur", "Échéance", "Statut"],
+    headers: ["Dimension", "Objectif de résultat", "Zone visée", "Indicateur", "Échéance", "Statut"],
     rows: cards.map((card) => {
       const byLabel = new Map(card.rows.map((row) => [row.label, row.value]));
       return [
         card.title.replace(/^Carte objectif\s+—\s+/, ""),
         byLabel.get("Objectif de résultat") ?? "",
+        byLabel.get("Zone prioritaire visée") ?? "",
         byLabel.get("Indicateur clé") ?? "",
         byLabel.get("Échéance") ?? "",
         byLabel.get("Statut validation dirigeant") ?? "",
@@ -906,6 +970,9 @@ export function buildPreviewDiagnosticReport(report: StandardDiagnosticReport): 
   sections.push({
     id: "action-plan",
     title: "6. Plan d’actions — objectifs orientés résultats",
+    paragraphs: [
+      "Chaque objectif reprend une zone dominante déjà gelée dans le diagnostic. Il ne s’agit pas d’une recommandation libre, mais d’une traduction opérationnelle d’un risque et d’une cause explicitement documentés.",
+    ],
     tables: [
       objectiveSummaryTable(report.actionPlanCards.cards),
       ...report.actionPlanCards.cards.map((card) => ({
@@ -1035,6 +1102,7 @@ export function buildPlainTextDiagnosticReport(report: StandardDiagnosticReport)
   push("");
 
   push("6. Plan d’actions — objectifs orientés résultats");
+  push("Chaque objectif reprend une zone dominante et une cause racine explicitement documentées.");
   for (const card of report.actionPlanCards.cards) {
     push(card.title);
     card.rows.forEach((row) => push(`- ${row.label} : ${row.value}`));
