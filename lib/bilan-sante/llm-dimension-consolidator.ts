@@ -126,6 +126,7 @@ function serializeFact(fact: DimensionFact): string {
     `  theme: ${fact.theme}`,
     `  nature: ${fact.nature}`,
     `  statement: ${truncate(fact.statement, 260)}`,
+    `  evidence: ${truncate(String(fact.evidence ?? ""), 220) || "aucune"}`,
     `  priorityScore: ${fact.priorityScore ?? 0}`,
     `  confidenceScore: ${fact.confidenceScore ?? 0}`,
     `  tags: ${(fact.tags ?? []).join(", ") || "aucun"}`,
@@ -141,6 +142,7 @@ function serializeSignal(signal: DiagnosticSignal): string {
     `  constat: ${truncate(signal.constat, 220)}`,
     `  managerialRisk: ${truncate(signal.managerialRisk, 220)}`,
     `  probableConsequence: ${truncate(signal.probableConsequence, 220)}`,
+    `  sourceExcerpt: ${truncate(signal.sourceExcerpt, 220)}`,
     `  criticalityScore: ${signal.criticalityScore}`,
     `  confidenceScore: ${signal.confidenceScore}`,
   ].join("\n");
@@ -152,6 +154,7 @@ function serializeBaseline(baseline: DimensionAnalysisSnapshot): string {
   return JSON.stringify(
     {
       summary: baseline.summary ?? "",
+      evidenceSummary: baseline.evidenceSummary ?? [],
       keyFindings: baseline.keyFindings ?? [],
       rootCauseHypotheses: safeArray(baseline.rootCauseHypotheses).map((item) => ({
         label: item.label,
@@ -191,6 +194,18 @@ function serializeBaseline(baseline: DimensionAnalysisSnapshot): string {
   );
 }
 
+function buildAnchorList(params: LlmRefinementInput): string[] {
+  const fromBaseline = safeArray(params.baseline.evidenceSummary).slice(0, 4);
+  const fromFacts = params.facts
+    .slice(0, 6)
+    .map((fact) => truncate(String(fact.evidence ?? fact.statement), 180));
+  const fromSignals = params.signals
+    .slice(0, 4)
+    .map((signal) => truncate(signal.sourceExcerpt, 180));
+
+  return [...new Set([...fromBaseline, ...fromFacts, ...fromSignals].map((item) => normalizeText(item)).filter(Boolean))].slice(0, 8);
+}
+
 function buildPrompt(params: LlmRefinementInput): string {
   const factMaterial =
     params.facts.length > 0
@@ -203,6 +218,7 @@ function buildPrompt(params: LlmRefinementInput): string {
       : "Aucun signal.";
 
   const trameExcerpt = truncate(params.trameText ?? "", 5000);
+  const anchors = buildAnchorList(params);
 
   return [
     "Tu es un consultant senior en diagnostic dirigeant de PME.",
@@ -215,7 +231,9 @@ function buildPrompt(params: LlmRefinementInput): string {
     "- conserver le sens des éléments existants",
     "- reformuler de manière plus crédible, plus métier, moins mécanique",
     "- rester prudent",
+    "- chaque constat reformulé doit rester traçable à au moins un élément d'appui contenu dans les ANCRAGES AUTORISÉS ci-dessous",
     "- si un élément est faible ou insuffisamment étayé, le conserver avec prudence plutôt que l'amplifier",
+    "- ne pas transformer une hypothèse en certitude",
     "- répondre STRICTEMENT en JSON",
     "",
     "Le JSON attendu est :",
@@ -234,6 +252,9 @@ function buildPrompt(params: LlmRefinementInput): string {
     "}",
     "",
     `DIMENSION : ${params.dimensionId} — ${dimensionTitle(params.dimensionId)}`,
+    "",
+    "ANCRAGES AUTORISÉS :",
+    anchors.length > 0 ? anchors.map((item) => `- ${item}`).join("\n") : "- Aucun ancrage disponible.",
     "",
     "BASELINE DETERMINISTE :",
     serializeBaseline(params.baseline),
@@ -442,13 +463,13 @@ export async function refineDimensionConsolidationWithLlm(
   try {
     const response = await client.chat.completions.create({
       model: llmModel(),
-      temperature: 0.1,
+      temperature: 0.05,
       response_format: { type: "json_object" },
       messages: [
         {
           role: "system",
           content:
-            "Tu affines une consolidation de diagnostic dirigeant. Tu n'inventes aucun fait. Tu réponds strictement en JSON.",
+            "Tu affines une consolidation de diagnostic dirigeant. Tu n'inventes aucun fait. Tu gardes les constats ancrés dans les éléments fournis. Tu réponds strictement en JSON.",
         },
         {
           role: "user",

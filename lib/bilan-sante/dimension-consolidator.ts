@@ -55,10 +55,30 @@ function normalizeText(value: unknown): string {
     .trim();
 }
 
+function cleanText(value: unknown): string {
+  return String(value ?? "")
+    .replace(/\s+/g, " ")
+    .replace(/\s+([,.;:!?])/g, "$1")
+    .trim();
+}
+
 function truncate(text: string, max = 220): string {
-  const clean = String(text ?? "").replace(/\s+/g, " ").trim();
+  const clean = cleanText(text);
   if (clean.length <= max) return clean;
   return `${clean.slice(0, max - 1).trim()}…`;
+}
+
+function firstSentence(value: unknown, max = 200): string {
+  const text = cleanText(value);
+  if (!text) return "";
+  const match = text.match(/^(.+?[.!?])(?:\s|$)/);
+  return truncate(cleanText(match?.[1] ?? text), max);
+}
+
+function lowerSentence(value: string): string {
+  const text = cleanText(value);
+  if (!text) return "";
+  return `${text.charAt(0).toLowerCase()}${text.slice(1)}`;
 }
 
 function hashString(input: string): string {
@@ -212,6 +232,23 @@ function fallbackConsequenceFromTheme(theme: string): string {
   return "Dégradation progressive de la tenue des engagements, de la qualité des arbitrages ou de la robustesse d’exécution.";
 }
 
+function supportingEvidenceForFact(
+  fact: DimensionFact,
+  signals: DiagnosticSignal[]
+): string {
+  const signal = signalForTheme(signals, fact.theme);
+  const evidence = firstSentence(fact.evidence, 180);
+  if (evidence) return evidence;
+
+  const source = firstSentence((fact.sources ?? [])[0], 180);
+  if (source) return source;
+
+  const excerpt = firstSentence(signal?.sourceExcerpt, 180);
+  if (excerpt) return excerpt;
+
+  return firstSentence(fact.statement, 180);
+}
+
 function buildZoneFromFact(
   fact: DimensionFact,
   signals: DiagnosticSignal[]
@@ -219,11 +256,11 @@ function buildZoneFromFact(
   const supportingSignal = signalForTheme(signals, fact.theme);
 
   return {
-    constat: fact.statement,
+    constat: firstSentence(fact.statement, 220),
     risqueManagerial:
-      supportingSignal?.managerialRisk ?? fallbackRiskFromTheme(fact.theme),
+      firstSentence(supportingSignal?.managerialRisk, 220) || fallbackRiskFromTheme(fact.theme),
     consequence:
-      supportingSignal?.probableConsequence ?? fallbackConsequenceFromTheme(fact.theme),
+      firstSentence(supportingSignal?.probableConsequence, 220) || fallbackConsequenceFromTheme(fact.theme),
   };
 }
 
@@ -232,34 +269,69 @@ function deterministicConstatFromFact(
   signals: DiagnosticSignal[]
 ): string {
   const legacy = asLegacyLikeFact(fact);
-  const observed = truncate(legacy.observed_element ?? fact.statement, 180);
+  const observed = firstSentence(legacy.observed_element ?? fact.statement, 170);
   const supportingSignal = signalForTheme(signals, fact.theme);
   const risk =
-    legacy.managerial_risk ??
-    supportingSignal?.managerialRisk ??
+    firstSentence(legacy.managerial_risk, 200) ||
+    firstSentence(supportingSignal?.managerialRisk, 200) ||
     fallbackRiskFromTheme(fact.theme);
+  const evidence = supportingEvidenceForFact(fact, signals);
 
   if (legacy.progress === "stabilized" || legacy.progress === "consolidated") {
-    return `${observed} ; ce point met désormais en évidence une zone de pilotage insuffisamment maîtrisée, avec un impact managérial suffisamment établi pour orienter les priorités.`;
+    return `${observed} La matière disponible montre aussi ${lowerSentence(
+      evidence
+    )}, ce qui rend le risque désormais suffisamment étayé pour orienter la priorité d’action.`;
   }
 
   if (legacy.progress === "arbitrated") {
-    return `${observed} ; la matière recueillie montre que le sujet ne relève pas d’un simple écart ponctuel mais d’un arbitrage insuffisamment tenu ou trop implicite.`;
+    return `${observed} La matière recueillie montre aussi ${lowerSentence(
+      evidence
+    )} ; le sujet relève donc moins d’un incident ponctuel que d’un arbitrage insuffisamment tenu.`;
   }
 
   if (legacy.progress === "causalized") {
-    return `${observed} ; les éléments convergent vers un mécanisme de fond insuffisamment maîtrisé plutôt qu’un incident isolé.`;
+    return `${observed} Les éléments convergent aussi vers ${lowerSentence(
+      evidence
+    )}, ce qui renvoie à un mécanisme de fond insuffisamment maîtrisé.`;
   }
 
   if (legacy.progress === "quantified" || legacy.progress === "illustrated") {
-    return `${observed} ; le sujet est désormais objectivé et renvoie à un défaut de maîtrise qui dépasse le seul constat opérationnel.`;
+    return `${observed} Le point est désormais objectivé, notamment parce que ${lowerSentence(
+      evidence
+    )}, et il révèle ${lowerSentence(risk)}.`;
   }
 
-  if (risk) {
-    return `${observed} ; le sujet reste structurant car il révèle ${risk.charAt(0).toLowerCase()}${risk.slice(1)}`;
-  }
+  return `${observed} La matière disponible montre aussi ${lowerSentence(
+    evidence
+  )}, ce qui expose à ${lowerSentence(risk)}.`;
+}
 
-  return `${observed} ; le sujet reste structurant et suggère un défaut de pilotage encore insuffisamment sécurisé.`;
+function buildEvidenceSummary(
+  facts: DimensionFact[],
+  signals: DiagnosticSignal[]
+): string[] {
+  const prioritized = sortFactsForConsolidation(facts).slice(0, 4);
+  const items = prioritized.map((fact) => {
+    const theme = cleanText(fact.theme);
+    const evidence = supportingEvidenceForFact(fact, signals);
+    return `${theme} — ${evidence}`;
+  });
+
+  return uniqueStrings(items.map((item) => truncate(item, 180))).slice(0, 4);
+}
+
+function uniqueStrings(values: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const value of values) {
+    const text = cleanText(value);
+    if (!text) continue;
+    const key = normalizeText(text);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(text);
+  }
+  return out;
 }
 
 function buildKeyFindings(
@@ -285,7 +357,7 @@ function buildKeyFindings(
     );
   }
 
-  return findings.slice(0, 3);
+  return findings.slice(0, 3).map((item) => truncate(item, 260));
 }
 
 function deterministicCauseFromFacts(
@@ -318,14 +390,9 @@ function deterministicCauseFromFacts(
 
   const legacy = asLegacyLikeFact(strongest);
   const theme = strongest.theme;
-  const observed = legacy.observed_element ?? strongest.statement;
-  const supportSignal = signalForTheme(signals, strongest.theme);
-  const supportRisk =
-    legacy.managerial_risk ??
-    supportSignal?.managerialRisk ??
-    fallbackRiskFromTheme(strongest.theme);
-
+  const observed = firstSentence(legacy.observed_element ?? strongest.statement, 170);
   const supportIds = [strongest.id, ...nextFacts.map((fact) => fact.id)];
+  const evidence = supportingEvidenceForFact(strongest, signals);
 
   if (legacy.progress === "arbitrated" || legacy.progress === "stabilized") {
     const confidenceScore = Math.max(62, Math.min(88, strongest.confidenceScore ?? 0));
@@ -336,10 +403,11 @@ function deterministicCauseFromFacts(
           `Arbitrages insuffisamment structurés sur "${theme}"`
         ),
         label: `Arbitrages insuffisamment structurés sur "${theme}"`,
-        rationale: `Les éléments les plus solides montrent que ${truncate(
-          observed.toLowerCase(),
-          180
-        )} ne relève pas seulement d’un écart d’exécution : la difficulté dominante tient à des arbitrages trop implicites, tardifs ou insuffisamment tenus.`,
+        rationale: `Les éléments les plus solides montrent que ${lowerSentence(
+          observed
+        )} et que ${lowerSentence(
+          evidence
+        )}. La difficulté dominante tient donc à des arbitrages trop implicites, tardifs ou insuffisamment tenus.`,
         supportingFactIds: supportIds,
         opposingFactIds: [],
         confidence: confidenceScore / 100,
@@ -357,10 +425,11 @@ function deterministicCauseFromFacts(
           `Mécanisme de pilotage insuffisamment maîtrisé sur "${theme}"`
         ),
         label: `Mécanisme de pilotage insuffisamment maîtrisé sur "${theme}"`,
-        rationale: `La matière consolidée suggère que ${truncate(
-          observed.toLowerCase(),
-          180
-        )} renvoie à un mécanisme récurrent de pilotage insuffisamment maîtrisé, plus qu’à un incident ponctuel.`,
+        rationale: `La matière consolidée suggère que ${lowerSentence(
+          observed
+        )} et que ${lowerSentence(
+          evidence
+        )}. Le sujet renvoie donc à un mécanisme récurrent de pilotage insuffisamment maîtrisé.`,
         supportingFactIds: supportIds,
         opposingFactIds: [],
         confidence: confidenceScore / 100,
@@ -369,40 +438,22 @@ function deterministicCauseFromFacts(
     ];
   }
 
-  if (supportRisk) {
-    const confidenceScore = Math.max(56, Math.min(78, strongest.confidenceScore ?? 0));
-    return [
-      {
-        id: makeRootCauseId(
-          dimensionId,
-          `Pilotage insuffisamment tenu sur "${theme}"`
-        ),
-        label: `Pilotage insuffisamment tenu sur "${theme}"`,
-        rationale: truncate(
-          `La cause dominante semble liée au thème "${theme}" : ${truncate(
-            observed.toLowerCase(),
-            140
-          )}. La difficulté principale tient moins à l’absence de sujet qu’à un pilotage insuffisamment explicite, cadré ou tenu dans la durée.`,
-          240
-        ),
-        supportingFactIds: supportIds,
-        opposingFactIds: [],
-        confidence: confidenceScore / 100,
-        confidenceScore,
-      },
-    ];
-  }
-
-  const confidenceScore = 58;
+  const confidenceScore = Math.max(56, Math.min(78, strongest.confidenceScore ?? 0));
   return [
     {
       id: makeRootCauseId(
         dimensionId,
-        `Défaut de structuration du pilotage sur "${theme}"`
+        `Pilotage insuffisamment tenu sur "${theme}"`
       ),
-      label: `Défaut de structuration du pilotage sur "${theme}"`,
-      rationale:
-        "La matière la plus solide converge vers un déficit de structuration du pilotage, de clarification des responsabilités ou de tenue des arbitrages sur ce thème.",
+      label: `Pilotage insuffisamment tenu sur "${theme}"`,
+      rationale: truncate(
+        `La cause dominante semble liée au thème "${theme}" : ${lowerSentence(
+          observed
+        )}. La matière disponible montre aussi ${lowerSentence(
+          evidence
+        )}, ce qui renvoie avant tout à un pilotage insuffisamment explicite, cadré ou tenu dans la durée.`,
+        240
+      ),
       supportingFactIds: supportIds,
       opposingFactIds: [],
       confidence: confidenceScore / 100,
@@ -424,7 +475,9 @@ function buildRootCauseHypotheses(
       return {
         id: makeRootCauseId(dimensionId, fact.statement),
         label: truncate(fact.statement.replace(/^.+?—\s*/, ""), 140),
-        rationale: `Hypothèse étayée par la matière collectée sur le thème "${fact.theme}" et recoupée avec les signaux disponibles.`,
+        rationale: `Hypothèse étayée par la matière collectée sur le thème "${fact.theme}" et recoupée avec les signaux disponibles, notamment : ${lowerSentence(
+          supportingEvidenceForFact(fact, signals)
+        )}.`,
         supportingFactIds: [fact.id],
         opposingFactIds: [],
         confidence: confidenceScore / 100,
@@ -465,7 +518,7 @@ function buildSwotItemsFromFacts(
   return topFactsByNature(facts, natures, limit).map((fact) => ({
     quadrant,
     label: truncate(fact.statement.replace(/^.+?—\s*/, ""), 140),
-    detail: truncate(fact.statement, 220),
+    detail: truncate(supportingEvidenceForFact(fact, []), 220) || truncate(fact.statement, 220),
     rationale: `Élément dérivé du thème "${fact.theme}" à partir de la matière recueillie.`,
     supportingFactIds: [fact.id],
     priorityScore: fact.priorityScore ?? 0,
@@ -644,6 +697,7 @@ function buildAnalysisSummary(
   const strongest = sortFactsForConsolidation(facts)[0];
   const rootCause = rootCauses[0]?.label;
   const zone = nonPilotedAreas[0]?.constat;
+  const evidence = strongest ? supportingEvidenceForFact(strongest, []) : "";
 
   return truncate(
     [
@@ -651,10 +705,11 @@ function buildAnalysisSummary(
       strongest ? `point dominant "${strongest.theme}"` : "plusieurs sujets structurants",
       rootCause ? `cause racine probable "${rootCause}"` : "",
       zone ? `zone non pilotée prioritaire "${zone}"` : "",
+      evidence ? `matière saillante "${evidence}"` : "",
     ]
       .filter(Boolean)
       .join(" — "),
-    320
+    340
   );
 }
 
@@ -717,6 +772,7 @@ export function consolidateDimensionMaterial(
   );
   const swot = buildSwotSnapshot(params.dimensionId, facts, objectiveSeeds);
   const keyFindings = buildKeyFindings(params.dimensionId, facts, signals);
+  const evidenceSummary = buildEvidenceSummary(facts, signals);
   const summary = buildAnalysisSummary(
     params.dimensionId,
     facts,
@@ -728,7 +784,7 @@ export function consolidateDimensionMaterial(
     dimensionId: params.dimensionId,
     score: conservativeScore(facts, signals),
     summary,
-    evidenceSummary: Array.isArray(keyFindings) ? keyFindings : [summary],
+    evidenceSummary: evidenceSummary.length > 0 ? evidenceSummary : [summary],
     keyFindings,
     nonPilotedAreas:
       nonPilotedAreas.length > 0
@@ -769,7 +825,7 @@ export function buildFrozenDimensionFromConsolidation(params: {
     threats: [],
   };
   const objectiveSeeds = params.consolidation.objectiveSeeds ?? [];
-  const evidenceSummary = params.consolidation.evidenceSummary ?? keyFindings;
+  const evidenceSummary = params.consolidation.evidenceSummary ?? buildEvidenceSummary(consolidationFacts, params.signals);
 
   const keyFacts = sortFactsForConsolidation(consolidationFacts)
     .filter((fact) => ["gap", "weakness", "impact", "cause"].includes(fact.nature))
