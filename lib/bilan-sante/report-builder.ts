@@ -149,6 +149,34 @@ function normalizeForMatch(value: string | null | undefined): string {
     .toLowerCase();
 }
 
+function cleanSentence(value: string | null | undefined, max = 280): string {
+  let text = normalizeText(value)
+    .replace(/\s+([,.;:!?])/g, "$1")
+    .replace(/([,;:]){2,}/g, "$1")
+    .replace(/\.{2,}/g, ".")
+    .replace(/…+/g, "…")
+    .trim();
+
+  text = text.replace(/\s+(de|du|des|d'|et|ou|avec|pour|sur|en|par|a|à)$/i, "").trim();
+  text = text.replace(/[:;,\-–—]\s*$/g, "").trim();
+
+  if (!text) return "";
+  if (text.length > max) {
+    text = `${text.slice(0, max - 1).trim()}…`;
+  }
+
+  if (!/[.!?…]$/.test(text)) {
+    text = `${text}.`;
+  }
+
+  return text;
+}
+
+function cleanFragment(value: string | null | undefined, max = 200): string {
+  const text = cleanSentence(value, max);
+  return text.replace(/[.!?…]$/, "");
+}
+
 function nonEmpty(values: Array<string | null | undefined>): string[] {
   return values.map((value) => normalizeText(value)).filter(Boolean);
 }
@@ -171,9 +199,7 @@ function uniqueStrings(values: Array<string | null | undefined>, max?: number): 
 }
 
 function truncate(value: string, max = 240): string {
-  const text = normalizeText(value);
-  if (text.length <= max) return text;
-  return `${text.slice(0, max - 1).trim()}…`;
+  return cleanSentence(value, max);
 }
 
 function escapeXml(value: string): string {
@@ -272,7 +298,7 @@ function isWeaknessLike(text: string): boolean {
 function swotLabels(items: SwotItem[] | undefined, max = 3): string[] {
   if (!Array.isArray(items)) return [];
   return uniqueStrings(
-    items.flatMap((item) => [item.label, item.detail, item.rationale]),
+    items.flatMap((item) => [item.label, item.detail, item.rationale]).map((x) => cleanFragment(x, 170)),
     max
   );
 }
@@ -285,8 +311,7 @@ function dominantZoneLabel(frozen: FrozenDimensionDiagnosis): string {
   const zone = dominantZone(frozen);
   if (!zone) return "Zone dominante non renseignée";
 
-  const first = truncate(zone.constat, 110);
-  return first || "Zone dominante non renseignée";
+  return cleanFragment(zone.constat, 110) || "Zone dominante non renseignée";
 }
 
 function supportStatementsForDimension(frozen: FrozenDimensionDiagnosis): string[] {
@@ -294,14 +319,14 @@ function supportStatementsForDimension(frozen: FrozenDimensionDiagnosis): string
   if (fromSnapshot.length > 0) return fromSnapshot;
 
   const fromEvidence = uniqueStrings(
-    (frozen.evidenceSummary ?? []).filter((item) => !isWeaknessLike(item)),
+    (frozen.evidenceSummary ?? []).filter((item) => !isWeaknessLike(item)).map((item) => cleanFragment(item, 160)),
     3
   );
   if (fromEvidence.length > 0) return fromEvidence;
 
   if (frozen.score >= 4) {
     const safeFindings = uniqueStrings(
-      frozen.consolidatedFindings.filter((item) => !isWeaknessLike(item)),
+      frozen.consolidatedFindings.filter((item) => !isWeaknessLike(item)).map((item) => cleanFragment(item, 170)),
       2
     );
     if (safeFindings.length > 0) {
@@ -320,7 +345,7 @@ function vulnerabilityStatementsForDimension(frozen: FrozenDimensionDiagnosis): 
       zone?.risqueManagerial,
       zone?.constat,
       frozen.dominantRootCause,
-    ],
+    ].map((item) => cleanFragment(item, 170)),
     3
   );
 }
@@ -329,11 +354,12 @@ function buildExecutiveSynthesis(session: DiagnosticSessionAggregate) {
   const frozenDimensions = getFrozenDimensions(session);
   const avg = averageScore(frozenDimensions);
   const weakest = weakestDimension(frozenDimensions);
+  const strongest = strongestDimension(frozenDimensions);
 
   const strengths = uniqueStrings(
     frozenDimensions.flatMap((frozen) =>
       supportStatementsForDimension(frozen).map(
-        (item) => `${dimensionTitle(frozen.dimensionId)} — ${item}`
+        (item) => `${dimensionTitle(frozen.dimensionId)} — ${cleanFragment(item, 160)}`
       )
     ),
     3
@@ -345,7 +371,7 @@ function buildExecutiveSynthesis(session: DiagnosticSessionAggregate) {
       .sort((a, b) => a.score - b.score)
       .flatMap((frozen) =>
         vulnerabilityStatementsForDimension(frozen).map(
-          (item) => `${dimensionTitle(frozen.dimensionId)} — ${item}`
+          (item) => `${dimensionTitle(frozen.dimensionId)} — ${cleanFragment(item, 165)}`
         )
       ),
     4
@@ -353,18 +379,26 @@ function buildExecutiveSynthesis(session: DiagnosticSessionAggregate) {
 
   const objectiveLabels = getFinalObjectives(session)
     .slice(0, 5)
-    .map((objective) => objective.objectiveLabel);
+    .map((objective) => cleanFragment(objective.objectiveLabel, 170));
+
+  const synthesis = weakest
+    ? cleanSentence(
+        [
+          `Le diagnostic 4D fait ressortir un niveau global ${globalLevelFromAverage(avg).toLowerCase()}, avec un score moyen de ${avg}/5.`,
+          `Le point de fragilité principal se situe sur la dimension "${dimensionTitle(weakest.dimensionId)}".`,
+          `La lecture consolidée montre surtout ${cleanFragment(weakest.dominantRootCause, 150)}.`,
+          strongest
+            ? `Le principal point d’appui disponible se situe sur "${dimensionTitle(strongest.dimensionId)}", qui peut servir de base pour sécuriser la mise en mouvement du plan d’actions.`
+            : "",
+        ].join(" "),
+        520
+      )
+    : "Le diagnostic 4D a été consolidé, mais aucune dimension gelée n’est disponible.";
 
   return {
     globalScore: avg,
     globalLevel: globalLevelFromAverage(avg),
-    synthesis: weakest
-      ? `Le diagnostic 4D fait ressortir une performance managériale globalement ${globalLevelFromAverage(
-          avg
-        ).toLowerCase()}, avec un point de fragilité dominant sur la dimension "${dimensionTitle(
-          weakest.dimensionId
-        )}". Les constats gelés convergent vers des enjeux de pilotage qui affectent la robustesse économique, la tenue des arbitrages et la capacité à transformer la performance attendue en résultats durables.`
-      : "Le diagnostic 4D a été consolidé, mais aucune dimension gelée n’est disponible.",
+    synthesis,
     keyStrengths:
       strengths.length > 0
         ? strengths
@@ -374,7 +408,7 @@ function buildExecutiveSynthesis(session: DiagnosticSessionAggregate) {
         ? vulnerabilities
         : ["Aucune vulnérabilité suffisamment consolidée à ce stade."],
     majorIssue: weakest
-      ? `${dimensionTitle(weakest.dimensionId)} — cause racine dominante : ${weakest.dominantRootCause}`
+      ? cleanSentence(`${dimensionTitle(weakest.dimensionId)} — cause racine dominante : ${weakest.dominantRootCause}`, 210)
       : "Enjeu majeur non disponible.",
     priorityObjectives:
       objectiveLabels.length > 0
@@ -387,9 +421,9 @@ function toZoneTable(zone: ZoneNonPilotee, title: string) {
   return {
     title,
     rows: [
-      { label: "Constat", value: zone.constat },
-      { label: "Risque managérial", value: zone.risqueManagerial },
-      { label: "Conséquence", value: zone.consequence },
+      { label: "Constat", value: cleanSentence(zone.constat, 240) },
+      { label: "Risque managérial", value: cleanSentence(zone.risqueManagerial, 220) },
+      { label: "Conséquence", value: cleanSentence(zone.consequence, 220) },
     ],
   };
 }
@@ -398,25 +432,25 @@ function buildSwot(frozen: FrozenDimensionDiagnosis): SwotTable {
   const forces = uniqueStrings(
     [
       ...supportStatementsForDimension(frozen),
-      ...(frozen.swot?.strengths ?? []).map((item) => item.label),
+      ...(frozen.swot?.strengths ?? []).map((item) => cleanFragment(item.label, 160)),
     ],
     4
   );
 
   const faiblesses = uniqueStrings(
     [
-      ...(frozen.unmanagedZones ?? []).map((zone) => zone.constat),
-      ...(frozen.swot?.weaknesses ?? []).map((item) => item.label),
-      frozen.dominantRootCause,
+      ...(frozen.unmanagedZones ?? []).map((zone) => cleanFragment(zone.constat, 170)),
+      ...(frozen.swot?.weaknesses ?? []).map((item) => cleanFragment(item.label, 170)),
+      cleanFragment(frozen.dominantRootCause, 170),
     ],
     4
   );
 
   const opportunites = uniqueStrings(
     [
-      ...(frozen.objectiveSeeds ?? []).map((seed) => seed.label),
-      ...(frozen.objectiveSeeds ?? []).map((seed) => seed.quickWin),
-      `Réduction directe de l’exposition liée à la cause racine : ${frozen.dominantRootCause}`,
+      ...(frozen.objectiveSeeds ?? []).map((seed) => cleanFragment(seed.label, 170)),
+      ...(frozen.objectiveSeeds ?? []).map((seed) => cleanFragment(seed.quickWin, 170)),
+      `Réduction directe de l’exposition liée à la cause racine : ${cleanFragment(frozen.dominantRootCause, 150)}`,
       `Amélioration de la robustesse de pilotage sur la dimension "${dimensionTitle(
         frozen.dimensionId
       )}"`,
@@ -426,9 +460,9 @@ function buildSwot(frozen: FrozenDimensionDiagnosis): SwotTable {
 
   const risques = uniqueStrings(
     [
-      ...(frozen.unmanagedZones ?? []).map((zone) => zone.consequence),
-      ...(frozen.swot?.threats ?? []).map((item) => item.label),
-      ...(frozen.unmanagedZones ?? []).map((zone) => zone.risqueManagerial),
+      ...(frozen.unmanagedZones ?? []).map((zone) => cleanFragment(zone.consequence, 170)),
+      ...(frozen.swot?.threats ?? []).map((item) => cleanFragment(item.label, 170)),
+      ...(frozen.unmanagedZones ?? []).map((zone) => cleanFragment(zone.risqueManagerial, 170)),
     ],
     4
   );
@@ -452,11 +486,15 @@ function buildDimensionSection(
     dimensionId: frozen.dimensionId,
     title: dimensionTitle(frozen.dimensionId),
     score: frozen.score,
-    summary: normalizeText(frozen.summary),
-    consolidatedFindings: frozen.consolidatedFindings,
-    dominantRootCause: frozen.dominantRootCause,
+    summary: cleanSentence(frozen.summary, 420),
+    consolidatedFindings: [
+      cleanSentence(frozen.consolidatedFindings[0], 240),
+      cleanSentence(frozen.consolidatedFindings[1], 240),
+      cleanSentence(frozen.consolidatedFindings[2], 240),
+    ],
+    dominantRootCause: cleanSentence(frozen.dominantRootCause, 220),
     dominantZoneLabel: dominantZoneLabel(frozen),
-    evidenceSummary: uniqueStrings(frozen.evidenceSummary ?? [], 4),
+    evidenceSummary: uniqueStrings((frozen.evidenceSummary ?? []).map((item) => cleanSentence(item, 180)), 4),
     unmanagedZoneTables: (frozen.unmanagedZones ?? []).map((zone, index) =>
       toZoneTable(zone, `Zone non pilotée ${index + 1}`)
     ),
@@ -483,20 +521,20 @@ function objectiveCard(objective: FinalObjective): ObjectiveCard {
   return {
     title: `Carte objectif — ${dimensionTitle(objective.dimensionId)}`,
     rows: [
-      { label: "Objectif de résultat", value: objective.objectiveLabel },
+      { label: "Objectif de résultat", value: cleanSentence(objective.objectiveLabel, 240) },
       { label: "Responsable", value: objective.owner },
-      { label: "Indicateur clé", value: objective.keyIndicator },
+      { label: "Indicateur clé", value: cleanSentence(objective.keyIndicator, 220) },
       { label: "Échéance", value: objective.dueDate },
       {
         label: "Gain potentiel",
-        value: objective.potentialGain,
+        value: cleanSentence(objective.potentialGain, 220),
       },
       {
         label: "Hypothèses de gain",
-        value: uniqueStrings(objective.gainHypotheses, 4).join(" | "),
+        value: uniqueStrings(objective.gainHypotheses.map((item) => cleanSentence(item, 170)), 4).join(" | "),
       },
       { label: "Statut validation dirigeant", value: validationStatusLabel(objective.validationStatus) },
-      { label: "Quick win", value: objective.quickWin },
+      { label: "Quick win", value: cleanSentence(objective.quickWin, 200) },
     ],
   };
 }
@@ -520,22 +558,31 @@ function buildLeaderConclusion(session: DiagnosticSessionAggregate) {
 
   if (strongest) {
     alignments.push(
-      `La dimension la plus robuste semble être "${dimensionTitle(
-        strongest.dimensionId
-      )}", ce qui constitue un appui potentiel pour sécuriser la mise en mouvement du plan d’actions.`
+      cleanSentence(
+        `La dimension la plus robuste semble être "${dimensionTitle(
+          strongest.dimensionId
+        )}", ce qui peut servir d’appui pour sécuriser la mise en mouvement du plan d’actions.`,
+        220
+      )
     );
   }
 
   if (weakest) {
     misalignments.push(
-      `La dimension "${dimensionTitle(
-        weakest.dimensionId
-      )}" concentre l’écart principal entre fonctionnement attendu et fonctionnement observé.`
+      cleanSentence(
+        `La dimension "${dimensionTitle(
+          weakest.dimensionId
+        )}" concentre l’écart principal entre fonctionnement attendu et fonctionnement observé.`,
+        220
+      )
     );
     const zone = dominantZone(weakest);
     if (zone) {
       misalignments.push(
-        `La zone dominante sur cette dimension peut se résumer ainsi : ${truncate(zone.constat, 220)}`
+        cleanSentence(
+          `La zone dominante sur cette dimension se résume ainsi : ${cleanFragment(zone.constat, 180)}.`,
+          240
+        )
       );
     }
   }
@@ -545,7 +592,10 @@ function buildLeaderConclusion(session: DiagnosticSessionAggregate) {
     frozenDimensions.some((d) => d.dimensionId === 3)
   ) {
     contradictions.push(
-      "Une tension potentielle existe entre ambition commerciale, discipline de sélection des affaires et robustesse de la marge réellement tenue."
+      cleanSentence(
+        "Une tension potentielle existe entre ambition commerciale, discipline de sélection des affaires et robustesse de la marge réellement tenue.",
+        220
+      )
     );
   }
 
@@ -554,15 +604,24 @@ function buildLeaderConclusion(session: DiagnosticSessionAggregate) {
     frozenDimensions.some((d) => d.dimensionId === 4)
   ) {
     contradictions.push(
-      "Une faiblesse de rôles, relais ou capacités peut amplifier directement les dérives d’exécution, de qualité ou de productivité."
+      cleanSentence(
+        "Une faiblesse de rôles, relais ou capacités peut amplifier directement les dérives d’exécution, de qualité ou de productivité.",
+        220
+      )
     );
   }
 
   globalImpacts.push(
-    "Les causes racines identifiées montrent que la performance économique ne dépend pas d’un seul sujet, mais d’un enchaînement entre pilotage, arbitrage, sélectivité et discipline d’exécution."
+    cleanSentence(
+      "Les causes racines identifiées montrent que la performance économique ne dépend pas d’un seul sujet, mais d’un enchaînement entre pilotage, arbitrage, sélectivité et discipline d’exécution.",
+      250
+    )
   );
   globalImpacts.push(
-    "Le plan d’actions doit donc être lu comme une traduction structurée du diagnostic gelé, et non comme une liste libre de recommandations."
+    cleanSentence(
+      "Le plan d’actions doit donc être lu comme la traduction structurée du diagnostic gelé, et non comme une liste libre de recommandations.",
+      220
+    )
   );
 
   return {
@@ -571,8 +630,10 @@ function buildLeaderConclusion(session: DiagnosticSessionAggregate) {
     misalignments,
     contradictions,
     globalImpacts,
-    closingStatement:
-      "La cohérence globale du diagnostic repose sur la capacité du dirigeant à traiter en parallèle les dimensions les plus exposées, sans rouvrir le diagnostic gelé, mais en transformant ses constats en objectifs de résultat pilotables.",
+    closingStatement: cleanSentence(
+      "La cohérence globale du diagnostic repose sur la capacité du dirigeant à traiter en parallèle les dimensions les plus exposées, sans rouvrir le diagnostic gelé, mais en transformant ses constats en objectifs de résultat réellement pilotables.",
+      320
+    ),
   };
 }
 
@@ -596,13 +657,16 @@ function buildInputHistory(session: DiagnosticSessionAggregate) {
       "Aucun chiffre précis n’est inventé ; les gains sont exprimés en fourchettes prudentes avec hypothèses.",
     ],
     trameQualityFlags:
-      session.trame?.qualityFlags.map((flag) => `[${flag.severity}] ${flag.message}`) ?? [],
+      session.trame?.qualityFlags.map((flag) => cleanSentence(`[${flag.severity}] ${flag.message}`, 220)) ?? [],
     missingFieldSignals:
       session.trame?.missingFields.map(
         (field) =>
-          `${field.label} — ${field.sourceText}${
-            field.dimensionId ? ` (dimension ${field.dimensionId})` : ""
-          }`
+          cleanSentence(
+            `${field.label} — ${field.sourceText}${
+              field.dimensionId ? ` (dimension ${field.dimensionId})` : ""
+            }`,
+            220
+          )
       ) ?? [],
   };
 }
@@ -626,9 +690,9 @@ function buildChecklist(compliance: ComplianceReport) {
   return {
     title: "Checklist de conformité finale",
     isCompliant: compliance.isCompliant,
-    summary: compliance.summary,
+    summary: compliance.summary.map((item) => cleanSentence(item, 200)),
     warnings: compliance.warnings.map(
-      (issue) => `[${issue.code}] ${issue.message}`
+      (issue) => cleanSentence(`[${issue.code}] ${issue.message}`, 220)
     ),
   };
 }
@@ -1044,18 +1108,18 @@ export function buildHtmlDiagnosticReport(report: StandardDiagnosticReport): str
       <title>${escapeXml(report.title)}</title>
       <style>
         body { font-family: Arial, Helvetica, sans-serif; color: #111827; margin: 0; background: #f8fafc; }
-        .page { max-width: 980px; margin: 0 auto; padding: 32px 24px 48px; }
+        .page { max-width: 1080px; margin: 0 auto; padding: 32px 24px 48px; }
         h1 { font-size: 28px; margin: 0 0 8px; }
         .meta { color: #4b5563; margin-bottom: 24px; }
         .report-section { background: #fff; border: 1px solid #d1d5db; border-radius: 12px; padding: 18px 18px 12px; margin-bottom: 18px; }
         .report-section h2 { font-size: 20px; margin: 0 0 12px; }
-        p { line-height: 1.55; margin: 0 0 10px; }
+        p { line-height: 1.65; margin: 0 0 12px; }
         ul { margin: 0 0 12px 18px; padding: 0; }
-        li { margin: 0 0 6px; line-height: 1.45; }
+        li { margin: 0 0 7px; line-height: 1.5; }
         .table-block { margin: 16px 0 18px; }
         .table-title { font-weight: 700; margin-bottom: 8px; }
-        table { width: 100%; border-collapse: collapse; table-layout: fixed; }
-        th, td { border: 1px solid #d1d5db; padding: 8px 10px; vertical-align: top; text-align: left; font-size: 13px; line-height: 1.35; }
+        table { width: 100%; border-collapse: collapse; table-layout: auto; }
+        th, td { border: 1px solid #d1d5db; padding: 8px 10px; vertical-align: top; text-align: left; font-size: 13px; line-height: 1.45; word-break: break-word; white-space: normal; }
         th { background: #f3f4f6; }
       </style>
     </head>
