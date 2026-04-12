@@ -123,6 +123,34 @@ function extractEvidenceFocus(params: {
   return candidate ?? "";
 }
 
+function sourceSuggestsFutureFragility(params: {
+  constat?: string;
+  trameEvidence?: string;
+  managerialRisk?: string;
+}): boolean {
+  const text = normalizeForMatch(
+    [params.constat, params.trameEvidence, params.managerialRisk].filter(Boolean).join(" | ")
+  );
+
+  return [
+    "si la croissance",
+    "si un contrat",
+    "si cela arrive",
+    "venait a manquer",
+    "venait à manquer",
+    "en cas de croissance",
+    "en cas d acceleration",
+    "en cas d'acceleration",
+    "montee en charge",
+    "montée en charge",
+    "aurons besoin",
+    "aura besoin",
+    "besoin de recruter",
+    "si la charge augmente",
+    "si le volume double",
+  ].some((pattern) => text.includes(normalizeForMatch(pattern)));
+}
+
 function questionLooksTooGeneric(value: string): boolean {
   const text = normalizeForMatch(value);
   return [
@@ -131,7 +159,21 @@ function questionLooksTooGeneric(value: string): boolean {
     "quel est aujourd'hui le point le moins maitrise",
     "qu'est-ce qui n'est pas assez cadre aujourd'hui",
     "qu'est-ce qui manque surtout pour piloter correctement le sujet",
+    "qu'est-ce qui empeche vos equipes de bien comprendre",
+    "qu'est-ce qui empeche vos equipes de bien suivre",
+    "quel serait le premier frein",
+    "quel est aujourd'hui le point le moins pilote",
   ].some((pattern) => text.includes(normalizeForMatch(pattern)));
+}
+
+function questionLooksTooHypothetical(value: string): boolean {
+  const text = normalizeForMatch(value);
+  return (
+    text.startsWith("si ") ||
+    text.startsWith("en cas de ") ||
+    text.includes("quel serait") ||
+    text.includes("que se passerait-il")
+  );
 }
 
 function questionTooCloseToPrior(value: string, priorQuestionText?: string | null): boolean {
@@ -151,6 +193,15 @@ function questionTooCloseToPrior(value: string, priorQuestionText?: string | nul
   return union > 0 && intersection / union >= 0.58;
 }
 
+function buildConcreteLead(theme: string, focus: string): string {
+  const safeTheme = normalizeText(theme);
+  const safeFocus = normalizeText(focus);
+  if (safeFocus) {
+    return `Sur "${safeTheme}", quand on regarde "${safeFocus}", `;
+  }
+  return `Sur "${safeTheme}", `;
+}
+
 function buildQuestionFallback(params: {
   iteration: IterationNumber;
   theme: string;
@@ -164,29 +215,21 @@ function buildQuestionFallback(params: {
 }): string {
   const theme = normalizeText(params.theme);
   const constat = normalizeText(params.constat);
-  const lowerConstat = constat
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase();
   const focus = normalizeText(params.evidenceFocus) || extractEvidenceFocus({
     trameEvidence: params.trameEvidence,
     facts: params.facts,
     constat,
   });
-  const preciseLead = focus
-    ? `Sur "${theme}", quand on regarde "${focus}", `
-    : `Sur "${theme}", `;
-
-  const growthLike =
-    lowerConstat.includes("croissance") ||
-    lowerConstat.includes("si la croissance arrive") ||
-    lowerConstat.includes("besoin de recruter") ||
-    lowerConstat.includes("montee en charge") ||
-    lowerConstat.includes("montée en charge");
+  const preciseLead = buildConcreteLead(theme, focus);
+  const futureFragility = sourceSuggestsFutureFragility({
+    constat,
+    trameEvidence: params.trameEvidence,
+    managerialRisk: params.managerialRisk,
+  });
 
   if (params.iteration === 1) {
-    if (growthLike && theme === "qualité et adéquation des équipes") {
-      return "Si l’activité accélère, qu’est-ce qui risque de bloquer d’abord dans votre capacité à suivre ?";
+    if (futureFragility && theme === "qualité et adéquation des équipes") {
+      return "Quand l’activité accélère, où voyez-vous d’abord le besoin de renfort : recrutement, intégration, encadrement ou profils terrain ?";
     }
 
     if (params.isAbsence) {
@@ -219,43 +262,57 @@ function buildQuestionFallback(params: {
   }
 
   if (params.iteration === 2) {
-    if (growthLike && theme === "qualité et adéquation des équipes") {
-      return "Si la charge augmente vite, où serait selon vous le premier manque : recrutement, intégration, encadrement ou profils terrain ?";
+    if (futureFragility) {
+      switch (params.entryAngle) {
+        case "dependency":
+          return `${preciseLead}si la charge monte vite, quel relais ou quelle personne devient indispensable ?`;
+        case "formalization":
+          return `${preciseLead}si l’activité accélère, qu’est-ce qui n’est pas assez cadré pour tenir le rythme ?`;
+        default:
+          return `${preciseLead}si l’activité accélère, où apparaît le premier frein concret ?`;
+      }
     }
 
     switch (params.entryAngle) {
       case "causality":
-        return `${preciseLead}qu’est-ce qui explique surtout cette situation ?`;
+        return `${preciseLead}qu’est-ce qui bloque ou explique le plus cette situation dans les faits ?`;
       case "arbitration":
-        return `${preciseLead}où la décision se bloque-t-elle réellement ?`;
+        return `${preciseLead}qui décide réellement et à quel moment cela remonte ?`;
       case "dependency":
-        return `${preciseLead}quelle dépendance pèse le plus aujourd’hui ?`;
+        return `${preciseLead}sur qui devez-vous encore vous appuyer pour que cela avance ?`;
       case "economics":
-        return `${preciseLead}où se voit aujourd’hui l’impact économique réel ?`;
+        return `${preciseLead}où voyez-vous concrètement l’effet sur le coût, la marge ou le cash ?`;
       case "formalization":
-        return `${preciseLead}qu’est-ce qui manque surtout pour piloter correctement ce point ?`;
+        return `${preciseLead}qu’est-ce qui se fait encore sans règle claire ou sans support formalisé ?`;
       default:
-        return `${preciseLead}qu’est-ce qui explique surtout la situation actuelle ?`;
+        return `${preciseLead}qu’est-ce qui coince concrètement aujourd’hui ?`;
     }
   }
 
-  if (growthLike && theme === "qualité et adéquation des équipes") {
-    return "En cas de croissance rapide, quel est le point que vous maîtrisez le moins aujourd’hui ?";
+  if (futureFragility) {
+    switch (params.entryAngle) {
+      case "dependency":
+        return `${preciseLead}si la personne clé manque, qu’est-ce qui s’arrête ou ralentit d’abord ?`;
+      case "economics":
+        return `${preciseLead}si l’activité accélère, quel repère vous manquera pour voir la dérive à temps ?`;
+      default:
+        return `${preciseLead}si l’activité accélère, quel point restera le plus fragile ?`;
+    }
   }
 
   switch (params.entryAngle) {
     case "arbitration":
-      return `${preciseLead}quel arbitrage reste aujourd’hui le moins clair ?`;
+      return `${preciseLead}quel arbitrage remonte encore jusqu’à vous aujourd’hui ?`;
     case "dependency":
-      return `${preciseLead}quelle dépendance reste aujourd’hui la plus risquée ?`;
+      return `${preciseLead}qu’est-ce qui ne tourne pas correctement sans la personne ou le relais clé ?`;
     case "economics":
-      return `${preciseLead}quel point est aujourd’hui le moins piloté sur le plan économique ?`;
+      return `${preciseLead}quel repère vous manque encore pour voir la dérive à temps ?`;
     case "formalization":
-      return `${preciseLead}quel point reste aujourd’hui le moins cadré ?`;
+      return `${preciseLead}qu’est-ce qui reste encore géré à l’oral ou au cas par cas ?`;
     case "causality":
-      return `${preciseLead}quelle cause racine domine encore aujourd’hui ?`;
+      return `${preciseLead}quelle cause de fond n’est toujours pas traitée aujourd’hui ?`;
     default:
-      return `${preciseLead}quel est aujourd’hui le point le moins maîtrisé ?`;
+      return `${preciseLead}quel point reste encore le moins sécurisé aujourd’hui ?`;
   }
 }
 
@@ -264,6 +321,49 @@ function normalizeQuestionOutput(value: unknown, fallback: string): string {
   if (!text) return fallback;
   if (/[?؟]$/.test(text)) return text;
   return `${text}?`;
+}
+
+function shouldFallbackToConcreteQuestion(params: {
+  candidate: string;
+  fallback: string;
+  iteration: IterationNumber;
+  constat: string;
+  trameEvidence?: string;
+  managerialRisk: string;
+  priorQuestionText?: string | null;
+}): boolean {
+  if (questionLooksTooGeneric(params.candidate)) return true;
+  if (questionTooCloseToPrior(params.candidate, params.priorQuestionText)) return true;
+
+  const futureFragility = sourceSuggestsFutureFragility({
+    constat: params.constat,
+    trameEvidence: params.trameEvidence,
+    managerialRisk: params.managerialRisk,
+  });
+
+  if (params.iteration >= 2 && !futureFragility && questionLooksTooHypothetical(params.candidate)) {
+    return true;
+  }
+
+  const candidateNormalized = normalizeForMatch(params.candidate);
+  const fallbackNormalized = normalizeForMatch(params.fallback);
+  if (candidateNormalized === fallbackNormalized) return false;
+
+  if (
+    params.iteration >= 2 &&
+    !futureFragility &&
+    [
+      "bien comprendre",
+      "bien suivre",
+      "point le moins maitrise",
+      "point le moins pilote",
+      "premier frein",
+    ].some((pattern) => candidateNormalized.includes(normalizeForMatch(pattern)))
+  ) {
+    return true;
+  }
+
+  return false;
 }
 
 export async function composeQuestionWithLlm(params: {
@@ -302,6 +402,11 @@ export async function composeQuestionWithLlm(params: {
     facts: params.extractedFacts,
     constat: params.constat,
   });
+  const futureFragility = sourceSuggestsFutureFragility({
+    constat: params.constat,
+    trameEvidence: params.trameEvidence,
+    managerialRisk: params.managerialRisk,
+  });
 
   const prompt = [
     "Tu es un consultant senior en diagnostic dirigeant de PME.",
@@ -315,7 +420,8 @@ export async function composeQuestionWithLlm(params: {
     "- une seule idée directrice",
     "- rester strictement aligné sur le constat fourni",
     "- t'appuyer explicitement sur le point d'appui concret fourni ci-dessous",
-    "- si le constat décrit une tension future, une montée en charge, un besoin de recrutement ou un risque de rupture, la question doit viser ce point de bascule",
+    "- privilégier une scène réelle, un geste de pilotage, une décision, un blocage concret ou un fait d'exécution observable",
+    "- en itération 2 et 3, partir d'abord du fonctionnement réel aujourd'hui ; n'utiliser un scénario hypothétique que si le constat ou l'évidence parle explicitement d'une fragilité future",
     "- ne pas réécrire le constat dans la question",
     "- ne pas réécrire le risque dans la question",
     "- ne pas utiliser de préambule théorique",
@@ -323,13 +429,16 @@ export async function composeQuestionWithLlm(params: {
     "- bannir les questions génériques qui pourraient s’appliquer à n’importe quel thème",
     "- éviter de reposer une question trop proche de la dernière question déjà posée sur ce thème",
     "- privilégier des formulations comme :",
-    '  * "Quand on regarde ..., comment cela se passe réellement ?" ',
-    '  * "Qui tranche réellement ?" ',
-    '  * "Où la décision se bloque-t-elle ?" ',
-    '  * "Quel est aujourd’hui le point le moins piloté ?" ',
+    '  * "Quand on regarde ..., qui décide réellement ?" ',
+    '  * "Sur ..., qu’est-ce qui se fait encore sans règle claire ?" ',
+    '  * "Sur ..., sur qui devez-vous encore vous appuyer ?" ',
+    '  * "Quand cela remonte, qu’est-ce qui bloque concrètement ?" ',
     "",
-    "Règle essentielle :",
-    "- si le constat dit qu’une situation est correcte aujourd’hui mais fragile demain, la question doit porter sur la fragilité future, pas sur le fonctionnement général actuel",
+    "Exemples à éviter :",
+    '  * "Quel serait le premier frein ... ?" sauf si l’évidence parle explicitement d’un risque futur',
+    '  * "Qu’est-ce qui explique surtout la situation actuelle ?"',
+    '  * "Qu’est-ce qui empêche vos équipes de bien comprendre ... ?"',
+    '  * "Quel est aujourd’hui le point le moins maîtrisé ?" si une formulation plus concrète est possible',
     "",
     "Réponds uniquement avec le texte final de la question.",
     "",
@@ -341,6 +450,7 @@ export async function composeQuestionWithLlm(params: {
     `Angle suggéré : ${params.entryAngle}`,
     `Indication angle : ${anglePrompt(params.entryAngle)}.`,
     `Signal d'absence : ${params.isAbsence ? "oui" : "non"}`,
+    `Fragilité future explicitement présente dans la matière : ${futureFragility ? "oui" : "non"}`,
     `Point d'appui concret : ${focus || "aucun point d'appui concret exploitable"}`,
     `Évidence trame : ${truncate(params.trameEvidence, 360) || "aucune citation utile"}`,
     `Faits déjà acquis : ${uniqueStrings((params.extractedFacts ?? []).map((item) => truncate(item, 170)), 4).join(" | ") || "aucun"}`,
@@ -352,19 +462,29 @@ export async function composeQuestionWithLlm(params: {
   try {
     const response = await client.chat.completions.create({
       model: modelName(),
-      temperature: 0.25,
+      temperature: 0.15,
       messages: [
         {
           role: "system",
           content:
-            "Tu rédiges des questions de diagnostic dirigeant. Une seule question. Français naturel, concret, direct. Aucune phrase générique. Aucun commentaire.",
+            "Tu rédiges des questions de diagnostic dirigeant. Une seule question. Français naturel, concret, direct. Pas de formule générique. Pas de contrefactuel si la matière ne le justifie pas. Aucun commentaire.",
         },
         { role: "user", content: prompt },
       ],
     });
 
     const candidate = normalizeQuestionOutput(response.choices[0]?.message?.content, fallback);
-    if (questionLooksTooGeneric(candidate) || questionTooCloseToPrior(candidate, params.priorQuestionText)) {
+    if (
+      shouldFallbackToConcreteQuestion({
+        candidate,
+        fallback,
+        iteration: params.iteration,
+        constat: params.constat,
+        trameEvidence: params.trameEvidence,
+        managerialRisk: params.managerialRisk,
+        priorQuestionText: params.priorQuestionText,
+      })
+    ) {
       return fallback;
     }
     return candidate;

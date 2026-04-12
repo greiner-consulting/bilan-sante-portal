@@ -136,6 +136,8 @@ function tokenizeForSimilarity(value: string | null | undefined): string[] {
     "point",
     "theme",
     "thème",
+    "quand",
+    "regarde",
   ]);
 
   return normalizeForMatch(value)
@@ -256,41 +258,40 @@ function buildConcreteFallbackQuestion(params: {
       case "formalization":
         return `${preciseLead}qu’est-ce qui est cadré et qu’est-ce qui ne l’est pas assez aujourd’hui ?`;
       default:
-        if (signal.signalKind === "absence") {
-          return `${preciseLead}comment cela se passe-t-il concrètement aujourd’hui ?`;
-        }
         return `${preciseLead}comment cela se passe-t-il concrètement aujourd’hui ?`;
     }
   }
 
   if (iteration === 2) {
     switch (signal.entryAngle) {
+      case "causality":
+        return `${preciseLead}qu’est-ce qui bloque ou explique le plus cette situation dans les faits ?`;
       case "arbitration":
-        return `${preciseLead}où la décision se bloque-t-elle réellement ?`;
+        return `${preciseLead}qui décide réellement et à quel moment cela remonte ?`;
       case "dependency":
-        return `${preciseLead}quelle dépendance pèse le plus dans les faits ?`;
+        return `${preciseLead}sur qui devez-vous encore vous appuyer pour que cela avance ?`;
       case "economics":
-        return `${preciseLead}où se voit l’impact économique réel ?`;
+        return `${preciseLead}où voyez-vous concrètement l’effet sur le coût, la marge ou le cash ?`;
       case "formalization":
-        return `${preciseLead}qu’est-ce qui manque pour piloter correctement ce point ?`;
+        return `${preciseLead}qu’est-ce qui se fait encore sans règle claire ou sans support formalisé ?`;
       default:
-        return `${preciseLead}qu’est-ce qui explique surtout cette situation ?`;
+        return `${preciseLead}qu’est-ce qui coince concrètement aujourd’hui ?`;
     }
   }
 
   switch (signal.entryAngle) {
     case "arbitration":
-      return `${preciseLead}quel arbitrage reste aujourd’hui le moins clair ?`;
+      return `${preciseLead}quel arbitrage remonte encore jusqu’à vous aujourd’hui ?`;
     case "dependency":
-      return `${preciseLead}quelle dépendance reste aujourd’hui la plus risquée ?`;
+      return `${preciseLead}qu’est-ce qui ne tourne pas correctement sans la personne ou le relais clé ?`;
     case "economics":
-      return `${preciseLead}quel point est aujourd’hui le moins piloté sur le plan économique ?`;
+      return `${preciseLead}quel repère vous manque encore pour voir la dérive à temps ?`;
     case "formalization":
-      return `${preciseLead}quel point reste aujourd’hui le moins cadré ?`;
+      return `${preciseLead}qu’est-ce qui reste encore géré à l’oral ou au cas par cas ?`;
     case "causality":
-      return `${preciseLead}quelle cause racine domine encore aujourd’hui ?`;
+      return `${preciseLead}quelle cause de fond n’est toujours pas traitée aujourd’hui ?`;
     default:
-      return `${preciseLead}quel est aujourd’hui le point le moins maîtrisé ?`;
+      return `${preciseLead}quel point reste encore le moins sécurisé aujourd’hui ?`;
   }
 }
 
@@ -1110,6 +1111,9 @@ function isOverlyGenericQuestion(value: string): boolean {
     "quel est aujourd'hui le point le moins maitrise",
     "qu'est-ce qui n'est pas assez cadre aujourd'hui",
     "qu'est-ce qui manque surtout pour piloter correctement le sujet",
+    "qu'est-ce qui empeche vos equipes de bien comprendre",
+    "qu'est-ce qui empeche vos equipes de bien suivre",
+    "quel serait le premier frein",
   ].some((pattern) => text.includes(normalizeForMatch(pattern)));
 }
 
@@ -1135,6 +1139,27 @@ function resemblesPriorQuestion(
   return false;
 }
 
+function signalEvidenceSimilarity(left: DiagnosticSignal, right: DiagnosticSignal): number {
+  const excerptSimilarity = jaccardSimilarity(left.sourceExcerpt, right.sourceExcerpt);
+  const constatSimilarity = jaccardSimilarity(left.constat, right.constat);
+  return Math.max(excerptSimilarity, constatSimilarity);
+}
+
+function signalsShareEvidenceCluster(left: DiagnosticSignal, right: DiagnosticSignal): boolean {
+  if (
+    left.sourceSection &&
+    right.sourceSection &&
+    normalizeForMatch(left.sourceSection) === normalizeForMatch(right.sourceSection)
+  ) {
+    return true;
+  }
+
+  const similarity = signalEvidenceSimilarity(left, right);
+  if (similarity >= 0.48) return true;
+  if (left.entryAngle === right.entryAngle && similarity >= 0.36) return true;
+  return false;
+}
+
 function isDuplicateQuestionAgainstAccepted(params: {
   accepted: Array<{ question: StructuredQuestion; signal: DiagnosticSignal }>;
   candidateQuestion: StructuredQuestion;
@@ -1142,7 +1167,13 @@ function isDuplicateQuestionAgainstAccepted(params: {
   themeMemory: ThemeMemorySummary;
   iteration: IterationNumber;
 }): boolean {
-  if (resemblesPriorQuestion(params.candidateQuestion.questionOuverte, params.themeMemory, params.iteration)) {
+  if (
+    resemblesPriorQuestion(
+      params.candidateQuestion.questionOuverte,
+      params.themeMemory,
+      params.iteration
+    )
+  ) {
     return true;
   }
 
@@ -1151,24 +1182,45 @@ function isDuplicateQuestionAgainstAccepted(params: {
 
   for (const accepted of params.accepted) {
     const sameTheme = normalizeForMatch(accepted.question.theme) === candidateThemeKey;
-    if (!sameTheme) continue;
-
     const acceptedSignature = normalizeQuestionSignature(accepted.question.questionOuverte);
-    if (candidateSignature === acceptedSignature) return true;
-
     const similarity = jaccardSimilarity(candidateSignature, acceptedSignature);
-    if (params.candidateSignal.entryAngle === accepted.signal.entryAngle && similarity >= 0.45) {
-      return true;
+    const sharedEvidence = signalsShareEvidenceCluster(params.candidateSignal, accepted.signal);
+
+    if (candidateSignature === acceptedSignature) return true;
+    if (similarity >= 0.82) return true;
+
+    if (sameTheme) {
+      if (params.candidateSignal.entryAngle === accepted.signal.entryAngle && similarity >= 0.45) {
+        return true;
+      }
+
+      if (
+        isOverlyGenericQuestion(params.candidateQuestion.questionOuverte) &&
+        isOverlyGenericQuestion(accepted.question.questionOuverte) &&
+        similarity >= 0.3
+      ) {
+        return true;
+      }
+
+      continue;
     }
 
-    if (similarity >= 0.72) {
+    if (sharedEvidence && similarity >= 0.34) {
       return true;
     }
 
     if (
+      sharedEvidence &&
+      params.candidateSignal.entryAngle === accepted.signal.entryAngle &&
+      similarity >= 0.24
+    ) {
+      return true;
+    }
+
+    if (
+      sharedEvidence &&
       isOverlyGenericQuestion(params.candidateQuestion.questionOuverte) &&
-      isOverlyGenericQuestion(accepted.question.questionOuverte) &&
-      similarity >= 0.3
+      isOverlyGenericQuestion(accepted.question.questionOuverte)
     ) {
       return true;
     }
@@ -1302,7 +1354,7 @@ export async function planIterationQuestionsWithDiagnostics(params: PlanParams):
     `Thèmes réellement alimentés dans le workset : ${activeThemeKeys.size}.`,
     `Cap max par thème sur cette itération : ${maxPerThemeForIteration(iteration)}.`,
     "L’itération 1 ouvre d’abord les thèmes disponibles, consolide cette ouverture, puis complète de manière contrôlée pour tenir 5/5/4.",
-    "Filtre anti-redondance activé sur thème + angle + proximité de formulation avant restitution finale.",
+    "Filtre anti-redondance activé sur thème + angle + proximité de formulation, y compris en cross-theme quand la matière source est proche.",
   ];
 
   return { questions, diagnostics, notes };
