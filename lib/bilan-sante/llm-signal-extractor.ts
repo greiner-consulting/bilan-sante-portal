@@ -79,6 +79,23 @@ function includesAnyNormalized(text: string, patterns: string[]): boolean {
   return patterns.some((pattern) => haystack.includes(normalizeForMatch(pattern)));
 }
 
+function splitIntoEvidenceUnits(text: string): string[] {
+  const rawLines = String(text ?? "")
+    .replace(/\r/g, "")
+    .split(/\n+/)
+    .map((line) => line.replace(/^[\s\-–—•·]+/, "").replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+
+  const sentences = String(text ?? "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(/(?<=[.!?])\s+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+  return [...new Set([...rawLines, ...sentences].filter((item) => item.length <= 240 && item.length >= 25))].slice(0, 8);
+}
+
 function isOverInterpretiveSignal(params: {
   theme: string;
   sourceExcerpt: string;
@@ -162,6 +179,7 @@ function serializeSections(sections: TrameSection[]): string {
       id: String(section.id ?? "").trim(),
       heading: normalizeExtractionText(section.heading),
       content: truncate(String(section.content ?? ""), 1800),
+      focusUnits: splitIntoEvidenceUnits(String(section.content ?? "")),
     })),
     null,
     2
@@ -194,6 +212,8 @@ function buildPrompt(params: { dimensionId: DimensionId; snapshot: BaseTrameSnap
     "Tu n'inventes aucun fait.",
     "Tu ne peux utiliser QUE les thèmes autorisés.",
     "Priorité absolue : le constat doit rester quasi paraphrastique de l’extrait choisi.",
+    "Tu dois t'appuyer sur le plus petit extrait utile possible : une puce, une phrase ou un fragment précis, pas un bloc composite qui mélange plusieurs idées.",
+    "Un explicitSignal = une seule idée managériale exploitable. Si une section contient plusieurs idées distinctes, sépare-les en plusieurs explicitSignals ou n'en garde qu'une seule si les autres sont trop faibles.",
     "Tu n’introduis pas dans le constat des notions comme 'arbitrages rapprochés', 'pilotage non stabilisé', 'fragilité actuelle' ou 'défaut de maîtrise' si elles ne sont pas explicitement présentes ou directement démontrées par l’extrait.",
     "Quand l’extrait décrit une capacité disponible, un surdimensionnement, une absence de manque actuel ou un besoin futur conditionnel, le constat doit décrire ce présent ; le risque éventuel doit être formulé comme une vulnérabilité potentielle et non comme une défaillance actuelle.",
     "En cas de doute entre un constat descriptif fidèle et une interprétation plus forte, choisis toujours la version la plus fidèle à l’extrait.",
@@ -265,7 +285,7 @@ function buildPrompt(params: { dimensionId: DimensionId; snapshot: BaseTrameSnap
     "Règles impératives :",
     "- theme doit appartenir strictement à la liste autorisée",
     "- sourceSectionId doit correspondre à une section fournie",
-    "- sourceExcerpt doit être extrait du texte, pas inventé",
+    "- sourceExcerpt doit être extrait du texte, pas inventé ; prends de préférence un élément présent dans focusUnits quand c'est possible",
     "- si un extrait est seulement partiellement convergent, tu peux quand même créer un explicitSignal si whyRelevant explique clairement le lien métier",
     "- ne bascule pas trop vite en uncoveredThemes",
     "- quand tu déclares uncoveredThemes, explique clairement POURQUOI la matière n'est pas suffisante malgré la recherche indirecte",
@@ -330,7 +350,7 @@ function sanitizeExplicitSignals(params: {
     out.push({
       theme,
       sourceSectionId,
-      sourceExcerpt,
+      sourceExcerpt: truncate(sourceExcerpt, 240),
       evidenceNature,
       entryAngle,
       relevanceScore: clampScore(row.relevanceScore, 0),
@@ -431,7 +451,7 @@ export async function extractSignalsForDimensionWithLlm(params: {
         {
           role: "system",
           content:
-            "Tu extrais des signaux de diagnostic dirigeant. Tu n'inventes aucun fait. Tu n'es pas excessivement conservateur : des indices convergents peuvent justifier un signal explicite. Tu réponds strictement en JSON.",
+            "Tu extrais des signaux de diagnostic dirigeant. Tu n'inventes aucun fait. Tu n'es pas excessivement conservateur : des indices convergents peuvent justifier un signal explicite. Tu dois choisir des extraits courts, précis et non composites. Tu réponds strictement en JSON.",
         },
         { role: "user", content: prompt },
       ],

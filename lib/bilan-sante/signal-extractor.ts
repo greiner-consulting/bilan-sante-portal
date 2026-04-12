@@ -30,6 +30,7 @@ type MissingField = BaseTrameSnapshot["missingFields"][number];
 type IndexedSection = {
   section: TrameSection;
   heading: string;
+  rawContent: string;
   content: string;
   normalizedHeading: string;
   normalizedContent: string;
@@ -39,6 +40,7 @@ type IndexedSection = {
   combinedTokenSet: Set<string>;
   genericPenalty: number;
   textLength: number;
+  evidenceUnits: string[];
 };
 
 type ThemeCandidate = {
@@ -84,7 +86,7 @@ type LlmFilterStats = {
   rejectedAnecdotal: number;
 };
 
-const MAX_EXCERPT_LENGTH = 280;
+const MAX_EXCERPT_LENGTH = 240;
 const MIN_EXPLICIT_SCORE = 28;
 const STRONG_EXPLICIT_SCORE = 38;
 const SECTION_REUSE_PENALTY = 12;
@@ -545,10 +547,61 @@ function buildGenericPenalty(
   return Math.min(penalty, 24);
 }
 
+function splitIntoSentences(text: string): string[] {
+  const clean = String(text ?? "").replace(/\s+/g, " ").trim();
+  if (!clean) return [];
+  return clean
+    .split(/(?<=[.!?])\s+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function normalizeEvidenceUnit(value: string): string {
+  return String(value ?? "")
+    .replace(/^[\s\-–—•·]+/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function splitLongEvidenceUnit(value: string): string[] {
+  const clean = normalizeEvidenceUnit(value);
+  if (!clean) return [];
+  if (clean.length <= 240) return [clean];
+
+  const sentenceSplit = splitIntoSentences(clean);
+  if (sentenceSplit.length > 1) {
+    return sentenceSplit.flatMap((item) => splitLongEvidenceUnit(item));
+  }
+
+  return clean
+    .split(/\s*;\s*/)
+    .map((item) => normalizeEvidenceUnit(item))
+    .filter(Boolean)
+    .slice(0, 3);
+}
+
+function buildEvidenceUnits(rawContent: string, cleanContent: string): string[] {
+  const rawLines = String(rawContent ?? "")
+    .replace(/\r/g, "")
+    .split(/\n+/)
+    .map((line) => normalizeEvidenceUnit(line))
+    .filter(Boolean);
+
+  const lineUnits = rawLines.flatMap((line) => splitLongEvidenceUnit(line));
+  const sentenceUnits = splitIntoSentences(cleanContent)
+    .flatMap((sentence) => splitLongEvidenceUnit(sentence));
+
+  return uniqueStrings([...lineUnits, ...sentenceUnits])
+    .map((item) => normalizeExtractionText(item))
+    .filter(Boolean)
+    .slice(0, 18);
+}
+
 function indexSections(snapshot: BaseTrameSnapshot): IndexedSection[] {
   return snapshot.sections.map((section) => {
     const heading = String(section.heading ?? "").replace(/\s+/g, " ").trim();
-    const content = String(section.content ?? "").replace(/\s+/g, " ").trim();
+    const rawContent = String(section.content ?? "").replace(/\r/g, "").trim();
+    const content = rawContent.replace(/\s+/g, " ").trim();
 
     const normalizedHeading = normalizeText(heading);
     const normalizedContent = normalizeText(content);
@@ -561,6 +614,7 @@ function indexSections(snapshot: BaseTrameSnapshot): IndexedSection[] {
     return {
       section,
       heading,
+      rawContent,
       content,
       normalizedHeading,
       normalizedContent,
@@ -570,6 +624,7 @@ function indexSections(snapshot: BaseTrameSnapshot): IndexedSection[] {
       combinedTokenSet,
       genericPenalty: buildGenericPenalty(headingTokens, contentTokens, heading),
       textLength: content.length,
+      evidenceUnits: buildEvidenceUnits(rawContent, content),
     };
   });
 }
@@ -648,11 +703,51 @@ function trimSnippet(text: string, start: number, end: number): string {
   return snippet;
 }
 
+function scoreEvidenceUnit(unit: string, theme: string, matchedKeywords: string[]): number {
+  const normalizedUnit = normalizeText(unit);
+  if (!normalizedUnit) return Number.NEGATIVE_INFINITY;
+
+  const normalizedTheme = normalizeText(theme);
+  const normalizedKeywords = matchedKeywords.map((keyword) => normalizeText(keyword));
+
+  let score = 0;
+  if (normalizedUnit.includes(normalizedTheme)) score += 20;
+  for (const keyword of normalizedKeywords) {
+    if (normalizedUnit.includes(keyword)) score += 12;
+  }
+  score += scoreKeywordProximity(normalizedUnit, normalizedKeywords);
+  if (unit.length >= 35) score += 4;
+  if (unit.length >= 80) score += 4;
+  if (unit.length > 220) score -= 8;
+  if (containsAny(normalizedUnit, ["mais", "cependant", "en revanche"])) score += 2;
+  return score;
+}
+
+function selectBestEvidenceUnit(
+  evidenceUnits: string[],
+  theme: string,
+  matchedKeywords: string[]
+): string | null {
+  const ranked = evidenceUnits
+    .map((unit) => ({ unit, score: scoreEvidenceUnit(unit, theme, matchedKeywords) }))
+    .sort((a, b) => b.score - a.score);
+
+  const best = ranked[0];
+  if (!best || best.score < 12) return null;
+  return best.unit;
+}
+
 function buildContextExcerpt(
   content: string,
   theme: string,
-  matchedKeywords: string[]
+  matchedKeywords: string[],
+  evidenceUnits: string[] = []
 ): string {
+  const bestUnit = selectBestEvidenceUnit(evidenceUnits, theme, matchedKeywords);
+  if (bestUnit) {
+    return normalizeExtractionText(bestUnit);
+  }
+
   const clean = String(content ?? "").replace(/\s+/g, " ").trim();
   if (!clean) return "";
 
@@ -1063,7 +1158,12 @@ function buildThemeCandidate(params: {
     return null;
   }
 
-  const excerpt = buildContextExcerpt(indexedSection.content, theme, matchedKeywords);
+  const excerpt = buildContextExcerpt(
+    indexedSection.content,
+    theme,
+    matchedKeywords,
+    indexedSection.evidenceUnits
+  );
   const entryAngle = pickEntryAngle(
     theme,
     indexedSection.heading,
