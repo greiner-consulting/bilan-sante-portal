@@ -51,6 +51,12 @@ type ScoredSignal = {
   rationale: string[];
 };
 
+type ThemeEvidencePacket = {
+  primaryExcerpt: string | null;
+  groundingFacts: string[];
+  focusLabel: string | null;
+};
+
 type TrameDimensionBlueprintLite = {
   dimensionId: DimensionId;
   selectedThemes?: string[];
@@ -101,6 +107,93 @@ function uniqueStrings(values: string[]): string[] {
   return out;
 }
 
+function tokenizeForSimilarity(value: string | null | undefined): string[] {
+  const stopWords = new Set([
+    "sur",
+    "dans",
+    "avec",
+    "pour",
+    "vous",
+    "votre",
+    "comment",
+    "cela",
+    "se",
+    "le",
+    "la",
+    "les",
+    "des",
+    "du",
+    "de",
+    "d",
+    "qu",
+    "quels",
+    "quelle",
+    "quelles",
+    "quel",
+    "est",
+    "aujourd",
+    "hui",
+    "point",
+    "theme",
+    "thème",
+  ]);
+
+  return normalizeForMatch(value)
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 3 && !stopWords.has(token));
+}
+
+function jaccardSimilarity(left: string | null | undefined, right: string | null | undefined): number {
+  const a = new Set(tokenizeForSimilarity(left));
+  const b = new Set(tokenizeForSimilarity(right));
+  if (a.size === 0 || b.size === 0) return 0;
+
+  let intersection = 0;
+  for (const token of a) {
+    if (b.has(token)) intersection += 1;
+  }
+
+  const union = new Set([...a, ...b]).size;
+  return union === 0 ? 0 : intersection / union;
+}
+
+function shortenEvidenceSnippet(value: string | null | undefined, max = 120): string {
+  const text = normalizeText(value)
+    .replace(/^[-–—:;,.\s]+/g, "")
+    .replace(/["“”«»]/g, "")
+    .trim();
+
+  if (!text) return "";
+  const firstSentence = normalizeText(text.match(/^(.+?[.!?])(?:\s|$)/)?.[1] ?? text);
+  if (firstSentence.length <= max) return firstSentence;
+  return `${firstSentence.slice(0, max - 1).trim()}…`;
+}
+
+function buildThemeEvidencePacket(
+  signal: DiagnosticSignal,
+  themeMemory: ThemeMemorySummary
+): ThemeEvidencePacket {
+  const primaryExcerpt = shortenEvidenceSnippet(signal.sourceExcerpt, 150) || null;
+  const groundingFacts = uniqueStrings([
+    ...themeMemory.extractedFacts.map((fact) => shortenEvidenceSnippet(fact, 140)),
+    primaryExcerpt ?? "",
+  ]).filter(Boolean).slice(0, 3);
+
+  const focusLabel =
+    shortenEvidenceSnippet(themeMemory.extractedFacts[0], 90) ||
+    shortenEvidenceSnippet(signal.sourceExcerpt, 90) ||
+    shortenEvidenceSnippet(signal.constat, 90) ||
+    null;
+
+  return {
+    primaryExcerpt,
+    groundingFacts,
+    focusLabel,
+  };
+}
+
 function stripTheoreticalLeadIns(value: string): string {
   return normalizeText(value)
     .replace(/^dans un contexte ou\s+/i, "")
@@ -143,22 +236,62 @@ function simplifyQuestionSurface(value: string, theme: string): string {
 function buildConcreteFallbackQuestion(params: {
   signal: DiagnosticSignal;
   iteration: IterationNumber;
+  evidencePacket: ThemeEvidencePacket;
 }): string {
-  const { signal, iteration } = params;
+  const { signal, iteration, evidencePacket } = params;
   const theme = signal.theme;
+  const focus = normalizeText(evidencePacket.focusLabel);
+  const preciseLead = focus
+    ? `Sur "${theme}", quand on regarde "${focus}", `
+    : `Sur "${theme}", `;
 
   if (iteration === 1) {
-    if (signal.signalKind === "absence") {
-      return `Sur "${theme}", comment cela se passe-t-il concrètement aujourd’hui ?`;
+    switch (signal.entryAngle) {
+      case "arbitration":
+        return `${preciseLead}qui tranche réellement et sur quelle base ?`;
+      case "dependency":
+        return `${preciseLead}sur qui ou sur quoi cela repose concrètement ?`;
+      case "economics":
+        return `${preciseLead}quel impact concret voyez-vous sur le coût, la marge ou le cash ?`;
+      case "formalization":
+        return `${preciseLead}qu’est-ce qui est cadré et qu’est-ce qui ne l’est pas assez aujourd’hui ?`;
+      default:
+        if (signal.signalKind === "absence") {
+          return `${preciseLead}comment cela se passe-t-il concrètement aujourd’hui ?`;
+        }
+        return `${preciseLead}comment cela se passe-t-il concrètement aujourd’hui ?`;
     }
-    return `Sur "${theme}", qu’est-ce qui se passe réellement aujourd’hui sur le terrain ?`;
   }
 
   if (iteration === 2) {
-    return `Sur "${theme}", qu’est-ce qui explique surtout la situation actuelle ?`;
+    switch (signal.entryAngle) {
+      case "arbitration":
+        return `${preciseLead}où la décision se bloque-t-elle réellement ?`;
+      case "dependency":
+        return `${preciseLead}quelle dépendance pèse le plus dans les faits ?`;
+      case "economics":
+        return `${preciseLead}où se voit l’impact économique réel ?`;
+      case "formalization":
+        return `${preciseLead}qu’est-ce qui manque pour piloter correctement ce point ?`;
+      default:
+        return `${preciseLead}qu’est-ce qui explique surtout cette situation ?`;
+    }
   }
 
-  return `Sur "${theme}", quel est aujourd’hui le point le moins maîtrisé ?`;
+  switch (signal.entryAngle) {
+    case "arbitration":
+      return `${preciseLead}quel arbitrage reste aujourd’hui le moins clair ?`;
+    case "dependency":
+      return `${preciseLead}quelle dépendance reste aujourd’hui la plus risquée ?`;
+    case "economics":
+      return `${preciseLead}quel point est aujourd’hui le moins piloté sur le plan économique ?`;
+    case "formalization":
+      return `${preciseLead}quel point reste aujourd’hui le moins cadré ?`;
+    case "causality":
+      return `${preciseLead}quelle cause racine domine encore aujourd’hui ?`;
+    default:
+      return `${preciseLead}quel est aujourd’hui le point le moins maîtrisé ?`;
+  }
 }
 
 function buildQuestionId(
@@ -585,6 +718,8 @@ async function buildStructuredQuestion(
   themeMemory: ThemeMemorySummary,
   dimensionId: DimensionId
 ): Promise<StructuredQuestion> {
+  const evidencePacket = buildThemeEvidencePacket(signal, themeMemory);
+
   const llmQuestion = await composeQuestionWithLlm({
     dimensionId,
     dimensionTitle: dimensionTitle(dimensionId),
@@ -593,16 +728,19 @@ async function buildStructuredQuestion(
     constat: signal.constat,
     managerialRisk: signal.managerialRisk,
     entryAngle: signal.entryAngle,
-    trameEvidence: signal.sourceExcerpt,
-    extractedFacts: themeMemory.extractedFacts,
+    trameEvidence: evidencePacket.primaryExcerpt ?? signal.sourceExcerpt,
+    extractedFacts: evidencePacket.groundingFacts,
     coveredAngles: themeMemory.confirmedAngles,
     rejectedAngles: themeMemory.rejectedAngles,
     isAbsence: signal.signalKind === "absence",
+    evidenceFocus: evidencePacket.focusLabel,
+    priorQuestionText: themeMemory.lastQuestionText,
   });
 
   const fallbackQuestion = buildConcreteFallbackQuestion({
     signal,
     iteration,
+    evidencePacket,
   });
 
   const questionOuverte = simplifyQuestionSurface(
@@ -960,6 +1098,126 @@ function selectPriorityThemes(params: {
   return uniqueStrings(params.selectedThemes).slice(0, params.maxThemeCount);
 }
 
+function normalizeQuestionSignature(value: string): string {
+  return normalizeForMatch(value).replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function isOverlyGenericQuestion(value: string): boolean {
+  const text = normalizeForMatch(value);
+  return [
+    "comment cela se passe-t-il concretement aujourd'hui",
+    "qu'est-ce qui explique surtout la situation actuelle",
+    "quel est aujourd'hui le point le moins maitrise",
+    "qu'est-ce qui n'est pas assez cadre aujourd'hui",
+    "qu'est-ce qui manque surtout pour piloter correctement le sujet",
+  ].some((pattern) => text.includes(normalizeForMatch(pattern)));
+}
+
+function resemblesPriorQuestion(
+  candidateText: string,
+  themeMemory: ThemeMemorySummary,
+  iteration: IterationNumber
+): boolean {
+  if (iteration <= 1 || !themeMemory.lastQuestionText) return false;
+  const normalizedCandidate = normalizeQuestionSignature(candidateText);
+  const normalizedPrevious = normalizeQuestionSignature(themeMemory.lastQuestionText);
+  if (!normalizedCandidate || !normalizedPrevious) return false;
+  if (normalizedCandidate === normalizedPrevious) return true;
+  const similarity = jaccardSimilarity(normalizedCandidate, normalizedPrevious);
+  if (similarity >= 0.58) return true;
+  if (
+    isOverlyGenericQuestion(candidateText) &&
+    isOverlyGenericQuestion(themeMemory.lastQuestionText) &&
+    similarity >= 0.36
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function isDuplicateQuestionAgainstAccepted(params: {
+  accepted: Array<{ question: StructuredQuestion; signal: DiagnosticSignal }>;
+  candidateQuestion: StructuredQuestion;
+  candidateSignal: DiagnosticSignal;
+  themeMemory: ThemeMemorySummary;
+  iteration: IterationNumber;
+}): boolean {
+  if (resemblesPriorQuestion(params.candidateQuestion.questionOuverte, params.themeMemory, params.iteration)) {
+    return true;
+  }
+
+  const candidateSignature = normalizeQuestionSignature(params.candidateQuestion.questionOuverte);
+  const candidateThemeKey = normalizeForMatch(params.candidateQuestion.theme);
+
+  for (const accepted of params.accepted) {
+    const sameTheme = normalizeForMatch(accepted.question.theme) === candidateThemeKey;
+    if (!sameTheme) continue;
+
+    const acceptedSignature = normalizeQuestionSignature(accepted.question.questionOuverte);
+    if (candidateSignature === acceptedSignature) return true;
+
+    const similarity = jaccardSimilarity(candidateSignature, acceptedSignature);
+    if (params.candidateSignal.entryAngle === accepted.signal.entryAngle && similarity >= 0.45) {
+      return true;
+    }
+
+    if (similarity >= 0.72) {
+      return true;
+    }
+
+    if (
+      isOverlyGenericQuestion(params.candidateQuestion.questionOuverte) &&
+      isOverlyGenericQuestion(accepted.question.questionOuverte) &&
+      similarity >= 0.3
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+async function buildDistinctQuestions(params: {
+  preferred: ScoredSignal[];
+  candidates: ScoredSignal[];
+  iteration: IterationNumber;
+  dimensionId: DimensionId;
+}): Promise<StructuredQuestion[]> {
+  const maxQuestions = maxQuestionsForIteration(params.iteration);
+  const orderedSignals = [...params.preferred, ...params.candidates]
+    .filter((item, index, array) => array.findIndex((other) => other.signal.id === item.signal.id) === index)
+    .slice(0, Math.min(params.candidates.length, maxQuestions * 4));
+
+  const accepted: Array<{ question: StructuredQuestion; signal: DiagnosticSignal }> = [];
+
+  for (const item of orderedSignals) {
+    const question = await buildStructuredQuestion(
+      item.signal,
+      params.iteration,
+      accepted.length + 1,
+      item.themeMemory,
+      params.dimensionId
+    );
+
+    if (
+      isDuplicateQuestionAgainstAccepted({
+        accepted,
+        candidateQuestion: question,
+        candidateSignal: item.signal,
+        themeMemory: item.themeMemory,
+        iteration: params.iteration,
+      })
+    ) {
+      continue;
+    }
+
+    accepted.push({ question, signal: item.signal });
+    if (accepted.length >= maxQuestions) break;
+  }
+
+  return accepted.map((item) => item.question);
+}
+
 export async function planIterationQuestionsWithDiagnostics(params: PlanParams): Promise<{
   questions: StructuredQuestion[];
   diagnostics: PlanningDiagnostic[];
@@ -1015,11 +1273,12 @@ export async function planIterationQuestionsWithDiagnostics(params: PlanParams):
     targetThemes: priorityThemes,
   });
 
-  const questions = await Promise.all(
-    selected.map((item, index) =>
-      buildStructuredQuestion(item.signal, iteration, index + 1, item.themeMemory, dimensionId)
-    )
-  );
+  const questions = await buildDistinctQuestions({
+    preferred: selected,
+    candidates,
+    iteration,
+    dimensionId,
+  });
 
   const diagnostics = candidates.map((item) => ({
     signalId: item.signal.id,
@@ -1029,7 +1288,7 @@ export async function planIterationQuestionsWithDiagnostics(params: PlanParams):
     rationale: item.rationale.length > 0 ? item.rationale : ["score composite"],
   }));
 
-  const activeThemeKeys = new Set(selected.map((item) => normalizeForMatch(item.signal.theme)));
+  const activeThemeKeys = new Set(questions.map((item) => normalizeForMatch(item.theme)));
 
   const notes = [
     `Plan de dimension disponible : ${selectedThemes.join(" | ") || "aucun thème retenu"}.`,
@@ -1043,6 +1302,7 @@ export async function planIterationQuestionsWithDiagnostics(params: PlanParams):
     `Thèmes réellement alimentés dans le workset : ${activeThemeKeys.size}.`,
     `Cap max par thème sur cette itération : ${maxPerThemeForIteration(iteration)}.`,
     "L’itération 1 ouvre d’abord les thèmes disponibles, consolide cette ouverture, puis complète de manière contrôlée pour tenir 5/5/4.",
+    "Filtre anti-redondance activé sur thème + angle + proximité de formulation avant restitution finale.",
   ];
 
   return { questions, diagnostics, notes };

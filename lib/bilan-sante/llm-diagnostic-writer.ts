@@ -29,6 +29,13 @@ function normalizeText(value: unknown): string {
   return String(value ?? "").replace(/\s+/g, " ").trim();
 }
 
+function normalizeForMatch(value: unknown): string {
+  return normalizeText(value)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+}
+
 function truncate(value: unknown, max = 220): string {
   const text = normalizeText(value);
   if (text.length <= max) return text;
@@ -98,6 +105,52 @@ function anglePrompt(angle: EntryAngle): string {
   }
 }
 
+function stripQuotes(value: string): string {
+  return normalizeText(value).replace(/["“”«»]/g, "").trim();
+}
+
+function extractEvidenceFocus(params: {
+  trameEvidence?: string;
+  facts?: string[];
+  constat?: string;
+}): string {
+  const candidate = uniqueStrings([
+    ...(params.facts ?? []).map((item) => stripQuotes(truncate(item, 110))),
+    stripQuotes(truncate(params.trameEvidence, 110)),
+    stripQuotes(truncate(params.constat, 110)),
+  ], 1)[0];
+
+  return candidate ?? "";
+}
+
+function questionLooksTooGeneric(value: string): boolean {
+  const text = normalizeForMatch(value);
+  return [
+    "comment cela se passe-t-il concretement aujourd'hui",
+    "qu'est-ce qui explique surtout la situation actuelle",
+    "quel est aujourd'hui le point le moins maitrise",
+    "qu'est-ce qui n'est pas assez cadre aujourd'hui",
+    "qu'est-ce qui manque surtout pour piloter correctement le sujet",
+  ].some((pattern) => text.includes(normalizeForMatch(pattern)));
+}
+
+function questionTooCloseToPrior(value: string, priorQuestionText?: string | null): boolean {
+  const current = normalizeForMatch(value);
+  const prior = normalizeForMatch(priorQuestionText);
+  if (!current || !prior) return false;
+  if (current === prior) return true;
+  const currentTokens = new Set(current.replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(Boolean));
+  const priorTokens = new Set(prior.replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(Boolean));
+  if (currentTokens.size === 0 || priorTokens.size === 0) return false;
+
+  let intersection = 0;
+  for (const token of currentTokens) {
+    if (priorTokens.has(token)) intersection += 1;
+  }
+  const union = new Set([...currentTokens, ...priorTokens]).size;
+  return union > 0 && intersection / union >= 0.58;
+}
+
 function buildQuestionFallback(params: {
   iteration: IterationNumber;
   theme: string;
@@ -107,6 +160,7 @@ function buildQuestionFallback(params: {
   trameEvidence?: string;
   facts?: string[];
   isAbsence?: boolean;
+  evidenceFocus?: string;
 }): string {
   const theme = normalizeText(params.theme);
   const constat = normalizeText(params.constat);
@@ -114,6 +168,14 @@ function buildQuestionFallback(params: {
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase();
+  const focus = normalizeText(params.evidenceFocus) || extractEvidenceFocus({
+    trameEvidence: params.trameEvidence,
+    facts: params.facts,
+    constat,
+  });
+  const preciseLead = focus
+    ? `Sur "${theme}", quand on regarde "${focus}", `
+    : `Sur "${theme}", `;
 
   const growthLike =
     lowerConstat.includes("croissance") ||
@@ -130,29 +192,29 @@ function buildQuestionFallback(params: {
     if (params.isAbsence) {
       switch (params.entryAngle) {
         case "dependency":
-          return `Sur "${theme}", de qui ou de quoi dépendez-vous le plus aujourd’hui ?`;
+          return `${preciseLead}de qui ou de quoi dépendez-vous le plus aujourd’hui ?`;
         case "arbitration":
-          return `Sur "${theme}", qui tranche réellement quand il faut décider ?`;
+          return `${preciseLead}qui tranche réellement quand il faut décider ?`;
         case "economics":
-          return `Sur "${theme}", quel impact concret voyez-vous aujourd’hui sur le coût, la marge ou le cash ?`;
+          return `${preciseLead}quel impact concret voyez-vous aujourd’hui sur le coût, la marge ou le cash ?`;
         case "formalization":
-          return `Sur "${theme}", qu’est-ce qui n’est pas assez cadré aujourd’hui ?`;
+          return `${preciseLead}qu’est-ce qui n’est pas assez cadré aujourd’hui ?`;
         default:
-          return `Sur "${theme}", comment cela se passe-t-il concrètement aujourd’hui ?`;
+          return `${preciseLead}comment cela se passe-t-il concrètement aujourd’hui ?`;
       }
     }
 
     switch (params.entryAngle) {
       case "dependency":
-        return `Sur "${theme}", de qui ou de quoi dépendez-vous le plus aujourd’hui ?`;
+        return `${preciseLead}sur qui ou sur quoi cela repose concrètement ?`;
       case "arbitration":
-        return `Sur "${theme}", qui tranche réellement quand il faut décider ?`;
+        return `${preciseLead}qui tranche réellement et sur quelle base ?`;
       case "economics":
-        return `Sur "${theme}", quel impact concret cela a-t-il aujourd’hui sur le coût, la marge ou le cash ?`;
+        return `${preciseLead}quel impact concret cela a-t-il aujourd’hui sur le coût, la marge ou le cash ?`;
       case "formalization":
-        return `Sur "${theme}", qu’est-ce qui n’est pas assez cadré aujourd’hui ?`;
+        return `${preciseLead}qu’est-ce qui est cadré et qu’est-ce qui ne l’est pas assez aujourd’hui ?`;
       default:
-        return `Sur "${theme}", comment cela se passe-t-il concrètement aujourd’hui ?`;
+        return `${preciseLead}comment cela se passe-t-il concrètement aujourd’hui ?`;
     }
   }
 
@@ -163,17 +225,17 @@ function buildQuestionFallback(params: {
 
     switch (params.entryAngle) {
       case "causality":
-        return `Sur "${theme}", qu’est-ce qui explique surtout la situation actuelle ?`;
+        return `${preciseLead}qu’est-ce qui explique surtout cette situation ?`;
       case "arbitration":
-        return `Sur "${theme}", où la décision se bloque-t-elle aujourd’hui ?`;
+        return `${preciseLead}où la décision se bloque-t-elle réellement ?`;
       case "dependency":
-        return `Sur "${theme}", quelle dépendance pèse le plus aujourd’hui ?`;
+        return `${preciseLead}quelle dépendance pèse le plus aujourd’hui ?`;
       case "economics":
-        return `Sur "${theme}", où se voit aujourd’hui l’impact économique réel ?`;
+        return `${preciseLead}où se voit aujourd’hui l’impact économique réel ?`;
       case "formalization":
-        return `Sur "${theme}", qu’est-ce qui manque surtout pour piloter correctement le sujet ?`;
+        return `${preciseLead}qu’est-ce qui manque surtout pour piloter correctement ce point ?`;
       default:
-        return `Sur "${theme}", qu’est-ce qui explique surtout la situation actuelle ?`;
+        return `${preciseLead}qu’est-ce qui explique surtout la situation actuelle ?`;
     }
   }
 
@@ -183,17 +245,17 @@ function buildQuestionFallback(params: {
 
   switch (params.entryAngle) {
     case "arbitration":
-      return `Sur "${theme}", quel arbitrage reste aujourd’hui le moins clair ?`;
+      return `${preciseLead}quel arbitrage reste aujourd’hui le moins clair ?`;
     case "dependency":
-      return `Sur "${theme}", quelle dépendance reste aujourd’hui la plus risquée ?`;
+      return `${preciseLead}quelle dépendance reste aujourd’hui la plus risquée ?`;
     case "economics":
-      return `Sur "${theme}", quel point est aujourd’hui le moins piloté sur le plan économique ?`;
+      return `${preciseLead}quel point est aujourd’hui le moins piloté sur le plan économique ?`;
     case "formalization":
-      return `Sur "${theme}", quel point reste aujourd’hui le moins cadré ?`;
+      return `${preciseLead}quel point reste aujourd’hui le moins cadré ?`;
     case "causality":
-      return `Sur "${theme}", quelle cause racine domine encore aujourd’hui ?`;
+      return `${preciseLead}quelle cause racine domine encore aujourd’hui ?`;
     default:
-      return `Sur "${theme}", quel est aujourd’hui le point le moins maîtrisé ?`;
+      return `${preciseLead}quel est aujourd’hui le point le moins maîtrisé ?`;
   }
 }
 
@@ -217,6 +279,8 @@ export async function composeQuestionWithLlm(params: {
   coveredAngles?: EntryAngle[];
   rejectedAngles?: EntryAngle[];
   isAbsence?: boolean;
+  evidenceFocus?: string | null;
+  priorQuestionText?: string | null;
 }): Promise<string> {
   const fallback = buildQuestionFallback({
     iteration: params.iteration,
@@ -227,10 +291,17 @@ export async function composeQuestionWithLlm(params: {
     trameEvidence: params.trameEvidence,
     facts: params.extractedFacts,
     isAbsence: params.isAbsence,
+    evidenceFocus: params.evidenceFocus ?? undefined,
   });
 
   const client = getClient();
   if (!client) return fallback;
+
+  const focus = normalizeText(params.evidenceFocus) || extractEvidenceFocus({
+    trameEvidence: params.trameEvidence,
+    facts: params.extractedFacts,
+    constat: params.constat,
+  });
 
   const prompt = [
     "Tu es un consultant senior en diagnostic dirigeant de PME.",
@@ -243,17 +314,19 @@ export async function composeQuestionWithLlm(params: {
     "- une phrase courte",
     "- une seule idée directrice",
     "- rester strictement aligné sur le constat fourni",
+    "- t'appuyer explicitement sur le point d'appui concret fourni ci-dessous",
     "- si le constat décrit une tension future, une montée en charge, un besoin de recrutement ou un risque de rupture, la question doit viser ce point de bascule",
     "- ne pas réécrire le constat dans la question",
     "- ne pas réécrire le risque dans la question",
     "- ne pas utiliser de préambule théorique",
     "- bannir les formulations du type : 'dans un contexte où', 'afin de', 'en tenant compte de', 'comment anticipez-vous efficacement'",
     "- bannir les questions génériques qui pourraient s’appliquer à n’importe quel thème",
+    "- éviter de reposer une question trop proche de la dernière question déjà posée sur ce thème",
     "- privilégier des formulations comme :",
-    '  * "Aujourd’hui, comment ... ?" ',
-    '  * "Si cela arrive, qu’est-ce qui bloque d’abord ?" ',
+    '  * "Quand on regarde ..., comment cela se passe réellement ?" ',
     '  * "Qui tranche réellement ?" ',
-    '  * "Quel est aujourd’hui le point le moins maîtrisé ?" ',
+    '  * "Où la décision se bloque-t-elle ?" ',
+    '  * "Quel est aujourd’hui le point le moins piloté ?" ',
     "",
     "Règle essentielle :",
     "- si le constat dit qu’une situation est correcte aujourd’hui mais fragile demain, la question doit porter sur la fragilité future, pas sur le fonctionnement général actuel",
@@ -268,8 +341,10 @@ export async function composeQuestionWithLlm(params: {
     `Angle suggéré : ${params.entryAngle}`,
     `Indication angle : ${anglePrompt(params.entryAngle)}.`,
     `Signal d'absence : ${params.isAbsence ? "oui" : "non"}`,
+    `Point d'appui concret : ${focus || "aucun point d'appui concret exploitable"}`,
     `Évidence trame : ${truncate(params.trameEvidence, 360) || "aucune citation utile"}`,
     `Faits déjà acquis : ${uniqueStrings((params.extractedFacts ?? []).map((item) => truncate(item, 170)), 4).join(" | ") || "aucun"}`,
+    `Dernière question déjà posée sur ce thème : ${truncate(params.priorQuestionText, 220) || "aucune"}`,
     `Angles déjà couverts : ${uniqueStrings(params.coveredAngles ?? []).join(", ") || "aucun"}`,
     `Angles à éviter : ${uniqueStrings(params.rejectedAngles ?? []).join(", ") || "aucun"}`,
   ].join("\n");
@@ -277,18 +352,22 @@ export async function composeQuestionWithLlm(params: {
   try {
     const response = await client.chat.completions.create({
       model: modelName(),
-      temperature: 0.2,
+      temperature: 0.25,
       messages: [
         {
           role: "system",
           content:
-            "Tu rédiges des questions de diagnostic dirigeant. Une seule question. Français naturel, concret, direct. Aucun commentaire.",
+            "Tu rédiges des questions de diagnostic dirigeant. Une seule question. Français naturel, concret, direct. Aucune phrase générique. Aucun commentaire.",
         },
         { role: "user", content: prompt },
       ],
     });
 
-    return normalizeQuestionOutput(response.choices[0]?.message?.content, fallback);
+    const candidate = normalizeQuestionOutput(response.choices[0]?.message?.content, fallback);
+    if (questionLooksTooGeneric(candidate) || questionTooCloseToPrior(candidate, params.priorQuestionText)) {
+      return fallback;
+    }
+    return candidate;
   } catch {
     return fallback;
   }
