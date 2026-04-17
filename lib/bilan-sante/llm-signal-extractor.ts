@@ -25,6 +25,52 @@ let cachedClient: OpenAI | null = null;
 
 const LOG_PREFIX = "[BilanSante][LlmSignalExtractor]";
 
+const GROUNDING_STOP_WORDS = new Set([
+  "avec",
+  "dans",
+  "pour",
+  "plus",
+  "moins",
+  "theme",
+  "thème",
+  "sujet",
+  "point",
+  "reel",
+  "réel",
+  "reelle",
+  "réelle",
+  "fonctionnement",
+  "pilotage",
+  "encore",
+  "assez",
+  "suffisamment",
+  "fragile",
+  "fragiles",
+  "aujourd",
+  "hui",
+  "entreprise",
+]);
+
+const GENERIC_CONSTAT_PATTERNS = [
+  "le fonctionnement actuel semble tenir",
+  "le fonctionnement semble tenir",
+  "n est pas encore suffisamment objective",
+  "n'est pas encore suffisamment objectivé",
+  "n est pas encore suffisamment objectivé",
+  "equilibres encore fragiles",
+  "équilibres encore fragiles",
+  "equilibre encore fragile",
+  "équilibre encore fragile",
+  "pas encore suffisamment objectivé",
+  "pas encore suffisamment objectivé dans le fonctionnement décrit",
+  "reste encore peu documente",
+  "reste encore peu documenté",
+  "repose sur des equilibres encore fragiles",
+  "repose sur des équilibres encore fragiles",
+  "pas encore assez objectivé",
+  "pas encore suffisamment robuste",
+];
+
 function logInfo(event: string, payload?: Record<string, unknown>) {
   console.info(`${LOG_PREFIX} ${event}`, payload ?? {});
 }
@@ -53,6 +99,13 @@ function llmModel(): string {
   return process.env.OPENAI_MODEL_CHAT || "gpt-4o-mini";
 }
 
+function normalizeForMatch(value: string): string {
+  return normalizeExtractionText(value)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+}
+
 function truncate(text: string, max = 1600): string {
   const clean = normalizeExtractionText(text);
   if (clean.length <= max) return clean;
@@ -65,6 +118,72 @@ function safeArray<T>(value: T[] | null | undefined): T[] {
 
 function compactJson<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function groundingTokens(value: string): string[] {
+  return normalizeForMatch(value)
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 4 && !GROUNDING_STOP_WORDS.has(token));
+}
+
+function sharedGroundingCount(left: string, right: string): number {
+  const rightTokens = new Set(groundingTokens(right));
+  if (rightTokens.size === 0) return 0;
+
+  let count = 0;
+  for (const token of groundingTokens(left)) {
+    if (rightTokens.has(token)) count += 1;
+  }
+  return count;
+}
+
+function constatLooksGeneric(constat: string): boolean {
+  const normalized = normalizeForMatch(constat);
+  return GENERIC_CONSTAT_PATTERNS.some((pattern) =>
+    normalized.includes(normalizeForMatch(pattern))
+  );
+}
+
+function buildAnchoredConstat(theme: string, sourceExcerpt: string, fallback: string): string {
+  const cleanExcerpt = normalizeExtractionText(sourceExcerpt)
+    .replace(/^[…\-–—\s]+/, "")
+    .replace(/[…\s]+$/, "")
+    .trim();
+
+  if (!cleanExcerpt) {
+    return fallback;
+  }
+
+  const excerpt = cleanExcerpt.length <= 190
+    ? cleanExcerpt
+    : `${cleanExcerpt.slice(0, 189).trim()}…`;
+  const lowered = excerpt.charAt(0).toLowerCase() + excerpt.slice(1);
+
+  return truncate(`Sur "${theme}", la trame montre que ${lowered}`, 240);
+}
+
+function sanitizeConstatWithGrounding(params: {
+  theme: string;
+  sourceExcerpt: string;
+  constat: string;
+  whyRelevant: string;
+}): string {
+  const constat = normalizeExtractionText(params.constat);
+  if (!constat) {
+    return buildAnchoredConstat(params.theme, params.sourceExcerpt, constat);
+  }
+
+  const overlapWithExcerpt = sharedGroundingCount(constat, params.sourceExcerpt);
+  const overlapWithWhy = sharedGroundingCount(constat, params.whyRelevant);
+  const isGeneric = constatLooksGeneric(constat);
+
+  if (!isGeneric && (overlapWithExcerpt >= 1 || overlapWithWhy >= 1)) {
+    return constat;
+  }
+
+  return buildAnchoredConstat(params.theme, params.sourceExcerpt, constat);
 }
 
 function serializeSections(sections: TrameSection[]): string {
@@ -126,6 +245,14 @@ function buildPrompt(params: { dimensionId: DimensionId; snapshot: BaseTrameSnap
     "",
     "Si un même thème fait ressortir DEUX mécanismes réellement distincts (par exemple arbitrage + dépendance, ou pratique réelle + risque économique), tu peux retourner jusqu'à 2 explicitSignals pour ce même thème, à condition qu'ils s'appuient sur des extraits ou angles clairement différents.",
     "N'utilise pas cette possibilité pour paraphraser deux fois la même idée.",
+    "",
+    "Règles de qualité supplémentaires :",
+    "- sourceExcerpt doit être atomique et concret : phrase ou passage précis, pas un bloc vague ni un résumé global de section",
+    "- le constat doit repartir d'un fait visible dans sourceExcerpt, pas d'une formule consultant générique",
+    "- évite des constats comme : 'le fonctionnement actuel semble tenir', 'pas encore suffisamment objectivé', 'équilibres encore fragiles' si l'extrait permet d'être plus concret",
+    "- si l'extrait parle d'un fait présent, reste au présent ; ne projette pas un scénario futur sauf si l'extrait le dit explicitement",
+    "- n'assigne pas le même extrait à plusieurs thèmes sauf si chaque thème est justifié par un objet concret distinct et expliqué dans whyRelevant",
+    "- privilégie des constats qui citent l'objet de pilotage réel : prévision à 6 mois, validation des offres > 50 K€, entretien annuel, book to bill estimatif, etc.",
     "",
     "Définitions obligatoires :",
     '- evidenceNature="structural" : preuve claire d’un fonctionnement durable, d’une faiblesse structurelle, d’une absence de pilotage, d’un arbitrage, d’une dépendance ou d’une pratique récurrente',
@@ -234,7 +361,12 @@ function sanitizeExplicitSignals(params: {
       relevanceScore: clampScore(row.relevanceScore, 0),
       confidenceScore: clampScore(row.confidenceScore, 0),
       criticalityScore: clampScore(row.criticalityScore, 0),
-      constat,
+      constat: sanitizeConstatWithGrounding({
+        theme,
+        sourceExcerpt,
+        constat,
+        whyRelevant,
+      }),
       managerialRisk,
       probableConsequence,
       whyRelevant,
@@ -323,13 +455,13 @@ export async function extractSignalsForDimensionWithLlm(params: {
   try {
     const response = await client.chat.completions.create({
       model: llmModel(),
-      temperature: 0.15,
+      temperature: 0.1,
       response_format: { type: "json_object" },
       messages: [
         {
           role: "system",
           content:
-            "Tu extrais des signaux de diagnostic dirigeant. Tu n'inventes aucun fait. Tu n'es pas excessivement conservateur : des indices convergents peuvent justifier un signal explicite. Tu réponds strictement en JSON.",
+            "Tu extrais des signaux de diagnostic dirigeant. Tu n'inventes aucun fait. Tu n'es pas excessivement conservateur : des indices convergents peuvent justifier un signal explicite. Tes constats doivent repartir d'objets concrets visibles dans l'extrait. Pas de formule générique. Tu réponds strictement en JSON.",
         },
         { role: "user", content: prompt },
       ],
