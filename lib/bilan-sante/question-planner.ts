@@ -57,6 +57,14 @@ type TrameDimensionBlueprintLite = {
   inferredThemes?: string[];
 };
 
+type BuiltQuestionCandidate = {
+  question: StructuredQuestion;
+  signal: DiagnosticSignal;
+  themeMemory: ThemeMemorySummary;
+  fallbackQuestion: string;
+  excerptAnchoredQuestion: string;
+};
+
 const CANDIDATE_POOL_SIZE: Record<IterationNumber, number> = {
   1: 48,
   2: 48,
@@ -74,6 +82,67 @@ const EXTENSION_MIN_SCORE: Record<IterationNumber, number> = {
   2: 30,
   3: 28,
 };
+
+const QUESTION_SEMANTIC_STOP_WORDS = new Set([
+  "comment",
+  "pourquoi",
+  "aujourd",
+  "hui",
+  "concretement",
+  "concrètement",
+  "reel",
+  "réel",
+  "reelle",
+  "réelle",
+  "terrain",
+  "point",
+  "sujet",
+  "sujets",
+  "thematique",
+  "thématique",
+  "theme",
+  "thème",
+  "question",
+  "entreprise",
+  "votre",
+  "vraiment",
+  "reste",
+  "encore",
+  "moins",
+  "plus",
+  "assez",
+  "suffisamment",
+  "quelle",
+  "quelles",
+  "quels",
+  "quel",
+  "cela",
+  "se",
+  "passe",
+  "passe-t-il",
+  "passe-t",
+  "decrire",
+  "décrire",
+  "preciser",
+  "préciser",
+  "decrit",
+  "décrit",
+  "decrirez",
+  "décrirez",
+]);
+
+const QUESTION_BAD_PATTERNS = [
+  "dans un contexte ou",
+  "dans un contexte où",
+  "afin de",
+  "en tenant compte de",
+  "comment anticipez vous efficacement",
+  "comment anticipez-vous efficacement",
+  "de quelle maniere",
+  "de quelle manière",
+  "comment vous assurez vous efficacement",
+  "comment vous assurez-vous efficacement",
+];
 
 function normalizeText(value: string | null | undefined): string {
   return String(value ?? "").replace(/\s+/g, " ").trim();
@@ -140,25 +209,232 @@ function simplifyQuestionSurface(value: string, theme: string): string {
   return text;
 }
 
+function semanticTokens(value: string, extraStopWords: string[] = []): string[] {
+  const stopWords = new Set<string>([
+    ...QUESTION_SEMANTIC_STOP_WORDS,
+    ...extraStopWords.map((item) => normalizeForMatch(item)),
+  ]);
+
+  return uniqueStrings(
+    normalizeForMatch(value)
+      .replace(/[^a-z0-9\s]/g, " ")
+      .split(/\s+/)
+      .map((token) => token.trim())
+      .filter((token) => token.length >= 4 && !stopWords.has(token))
+  );
+}
+
+function tokenOverlapRatio(left: string[], right: string[]): number {
+  if (left.length === 0 || right.length === 0) return 0;
+  const rightSet = new Set(right);
+  let overlap = 0;
+  for (const token of left) {
+    if (rightSet.has(token)) overlap += 1;
+  }
+  return overlap / Math.min(left.length, right.length);
+}
+
+function questionSemanticTokens(question: string, theme: string): string[] {
+  return semanticTokens(question, [theme]);
+}
+
+function signalSemanticTokens(signal: DiagnosticSignal): string[] {
+  return semanticTokens(
+    [signal.theme, signal.constat, signal.managerialRisk, signal.sourceExcerpt].join(" | "),
+    [signal.theme]
+  );
+}
+
+function questionsAreSemanticallyNear(params: {
+  leftQuestion: string;
+  rightQuestion: string;
+  leftTheme: string;
+  rightTheme: string;
+}): boolean {
+  const leftText = normalizeForMatch(params.leftQuestion);
+  const rightText = normalizeForMatch(params.rightQuestion);
+  if (!leftText || !rightText) return false;
+  if (leftText === rightText) return true;
+
+  const leftTokens = questionSemanticTokens(params.leftQuestion, params.leftTheme);
+  const rightTokens = questionSemanticTokens(params.rightQuestion, params.rightTheme);
+  const ratio = tokenOverlapRatio(leftTokens, rightTokens);
+  const exactSignature = leftTokens.slice(0, 6).join("|") === rightTokens.slice(0, 6).join("|");
+
+  return exactSignature || (ratio >= 0.72 && Math.min(leftTokens.length, rightTokens.length) >= 2);
+}
+
+function signalsAreSemanticallyNear(left: DiagnosticSignal, right: DiagnosticSignal): boolean {
+  if (left.id === right.id) return true;
+  const sameExcerpt =
+    normalizeForMatch(left.sourceExcerpt) &&
+    normalizeForMatch(left.sourceExcerpt) === normalizeForMatch(right.sourceExcerpt);
+  if (sameExcerpt) return true;
+
+  const leftTokens = signalSemanticTokens(left);
+  const rightTokens = signalSemanticTokens(right);
+  const ratio = tokenOverlapRatio(leftTokens, rightTokens);
+
+  return ratio >= 0.78 && left.entryAngle === right.entryAngle;
+}
+
+function shortExcerptFocus(value: string, maxWords = 9): string {
+  const words = normalizeText(value)
+    .replace(/^[…\-–—\s]+/, "")
+    .replace(/[.!?;:]+$/g, "")
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, maxWords);
+
+  return normalizeText(words.join(" "));
+}
+
+function buildExcerptAnchoredQuestion(params: {
+  signal: DiagnosticSignal;
+  iteration: IterationNumber;
+}): string {
+  const { signal, iteration } = params;
+  const theme = signal.theme;
+  const focus = shortExcerptFocus(signal.sourceExcerpt);
+
+  if (!focus) {
+    return buildConcreteFallbackQuestion(params);
+  }
+
+  if (iteration === 1) {
+    return `Sur "${theme}", quand vous évoquez "${focus}", qu’est-ce qui se passe concrètement aujourd’hui ?`;
+  }
+
+  if (iteration === 2) {
+    return `Sur "${theme}", quand vous évoquez "${focus}", qu’est-ce qui explique surtout cette situation ?`;
+  }
+
+  return `Sur "${theme}", quand vous évoquez "${focus}", quel est aujourd’hui le point le moins maîtrisé ?`;
+}
+
 function buildConcreteFallbackQuestion(params: {
   signal: DiagnosticSignal;
   iteration: IterationNumber;
 }): string {
   const { signal, iteration } = params;
   const theme = signal.theme;
+  const focus = shortExcerptFocus(signal.sourceExcerpt);
 
   if (iteration === 1) {
-    if (signal.signalKind === "absence") {
-      return `Sur "${theme}", comment cela se passe-t-il concrètement aujourd’hui ?`;
+    if (signal.entryAngle === "arbitration") {
+      return focus
+        ? `Sur "${theme}", quand vous évoquez "${focus}", qui décide réellement et où cela se bloque-t-il ?`
+        : `Sur "${theme}", qui décide réellement aujourd’hui, qui valide, et où cela se bloque-t-il ?`;
     }
-    return `Sur "${theme}", qu’est-ce qui se passe réellement aujourd’hui sur le terrain ?`;
+    if (signal.entryAngle === "dependency") {
+      return focus
+        ? `Sur "${theme}", quand vous évoquez "${focus}", de qui ou de quoi dépendez-vous le plus aujourd’hui ?`
+        : `Sur "${theme}", de qui ou de quoi dépendez-vous le plus aujourd’hui ?`;
+    }
+    if (signal.entryAngle === "economics") {
+      return focus
+        ? `Sur "${theme}", quand vous évoquez "${focus}", quel impact concret voyez-vous aujourd’hui sur le coût, la marge ou le cash ?`
+        : `Sur "${theme}", quel impact concret voyez-vous aujourd’hui sur le coût, la marge ou le cash ?`;
+    }
+    if (signal.entryAngle === "formalization") {
+      return focus
+        ? `Sur "${theme}", quand vous évoquez "${focus}", qu’est-ce qui n’est pas assez cadré aujourd’hui ?`
+        : `Sur "${theme}", qu’est-ce qui n’est pas assez cadré aujourd’hui ?`;
+    }
+    if (signal.entryAngle === "causality") {
+      return focus
+        ? `Sur "${theme}", quand vous évoquez "${focus}", qu’est-ce qui explique surtout cette difficulté aujourd’hui ?`
+        : `Sur "${theme}", qu’est-ce qui explique surtout cette difficulté aujourd’hui ?`;
+    }
+    return focus
+      ? `Sur "${theme}", quand vous évoquez "${focus}", qu’est-ce qui se passe réellement sur le terrain ?`
+      : `Sur "${theme}", qu’est-ce qui se passe réellement aujourd’hui sur le terrain ?`;
   }
 
   if (iteration === 2) {
-    return `Sur "${theme}", qu’est-ce qui explique surtout la situation actuelle ?`;
+    if (signal.entryAngle === "arbitration") {
+      return `Sur "${theme}", où la décision se bloque-t-elle aujourd’hui, et qui devrait trancher plus clairement ?`;
+    }
+    if (signal.entryAngle === "dependency") {
+      return `Sur "${theme}", quelle dépendance pèse le plus aujourd’hui sur l’exécution réelle ?`;
+    }
+    if (signal.entryAngle === "economics") {
+      return `Sur "${theme}", où voyez-vous aujourd’hui l’impact économique réel : marge, coût réel ou cash ?`;
+    }
+    if (signal.entryAngle === "formalization") {
+      return `Sur "${theme}", qu’est-ce qui manque surtout pour piloter correctement le sujet ?`;
+    }
+    if (signal.entryAngle === "causality") {
+      return `Sur "${theme}", qu’est-ce qui explique surtout la situation actuelle ?`;
+    }
+    return `Sur "${theme}", qu’est-ce qui explique surtout le fonctionnement actuel ?`;
   }
 
+  if (signal.entryAngle === "arbitration") {
+    return `Sur "${theme}", quel arbitrage reste aujourd’hui le moins clair ou le moins piloté ?`;
+  }
+  if (signal.entryAngle === "dependency") {
+    return `Sur "${theme}", quelle dépendance reste aujourd’hui la plus risquée ?`;
+  }
+  if (signal.entryAngle === "economics") {
+    return `Sur "${theme}", quel point est aujourd’hui le moins maîtrisé sur le plan économique ?`;
+  }
+  if (signal.entryAngle === "formalization") {
+    return `Sur "${theme}", quel point reste aujourd’hui le moins cadré ou le moins objectivé ?`;
+  }
+  if (signal.entryAngle === "causality") {
+    return `Sur "${theme}", quelle cause racine domine encore aujourd’hui ?`;
+  }
   return `Sur "${theme}", quel est aujourd’hui le point le moins maîtrisé ?`;
+}
+
+function questionGroundingScore(
+  question: string,
+  signal: DiagnosticSignal,
+  themeMemory: ThemeMemorySummary
+): number {
+  const questionTokens = questionSemanticTokens(question, signal.theme);
+  const materialTokens = uniqueStrings([
+    ...semanticTokens(signal.constat, [signal.theme]),
+    ...semanticTokens(signal.managerialRisk, [signal.theme]),
+    ...semanticTokens(signal.sourceExcerpt, [signal.theme]),
+    ...themeMemory.extractedFacts.flatMap((fact) => semanticTokens(fact, [signal.theme])),
+  ]);
+
+  const overlapRatio = tokenOverlapRatio(questionTokens, materialTokens);
+  let score = 0;
+  if (overlapRatio >= 0.35) score += 2;
+  if (overlapRatio >= 0.5) score += 2;
+  if (questionTokens.length > 0 && materialTokens.length > 0 && overlapRatio === 0) score -= 3;
+  if (normalizeForMatch(question).includes(normalizeForMatch(signal.theme))) score += 1;
+  if (normalizeText(signal.sourceExcerpt).length >= 60 && overlapRatio > 0) score += 1;
+  return score;
+}
+
+function questionNeedsFallback(
+  question: string,
+  signal: DiagnosticSignal,
+  themeMemory: ThemeMemorySummary
+): boolean {
+  const text = normalizeText(question);
+  const normalized = normalizeForMatch(text);
+  if (!text) return true;
+  if (text.length > 185) return true;
+  if (QUESTION_BAD_PATTERNS.some((pattern) => normalized.includes(normalizeForMatch(pattern)))) {
+    return true;
+  }
+  if (
+    themeMemory.lastQuestionText &&
+    questionsAreSemanticallyNear({
+      leftQuestion: text,
+      rightQuestion: themeMemory.lastQuestionText,
+      leftTheme: signal.theme,
+      rightTheme: themeMemory.theme,
+    })
+  ) {
+    return true;
+  }
+  return questionGroundingScore(text, signal, themeMemory) <= 0;
 }
 
 function buildQuestionId(
@@ -578,13 +854,13 @@ function scoreSignalForIteration(
   return score;
 }
 
-async function buildStructuredQuestion(
+async function buildStructuredQuestionCandidate(
   signal: DiagnosticSignal,
   iteration: IterationNumber,
   index: number,
   themeMemory: ThemeMemorySummary,
   dimensionId: DimensionId
-): Promise<StructuredQuestion> {
+): Promise<BuiltQuestionCandidate> {
   const llmQuestion = await composeQuestionWithLlm({
     dimensionId,
     dimensionTitle: dimensionTitle(dimensionId),
@@ -605,19 +881,91 @@ async function buildStructuredQuestion(
     iteration,
   });
 
-  const questionOuverte = simplifyQuestionSurface(
+  const excerptAnchoredQuestion = buildExcerptAnchoredQuestion({
+    signal,
+    iteration,
+  });
+
+  let questionOuverte = simplifyQuestionSurface(
     normalizeText(llmQuestion) || fallbackQuestion,
     signal.theme
   );
 
+  if (questionNeedsFallback(questionOuverte, signal, themeMemory)) {
+    questionOuverte = excerptAnchoredQuestion;
+  }
+
+  if (questionNeedsFallback(questionOuverte, signal, themeMemory)) {
+    questionOuverte = fallbackQuestion;
+  }
+
   return {
-    id: buildQuestionId(signal, iteration, index),
-    signalId: signal.id,
-    theme: signal.theme,
-    constat: signal.constat,
-    risqueManagerial: signal.managerialRisk,
-    questionOuverte,
+    question: {
+      id: buildQuestionId(signal, iteration, index),
+      signalId: signal.id,
+      theme: signal.theme,
+      constat: signal.constat,
+      risqueManagerial: signal.managerialRisk,
+      questionOuverte,
+    },
+    signal,
+    themeMemory,
+    fallbackQuestion,
+    excerptAnchoredQuestion,
   };
+}
+
+function finalizeQuestionCandidates(
+  candidates: BuiltQuestionCandidate[]
+): StructuredQuestion[] {
+  const accepted: StructuredQuestion[] = [];
+
+  for (const candidate of candidates) {
+    let question = candidate.question;
+
+    if (
+      accepted.some((existing) =>
+        questionsAreSemanticallyNear({
+          leftQuestion: existing.questionOuverte,
+          rightQuestion: question.questionOuverte,
+          leftTheme: existing.theme,
+          rightTheme: question.theme,
+        })
+      )
+    ) {
+      question = {
+        ...question,
+        questionOuverte: candidate.excerptAnchoredQuestion,
+      };
+    }
+
+    if (questionNeedsFallback(question.questionOuverte, candidate.signal, candidate.themeMemory)) {
+      question = {
+        ...question,
+        questionOuverte: candidate.fallbackQuestion,
+      };
+    }
+
+    if (
+      accepted.some((existing) =>
+        questionsAreSemanticallyNear({
+          leftQuestion: existing.questionOuverte,
+          rightQuestion: question.questionOuverte,
+          leftTheme: existing.theme,
+          rightTheme: question.theme,
+        })
+      )
+    ) {
+      question = {
+        ...question,
+        questionOuverte: `${candidate.fallbackQuestion.replace(/[?]+$/, "")} (sur le point précis "${shortExcerptFocus(candidate.signal.sourceExcerpt) || candidate.signal.theme}") ?`,
+      };
+    }
+
+    accepted.push(question);
+  }
+
+  return accepted;
 }
 
 function hasStrongReasonToKeep(item: ScoredSignal, iteration: IterationNumber): boolean {
@@ -722,13 +1070,26 @@ function canReuseThemeInSameIteration(
     (item) => normalizeForMatch(item.signal.theme) === candidateThemeKey
   );
   const maxPerTheme = maxPerThemeForIteration(iteration);
-  if (sameTheme.length === 0) return true;
+  if (sameTheme.length === 0) {
+    return !selected.some(
+      (item) =>
+        normalizeForMatch(item.signal.theme) !== candidateThemeKey &&
+        signalsAreSemanticallyNear(item.signal, candidate.signal)
+    );
+  }
   if (sameTheme.length >= maxPerTheme) return false;
   const differentAngle = sameTheme.every(
     (existing) => existing.signal.entryAngle !== candidate.signal.entryAngle
   );
-  if (differentAngle) return true;
-  return candidate.score >= EXTENSION_MIN_SCORE[iteration] + 4;
+  if (!differentAngle && candidate.score < EXTENSION_MIN_SCORE[iteration] + 4) {
+    return false;
+  }
+  return !selected.some(
+    (item) =>
+      item.signal.id !== candidate.signal.id &&
+      normalizeForMatch(item.signal.theme) !== candidateThemeKey &&
+      signalsAreSemanticallyNear(item.signal, candidate.signal)
+  );
 }
 
 function chooseOneCandidateForTheme(params: {
@@ -810,6 +1171,15 @@ function consolidateSeedSelection(params: {
       if (
         candidate.score < ABSOLUTE_MIN_SCORE[params.iteration] &&
         !hasStrongReasonToKeep(candidate, params.iteration)
+      ) {
+        return false;
+      }
+      if (
+        out.some(
+          (existing) =>
+            normalizeForMatch(existing.signal.theme) !== themeKey &&
+            signalsAreSemanticallyNear(existing.signal, candidate.signal)
+        )
       ) {
         return false;
       }
@@ -1015,11 +1385,19 @@ export async function planIterationQuestionsWithDiagnostics(params: PlanParams):
     targetThemes: priorityThemes,
   });
 
-  const questions = await Promise.all(
+  const builtCandidates = await Promise.all(
     selected.map((item, index) =>
-      buildStructuredQuestion(item.signal, iteration, index + 1, item.themeMemory, dimensionId)
+      buildStructuredQuestionCandidate(
+        item.signal,
+        iteration,
+        index + 1,
+        item.themeMemory,
+        dimensionId
+      )
     )
   );
+
+  const questions = finalizeQuestionCandidates(builtCandidates);
 
   const diagnostics = candidates.map((item) => ({
     signalId: item.signal.id,
@@ -1043,6 +1421,7 @@ export async function planIterationQuestionsWithDiagnostics(params: PlanParams):
     `Thèmes réellement alimentés dans le workset : ${activeThemeKeys.size}.`,
     `Cap max par thème sur cette itération : ${maxPerThemeForIteration(iteration)}.`,
     "L’itération 1 ouvre d’abord les thèmes disponibles, consolide cette ouverture, puis complète de manière contrôlée pour tenir 5/5/4.",
+    "Le planner applique désormais un filtre anti-doublon sémantique entre thèmes et un garde-fou d’ancrage concret sur la matière source.",
   ];
 
   return { questions, diagnostics, notes };
