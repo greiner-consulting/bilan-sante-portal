@@ -376,18 +376,68 @@ function shouldRewriteCurrentQuestion(params: {
   return shouldRephraseQuestion || shouldPivotAngle;
 }
 
+function analysisSignalsRedundancy(
+  analysis: ReturnType<typeof analyzeUserAnswer>
+): boolean {
+  return [
+    analysis.rawMessage,
+    analysis.summary,
+    analysis.rationale,
+    ...(analysis.contradictionSignals ?? []),
+  ].some((value) => {
+    const text = normalizeForMatch(value);
+    return (
+      text.includes("redond") ||
+      text.includes("meme question") ||
+      text.includes("deja posee") ||
+      text.includes("tourne en rond")
+    );
+  });
+}
+
+function analysisSignalsThemeMismatch(
+  analysis: ReturnType<typeof analyzeUserAnswer>
+): boolean {
+  return [
+    analysis.rawMessage,
+    analysis.summary,
+    analysis.rationale,
+    ...(analysis.contradictionSignals ?? []),
+  ].some((value) => {
+    const text = normalizeForMatch(value);
+    return (
+      text.includes("pas le bon theme") ||
+      text.includes("hors sujet") ||
+      text.includes("decalage de theme") ||
+      text.includes("mauvais angle") ||
+      text.includes("mauvais sujet") ||
+      text.includes("melange")
+    );
+  });
+}
+
 function buildRewriteAssistantMessage(
-  intent: ReturnType<typeof analyzeUserAnswer>["intent"]
+  analysis: ReturnType<typeof analyzeUserAnswer>
 ): string {
-  switch (intent) {
-    case "clarification_request":
-      return "Je reformule la question plus simplement pour repartir sur le bon sujet.";
+  if (analysis.intent === "clarification_request") {
+    return "Je reformule la question plus simplement pour repartir sur le bon sujet.";
+  }
+
+  if (analysis.intent === "challenge" && analysisSignalsRedundancy(analysis)) {
+    return "Je ne repose pas la même question. Je repars sur un autre angle utile, dans la limite du protocole.";
+  }
+
+  if (analysis.intent === "challenge" && analysisSignalsThemeMismatch(analysis)) {
+    return "Je recentre la question sur le bon sujet avant de poursuivre le diagnostic.";
+  }
+
+  switch (analysis.intent) {
     case "challenge":
-      return "Je reformule la question pour repartir du bon angle métier.";
+      return "Je corrige le cadrage de la question avant de poursuivre le diagnostic.";
     case "reframing":
       return "Je reprends la question selon l’angle que vous venez de recadrer.";
     case "noise":
-      return "Je recentre la question pour poursuivre le diagnostic.";
+      return "Je recentre la question avec un exemple plus concret pour poursuivre le diagnostic.";
     default:
       return "Je reformule la question pour poursuivre le diagnostic.";
   }
@@ -971,7 +1021,7 @@ export async function processSessionInput(params: {
 
     const payload: SessionViewPayload = {
       ...toSessionView(aggregate),
-      assistant_message: buildRewriteAssistantMessage(analysis.intent),
+      assistant_message: buildRewriteAssistantMessage(analysis),
       needs_validation: false,
     };
 
