@@ -103,6 +103,16 @@ const CHALLENGE_PATTERNS = [
   "ce n'est pas la vraie cause",
   "vous partez du mauvais angle",
   "tu pars du mauvais angle",
+  "meme question",
+  "même question",
+  "question deja posee",
+  "question déjà posée",
+  "redondant",
+  "redondante",
+  "pas le bon theme",
+  "pas le bon thème",
+  "hors sujet",
+  "on tourne en rond",
 ];
 
 const REFRAMING_PATTERNS = [
@@ -391,6 +401,25 @@ function hasContinuationCue(text: string): boolean {
   );
 }
 
+function isRedundancyFeedback(text: string): boolean {
+  return [
+    "meme question",
+    "question deja posee",
+    "redondant",
+    "redondante",
+    "on tourne en rond",
+  ].some((pattern) => text.includes(normalizeForMatch(pattern)));
+}
+
+function isThemeMismatchFeedback(text: string): boolean {
+  return [
+    "pas le bon theme",
+    "hors sujet",
+    "vous melangez",
+    "tu melanges",
+  ].some((pattern) => text.includes(normalizeForMatch(pattern)));
+}
+
 function extractFacts(
   cleanedMessage: string,
   currentQuestion?: AnalyzerQuestionContext | null
@@ -403,6 +432,12 @@ function extractFacts(
 
     if (!normalized) return false;
     if (hasAnyPattern(normalized, CLARIFICATION_PATTERNS)) return false;
+    if (
+      (isRedundancyFeedback(normalized) || isThemeMismatchFeedback(normalized)) &&
+      !hasBusinessCue(normalized)
+    ) {
+      return false;
+    }
 
     const shortButUseful =
       sentence.length >= 8 &&
@@ -558,6 +593,14 @@ function computeBusinessMatterScore(params: {
     score += 8;
   }
 
+  if (
+    (isRedundancyFeedback(normalized) || isThemeMismatchFeedback(normalized)) &&
+    facts.length === 0 &&
+    rootCauses.length === 0
+  ) {
+    score -= 24;
+  }
+
   return score;
 }
 
@@ -605,12 +648,22 @@ function buildFollowUp(params: {
   theme: string | null;
   suggestedAngle: SuggestedAngle | null;
   rootCauses: RootCauseCategory[];
+  cleanedMessage?: string;
 }): string | null {
   const { intent, theme, suggestedAngle, rootCauses } = params;
+  const normalized = normalizeForMatch(params.cleanedMessage ?? "");
   const themeLabel = theme ? `"${theme}"` : "ce sujet";
 
   if (intent === "clarification_request") {
     return `Je reformule sur ${themeLabel} de façon plus concrète, en demandant qui pilote réellement le sujet, comment les décisions sont prises et quels faits observables montrent où se situe la difficulté.`;
+  }
+
+  if (intent === "challenge" && isRedundancyFeedback(normalized)) {
+    return `Je repars sur ${themeLabel} avec un angle différent pour éviter de reposer la même question.`;
+  }
+
+  if (intent === "challenge" && isThemeMismatchFeedback(normalized)) {
+    return `Je recentre la prochaine question sur le bon sujet de ${themeLabel} au lieu de prolonger l’angle actuel.`;
   }
 
   if (intent === "reframing" || intent === "mixed") {
@@ -677,7 +730,9 @@ export function analyzeUserAnswer(params: {
   });
 
   const asksClarification = clarificationMatches.length > 0;
-  const challenges = challengeMatches.length > 0;
+  const redundancyFeedback = isRedundancyFeedback(normalized);
+  const themeMismatchFeedback = isThemeMismatchFeedback(normalized);
+  const challenges = challengeMatches.length > 0 || redundancyFeedback || themeMismatchFeedback;
   const reframes = reframingMatches.length > 0;
   const hasBusinessMatter = businessMatterScore >= 28;
 
@@ -717,9 +772,12 @@ export function analyzeUserAnswer(params: {
     action = hasBusinessMatter ? "store_and_pivot" : "challenge_same_topic";
     confidence = hasBusinessMatter ? 82 : 76;
     shouldStoreAsAnswer = hasBusinessMatter;
-    shouldPivotAngle = hasBusinessMatter;
-    rationale =
-      "Le message conteste le postulat de départ ; il faut vérifier l’hypothèse au lieu de la conserver telle quelle.";
+    shouldPivotAngle = hasBusinessMatter || redundancyFeedback || themeMismatchFeedback;
+    rationale = redundancyFeedback
+      ? "Le message signale que la question est redondante ou déjà traitée ; il faut changer d’angle plutôt que reposer la même question."
+      : themeMismatchFeedback
+      ? "Le message signale un décalage de thème ou un hors-sujet ; il faut recentrer la suite sur le bon sujet."
+      : "Le message conteste le postulat de départ ; il faut vérifier l’hypothèse au lieu de la conserver telle quelle.";
   } else if (hasBusinessMatter) {
     intent = "business_answer";
     action = "store_answer";
@@ -766,6 +824,7 @@ export function analyzeUserAnswer(params: {
       theme: currentTheme,
       suggestedAngle,
       rootCauses,
+      cleanedMessage,
     }),
   };
 }
