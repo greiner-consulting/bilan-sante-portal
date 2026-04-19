@@ -5,7 +5,10 @@ import {
   adminSupabase,
 } from "@/lib/supabaseServer";
 import { loadAggregate, saveAggregate } from "@/lib/bilan-sante/session-repository";
-import { bootstrapSessionFromTrameWithLlm } from "@/lib/bilan-sante/protocol-engine";
+import {
+  bootstrapSessionFromTrameWithLlm,
+  getEngineView,
+} from "@/lib/bilan-sante/protocol-engine";
 import type { DiagnosticSessionAggregate } from "@/lib/bilan-sante/session-model";
 
 export const runtime = "nodejs";
@@ -143,10 +146,8 @@ export async function GET(req: Request) {
       await saveAggregate(sessionId, aggregate);
     }
 
-    const activeQuestionBatch =
-      aggregate?.phase === "dimension_iteration" && aggregate.currentWorkset?.questions
-        ? aggregate.currentWorkset.questions
-        : [];
+    const engineView = aggregate ? getEngineView(aggregate) : null;
+    const activeQuestionBatch = engineView?.questions ?? [];
 
     return NextResponse.json({
       ok: true,
@@ -169,6 +170,8 @@ export async function GET(req: Request) {
         has_extracted_text: Boolean(row.extracted_text),
       },
       engine_state: {
+        assistant_message: engineView?.assistantMessage ?? null,
+        needs_validation: Boolean(engineView?.needsValidation),
         question_batch_json: activeQuestionBatch.map((q) => ({
           fact_id: q.signalId,
           theme: q.theme,
