@@ -59,6 +59,16 @@ export interface EngineView {
   currentIteration: IterationNumber | null;
 }
 
+const ENGINE_LOG_PREFIX = "[BilanSante][Workset]";
+
+function engineLogInfo(event: string, payload?: Record<string, unknown>) {
+  console.info(`${ENGINE_LOG_PREFIX} ${event}`, payload ?? {});
+}
+
+function engineLogWarn(event: string, payload?: Record<string, unknown>) {
+  console.warn(`${ENGINE_LOG_PREFIX} ${event}`, payload ?? {});
+}
+
 function uniqueById<T extends { id: string }>(items: T[]): T[] {
   const seen = new Set<string>();
   const out: T[] = [];
@@ -101,6 +111,40 @@ function uniqueStrings(values: Array<string | null | undefined>, max?: number): 
     if (max != null && out.length >= max) break;
   }
   return out;
+}
+
+function summarizeQuestionSamples(
+  questions: StructuredQuestion[],
+  max = 3
+): Array<Record<string, unknown>> {
+  return questions.slice(0, max).map((question) => ({
+    id: question.id,
+    theme: question.theme,
+    signalId: question.signalId,
+    question: shortenText(question.questionOuverte, 140),
+  }));
+}
+
+function summarizeCandidateDiagnostics(
+  diagnostics:
+    | Array<{
+        signalId: string;
+        theme: string;
+        entryAngle: string;
+        score: number;
+        rationale: string[];
+      }>
+    | null
+    | undefined,
+  max = 5
+): Array<Record<string, unknown>> {
+  return (diagnostics ?? []).slice(0, max).map((item) => ({
+    signalId: item.signalId,
+    theme: item.theme,
+    entryAngle: item.entryAngle,
+    score: item.score,
+    rationale: item.rationale.slice(0, 3),
+  }));
 }
 
 function withSafeMemory(
@@ -350,6 +394,16 @@ function applyEmptyWorksetAutoValidation(
   if (!workset) return session;
   if (workset.questions.length > 0) return session;
   if (session.phase !== "dimension_iteration") return session;
+
+  engineLogWarn("auto_iteration_validation_empty_workset", {
+    sessionId: session.sessionId,
+    dimensionId: workset.dimensionId,
+    iteration: workset.iteration,
+    targetQuestionCount: workset.targetQuestionCount,
+    minimumRequiredCount: workset.minimumRequiredCount,
+    planningNotes: (workset.planningDiagnostics?.notes ?? []).slice(0, 10),
+  });
+
   return {
     ...session,
     phase: "iteration_validation",
@@ -377,6 +431,20 @@ async function buildWorkset(
     previousIterationQuestionCount: previousQuestionCount,
   });
 
+  const dimensionSignals = getDimensionSignals(session, dimensionId);
+
+  engineLogInfo("build_workset_start", {
+    sessionId: session.sessionId,
+    dimensionId,
+    iteration,
+    reopen,
+    previousQuestionCount,
+    desiredQuestionCount,
+    dimensionSignalCount: dimensionSignals.length,
+    explicitSignalCount: dimensionSignals.filter((signal) => signal.signalKind === "explicit").length,
+    absenceSignalCount: dimensionSignals.filter((signal) => signal.signalKind === "absence").length,
+  });
+
   let questions: StructuredQuestion[] = [];
   let planningDiagnostics = null;
   let planningNotes: string[] = [];
@@ -398,6 +466,28 @@ async function buildWorkset(
       notes: planned.notes,
     };
     planningNotes = planned.notes;
+
+    engineLogInfo("planner_result", {
+      sessionId: session.sessionId,
+      dimensionId,
+      iteration,
+      plannedQuestionCount: planned.questions.length,
+      diagnosticCount: planned.diagnostics.length,
+      sampleQuestions: summarizeQuestionSamples(planned.questions),
+      topCandidates: summarizeCandidateDiagnostics(planned.diagnostics),
+      notes: planned.notes.slice(0, 10),
+    });
+
+    if (planned.questions.length === 0) {
+      engineLogWarn("planner_returned_zero_questions", {
+        sessionId: session.sessionId,
+        dimensionId,
+        iteration,
+        diagnosticCount: planned.diagnostics.length,
+        topCandidates: summarizeCandidateDiagnostics(planned.diagnostics, 8),
+        notes: planned.notes.slice(0, 10),
+      });
+    }
   }
 
   if (questions.length === 0) {
@@ -410,6 +500,15 @@ async function buildWorkset(
       candidateDiagnostics: [],
       notes: planningNotes,
     };
+
+    engineLogWarn("legacy_fallback_used", {
+      sessionId: session.sessionId,
+      dimensionId,
+      iteration,
+      desiredQuestionCount,
+      legacyQuestionCount: questions.length,
+      sampleQuestions: summarizeQuestionSamples(questions),
+    });
   }
 
   if (questions.length < desiredQuestionCount) {
@@ -428,6 +527,17 @@ async function buildWorkset(
         `Backfill runtime activé avant trim: +${added} question(s) pour viser ${desiredQuestionCount}.`,
       ];
     }
+
+    engineLogInfo("backfill_before_trim", {
+      sessionId: session.sessionId,
+      dimensionId,
+      iteration,
+      before,
+      after: questions.length,
+      added,
+      desiredQuestionCount,
+      sampleQuestions: summarizeQuestionSamples(questions),
+    });
   }
 
   const policy = computeIterationQuestionPolicy({
@@ -443,6 +553,17 @@ async function buildWorkset(
     iteration,
     questions: slicedQuestions,
     minimumRequiredCount: policy.minimumRequiredCount,
+  });
+
+  engineLogInfo("trim_result", {
+    sessionId: session.sessionId,
+    dimensionId,
+    iteration,
+    beforeTrim: slicedQuestions.length,
+    afterTrim: trimmedQuestions.length,
+    minimumRequiredCount: policy.minimumRequiredCount,
+    targetQuestionCount: policy.targetQuestionCount,
+    sampleQuestions: summarizeQuestionSamples(trimmedQuestions),
   });
 
   let finalQuestions = trimmedQuestions;
@@ -463,6 +584,17 @@ async function buildWorkset(
         `Backfill runtime activé après trim: +${added} question(s) pour éviter un workset sous-alimenté.`,
       ];
     }
+
+    engineLogInfo("backfill_after_trim", {
+      sessionId: session.sessionId,
+      dimensionId,
+      iteration,
+      before,
+      after: finalQuestions.length,
+      added,
+      desiredQuestionCount,
+      sampleQuestions: summarizeQuestionSamples(finalQuestions),
+    });
   }
 
   const finalPolicy = computeIterationQuestionPolicy({
@@ -472,6 +604,31 @@ async function buildWorkset(
   });
 
   const boundedFinalQuestions = finalQuestions.slice(0, finalPolicy.targetQuestionCount);
+
+  if (boundedFinalQuestions.length === 0) {
+    engineLogWarn("build_workset_zero_questions", {
+      sessionId: session.sessionId,
+      dimensionId,
+      iteration,
+      desiredQuestionCount,
+      previousQuestionCount,
+      finalCandidateCount: finalQuestions.length,
+      finalTargetQuestionCount: finalPolicy.targetQuestionCount,
+      minimumRequiredCount: finalPolicy.minimumRequiredCount,
+      planningNotes: planningNotes.slice(0, 12),
+      topCandidates: summarizeCandidateDiagnostics(planningDiagnostics?.candidateDiagnostics, 8),
+    });
+  } else {
+    engineLogInfo("build_workset_ready", {
+      sessionId: session.sessionId,
+      dimensionId,
+      iteration,
+      desiredQuestionCount,
+      finalQuestionCount: boundedFinalQuestions.length,
+      minimumRequiredCount: finalPolicy.minimumRequiredCount,
+      sampleQuestions: summarizeQuestionSamples(boundedFinalQuestions),
+    });
+  }
 
   return {
     dimensionId,
@@ -1386,8 +1543,28 @@ async function createBootstrappedSessionFromRegistry(params: {
   });
 
   const workset = await buildWorkset(session, 1, 1, false);
+  engineLogInfo("bootstrap_workset_built", {
+    sessionId: params.sessionId,
+    dimensionId: 1,
+    iteration: 1,
+    questionCount: workset.questions.length,
+    targetQuestionCount: workset.targetQuestionCount,
+    minimumRequiredCount: workset.minimumRequiredCount,
+    sampleQuestions: summarizeQuestionSamples(workset.questions),
+    planningNotes: (workset.planningDiagnostics?.notes ?? []).slice(0, 10),
+  });
+
   session = attachWorkset(session, workset);
   session = applyEmptyWorksetAutoValidation(session);
+
+  engineLogInfo("bootstrap_session_ready", {
+    sessionId: params.sessionId,
+    phase: session.phase,
+    dimensionId: session.currentDimensionId,
+    iteration: session.currentIteration,
+    currentWorksetQuestionCount: session.currentWorkset?.questions.length ?? 0,
+  });
+
   return touchSession(withSafeMemory(session));
 }
 
