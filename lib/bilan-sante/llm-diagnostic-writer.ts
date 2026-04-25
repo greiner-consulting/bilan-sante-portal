@@ -151,6 +151,21 @@ function sourceSuggestsFutureFragility(params: {
   ].some((pattern) => text.includes(normalizeForMatch(pattern)));
 }
 
+function sourceIncludesAny(source: string, patterns: string[]): boolean {
+  return patterns.some((pattern) => source.includes(normalizeForMatch(pattern)));
+}
+
+function recruitmentTargetLabel(source: string): string {
+  if (sourceIncludesAny(source, ["technicien", "techniciens"])) return "des techniciens";
+  if (sourceIncludesAny(source, ["conducteur de travaux", "conducteurs de travaux"])) {
+    return "des conducteurs de travaux";
+  }
+  if (sourceIncludesAny(source, ["charge d'affaires", "chargé d'affaires", "chargés d'affaires"])) {
+    return "des chargés d'affaires";
+  }
+  return "les bons profils";
+}
+
 function questionLooksTooGeneric(value: string): boolean {
   const text = normalizeForMatch(value);
   return [
@@ -168,6 +183,8 @@ function questionLooksTooGeneric(value: string): boolean {
     "quelle est la premiere difficulte qui se presente",
     "qu'est-ce qui n'est pas encore pret aujourd'hui pour tenir une montee en charge",
     "qu'est-ce qui risque de bloquer d'abord",
+    "entre trouver recruter et integrer",
+    "quelle etape reste encore la moins securisee aujourd'hui",
   ].some((pattern) => text.includes(normalizeForMatch(pattern)));
 }
 
@@ -292,14 +309,146 @@ function buildFocusSpecificQuestion(params: {
     return "Qu’est-ce qui rend aujourd’hui la prévision à moyen terme plus difficile que celle à quelques semaines ?";
   }
 
-  if (source.includes("recrut") || source.includes("integr") || source.includes("onboarding")) {
+  const mentionsRecruitment = sourceIncludesAny(source, [
+    "recrut",
+    "trouver",
+    "sourcing",
+    "cv",
+    "candid",
+    "identification",
+    "visibilite",
+    "visibilité",
+    "canaux",
+    "annonce",
+    "profils",
+    "recrutable",
+  ]);
+  const mentionsIntegration = sourceIncludesAny(source, [
+    "integr",
+    "integration",
+    "intégration",
+    "onboarding",
+    "accueil",
+    "formation",
+    "tutorat",
+    "compagnonnage",
+    "autonomie",
+    "outil",
+    "outils",
+    "interne",
+    "internes",
+    "qualite",
+    "qualité",
+    "standard",
+    "procedure",
+    "procédure",
+  ]);
+
+  if (mentionsRecruitment || mentionsIntegration) {
+    const target = recruitmentTargetLabel(source);
+    const mentionsVisibility = sourceIncludesAny(source, [
+      "visible",
+      "visibilite",
+      "visibilité",
+      "canaux",
+      "reseau",
+      "réseau",
+      "annonce",
+      "sourcing",
+    ]);
+    const mentionsIdentification = sourceIncludesAny(source, [
+      "identification",
+      "identifier",
+      "cibles",
+      "cv",
+      "profil",
+      "profils",
+      "recrutable",
+      "detection",
+      "détection",
+    ]);
+    const mentionsSelection = sourceIncludesAny(source, [
+      "qualifier",
+      "qualification",
+      "entretien",
+      "selection",
+      "sélection",
+    ]);
+    const mentionsTraining = sourceIncludesAny(source, [
+      "formation",
+      "former",
+      "tutorat",
+      "compagnonnage",
+      "autonomie",
+      "montee en competence",
+      "montée en compétence",
+    ]);
+    const mentionsTools = sourceIncludesAny(source, [
+      "outil",
+      "outils",
+      "interne",
+      "internes",
+      "erp",
+      "logiciel",
+      "logiciels",
+    ]);
+    const mentionsQuality = sourceIncludesAny(source, [
+      "qualite",
+      "qualité",
+      "standard",
+      "procedure",
+      "procédure",
+      "mode operatoire",
+      "mode opératoire",
+    ]);
+
+    if (mentionsRecruitment && (mentionsVisibility || mentionsIdentification || mentionsSelection)) {
+      if (params.iteration === 1) {
+        return `Aujourd’hui, qu’est-ce qui bloque d’abord pour identifier ${target} : visibilité, ciblage ou qualification initiale ?`;
+      }
+      if (params.iteration === 2) {
+        return `Aujourd’hui, entre faire venir des candidatures, qualifier les profils et conclure, où perdez-vous le plus de temps pour recruter ${target} ?`;
+      }
+      return `Aujourd’hui, sur le recrutement de ${target}, quelle étape reste la moins sécurisée : attirer, qualifier ou conclure ?`;
+    }
+
+    if (mentionsIntegration && mentionsTools && mentionsQuality) {
+      if (params.iteration === 1) {
+        return "Quand un nouveau recruté arrive, qu’est-ce qui prend aujourd’hui le plus de temps pour le rendre autonome sur vos outils internes et vos standards qualité ?";
+      }
+      if (params.iteration === 2) {
+        return "Sur l’intégration, qu’est-ce qui consomme aujourd’hui le plus de temps réel : former aux outils, transmettre les standards qualité ou faire reprendre les erreurs ?";
+      }
+      return "Quand un nouveau recruté arrive, qu’est-ce qui reste encore le moins sécurisé pour qu’il soit autonome sans reprise derrière sur les outils et la qualité ?";
+    }
+
+    if (mentionsIntegration && mentionsTools) {
+      if (params.iteration === 1) {
+        return "Quand un nouveau recruté arrive, qu’est-ce qui prend aujourd’hui le plus de temps pour le mettre à l’aise sur vos outils internes ?";
+      }
+      if (params.iteration === 2) {
+        return "Sur l’intégration aux outils internes, où perdez-vous aujourd’hui le plus de temps réel : paramétrer, former ou corriger après coup ?";
+      }
+      return "Sur l’intégration aux outils internes, quel point reste aujourd’hui le moins sécurisé pour rendre un nouveau recruté autonome ?";
+    }
+
+    if (mentionsIntegration && (mentionsQuality || mentionsTraining)) {
+      if (params.iteration === 1) {
+        return "Quand un nouveau recruté arrive, qui le forme réellement les premiers jours et qu’est-ce qui se tend d’abord sur la qualité attendue ?";
+      }
+      if (params.iteration === 2) {
+        return "Sur l’intégration, qu’est-ce qui prend aujourd’hui le plus de temps réel : transmettre le métier, les standards qualité ou vérifier que cela tient ?";
+      }
+      return "Quand un nouveau recruté arrive, quel point reste encore le moins sécurisé pour qu’il tienne seul le niveau de qualité attendu ?";
+    }
+
     if (params.iteration === 1) {
-      return "Quand un nouveau recruté arrive, qu’est-ce qui empêche aujourd’hui de sécuriser correctement son intégration ?";
+      return "Quand un nouveau recruté arrive, qui prend réellement en charge son intégration au départ et où cela se tend-il ?";
     }
     if (params.iteration === 2) {
-      return "Entre trouver, recruter et intégrer, où perdez-vous le plus de temps aujourd’hui ?";
+      return "Quand un nouveau recruté arrive, qu’est-ce qui consomme aujourd’hui le plus de temps réel pour le rendre autonome ?";
     }
-    return "Quand un recruté arrive, quelle étape reste encore la moins sécurisée aujourd’hui ?";
+    return "Quand un nouveau recruté arrive, qu’est-ce qui reste encore le moins sécurisé pour qu’il soit autonome sans reprise derrière ?";
   }
 
   if (
@@ -531,6 +680,7 @@ function shouldFallbackToConcreteQuestion(params: {
       "point le moins pilote",
       "premier frein",
       "obstacle concret qui pourrait",
+      "entre trouver recruter et integrer",
     ].some((pattern) => candidateNormalized.includes(normalizeForMatch(pattern)))
   ) {
     return true;
