@@ -10,10 +10,7 @@ import type {
   SignalRegistry,
 } from "@/lib/bilan-sante/session-model";
 import {
-  MAX_SECTION_REUSE_BEFORE_HARD_PENALTY,
-  evidenceNatureRank,
   normalizeExtractionText,
-  type EvidenceNature,
   type LlmExtractedExplicitSignal,
   type LlmSignalExtractionResponse,
   type LlmUncoveredTheme,
@@ -27,73 +24,9 @@ type ThemeKeywordMap = Record<string, string[]>;
 type TrameSection = BaseTrameSnapshot["sections"][number];
 type MissingField = BaseTrameSnapshot["missingFields"][number];
 
-type IndexedSection = {
-  section: TrameSection;
-  heading: string;
-  content: string;
-  normalizedHeading: string;
-  normalizedContent: string;
-  normalizedCombined: string;
-  headingTokens: string[];
-  contentTokens: string[];
-  combinedTokenSet: Set<string>;
-  genericPenalty: number;
-  textLength: number;
-};
-
-type ThemeCandidate = {
-  dimensionId: DimensionId;
-  theme: string;
-  section: TrameSection;
-  sectionHeading: string;
-  excerpt: string;
-  matchedKeywords: string[];
-  headingHitCount: number;
-  contentHitCount: number;
-  genericPenalty: number;
-  score: number;
-  entryAngle: DiagnosticSignal["entryAngle"];
-  constat: string;
-};
-
-type LlmAcceptedCandidate = {
-  dimensionId: DimensionId;
-  theme: string;
-  section: TrameSection;
-  sourceExcerpt: string;
-  evidenceNature: EvidenceNature;
-  entryAngle: DiagnosticSignal["entryAngle"];
-  relevanceScore: number;
-  confidenceScore: number;
-  criticalityScore: number;
-  constat: string;
-  managerialRisk: string;
-  probableConsequence: string;
-  whyRelevant: string;
-};
-
-type LlmFilterDecision =
-  | "accepted_non_anecdotal"
-  | "rejected_no_section"
-  | "rejected_anecdotal";
-
-type LlmFilterStats = {
-  total: number;
-  acceptedNonAnecdotal: number;
-  rejectedNoSection: number;
-  rejectedAnecdotal: number;
-};
-
-const MAX_EXCERPT_LENGTH = 280;
-const MIN_EXPLICIT_SCORE = 28;
-const STRONG_EXPLICIT_SCORE = 38;
-const SECTION_REUSE_PENALTY = 12;
-const GENERIC_REUSE_EXTRA_PENALTY = 6;
-const MAX_EXPLICIT_SIGNALS_PER_THEME = 3;
-const SECONDARY_DETERMINISTIC_GAP = 22;
-const SECONDARY_LLM_RATIO = 0.64;
-
 const LOG_PREFIX = "[BilanSante][SignalExtraction]";
+const MAX_EXCERPT_LENGTH = 420;
+const MAX_SIGNALS_PER_THEME = 2;
 
 function logInfo(event: string, payload?: Record<string, unknown>) {
   console.info(`${LOG_PREFIX} ${event}`, payload ?? {});
@@ -104,125 +37,124 @@ function logWarn(event: string, payload?: Record<string, unknown>) {
 }
 
 function summarizeError(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message;
-  }
+  if (error instanceof Error) return error.message;
   return String(error ?? "unknown_error");
 }
 
-const GENERIC_HEADING_HINTS = [
-  "commentaire",
-  "commentaires",
-  "observation",
-  "observations",
-  "synthese",
-  "synthèse",
-  "constat",
-  "constats",
-  "analyse",
-  "analyses",
-  "point de vigilance",
-  "points de vigilance",
-  "general",
-  "général",
-  "divers",
-  "autre",
-  "annexe",
-  "complement",
-  "complément",
-  "notes",
-];
+function normalizeText(value: unknown): string {
+  return String(value ?? "")
+    .replace(/\s+/g, " ")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
+}
 
-const STOP_WORDS = new Set<string>([
-  "des",
-  "les",
-  "une",
-  "dans",
-  "avec",
-  "pour",
-  "sur",
-  "par",
-  "aux",
-  "ses",
-  "ces",
-  "est",
-  "sont",
-  "pas",
-  "plus",
-  "moins",
-  "entre",
-  "sans",
-  "sous",
-  "vers",
-  "cela",
-  "tout",
-  "toute",
-  "tous",
-  "toutes",
-  "etre",
-  "être",
-  "leurs",
-  "leur",
-  "dont",
-]);
+function cleanText(value: unknown): string {
+  return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
+function truncate(value: unknown, max = MAX_EXCERPT_LENGTH): string {
+  const text = cleanText(value);
+  if (text.length <= max) return text;
+  return `${text.slice(0, max - 1).trim()}…`;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+function uniqueStrings(values: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+
+  for (const value of values) {
+    const text = cleanText(value);
+    const key = normalizeText(text);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(text);
+  }
+
+  return out;
+}
+
+function includesAny(text: string, patterns: string[]): boolean {
+  return patterns.some((pattern) => text.includes(normalizeText(pattern)));
+}
 
 const KEYWORDS_BY_DIMENSION: Record<DimensionId, ThemeKeywordMap> = {
   1: {
     "qualité et adéquation des équipes": [
       "équipe",
+      "équipes",
       "compétence",
       "profil",
+      "profils",
+      "technicien",
+      "techniciens",
       "niveau",
       "encadrement",
-      "expérience",
-      "seniorité",
       "formation",
-      "chef de chantier",
-      "chefs de chantier",
-      "niveau à date",
+      "expérience",
     ],
     "ressources vs charge": [
       "charge",
-      "capacité",
+      "charges",
+      "ressource",
       "ressources",
-      "sous-effectif",
-      "surcharge",
+      "capacité",
+      "capacite",
+      "encadrement",
+      "surdimensionné",
+      "surdimensionnés",
+      "30%",
+      "30 %",
       "planning",
-      "disponibilité",
-      "charge capacité",
-      "planifier",
       "planification",
-      "staffing",
-      "5 semaines",
+      "affectation",
+      "volume",
     ],
     "turnover absentéisme stabilité": [
       "turnover",
       "absentéisme",
-      "stabilité",
-      "départ",
-      "fidélisation",
-      "rotation",
       "absenteisme",
+      "stabilité",
+      "stabilite",
+      "départ",
+      "départs",
+      "démission",
+      "démissions",
+      "absence",
+      "absences",
     ],
     "recrutement et intégration": [
       "recrutement",
       "recruter",
+      "recruté",
+      "recrutés",
       "intégration",
-      "onboarding",
-      "embauche",
-      "embauches",
-      "besoins",
       "intégrer",
+      "embauche",
+      "candidat",
+      "candidats",
+      "cv",
+      "formation",
+      "onboarding",
     ],
     "clarté des rôles": [
       "rôle",
+      "rôles",
+      "role",
+      "roles",
       "responsabilité",
-      "organigramme",
-      "périmètre",
+      "responsabilités",
       "délégation",
-      "poste",
+      "delegation",
+      "périmètre",
       "autorité",
-      "périmètre de responsabilité",
+      "qui décide",
+      "décision",
     ],
   },
   2: {
@@ -266,6 +198,7 @@ const KEYWORDS_BY_DIMENSION: Record<DimensionId, ThemeKeywordMap> = {
       "tarif",
       "devis",
       "hypothèse",
+      "hypothèses",
       "chiffrage",
       "tarification",
       "remise",
@@ -341,165 +274,6 @@ const KEYWORDS_BY_DIMENSION: Record<DimensionId, ThemeKeywordMap> = {
   },
 };
 
-const ENTRY_ANGLE_HINTS: Record<DiagnosticSignal["entryAngle"], string[]> = {
-  causality: [
-    "parce que",
-    "cause",
-    "causes",
-    "origine",
-    "origines",
-    "explique",
-    "explication",
-    "lié à",
-    "liée à",
-    "du fait de",
-    "en raison de",
-    "manque de",
-    "défaut de",
-    "erreur",
-    "mauvaise décision",
-    "mauvais choix",
-    "compétence",
-    "expérience",
-  ],
-  arbitration: [
-    "qui décide",
-    "décide",
-    "décision",
-    "validation",
-    "valider",
-    "arbitrage",
-    "autorisation",
-    "comité",
-    "escalade",
-    "signature",
-  ],
-  economics: [
-    "coût",
-    "coûts",
-    "marge",
-    "cash",
-    "trésorerie",
-    "résultat",
-    "rentabilité",
-    "prix",
-    "impact économique",
-    "budget",
-  ],
-  formalization: [
-    "procédure",
-    "processus",
-    "rituel",
-    "revue",
-    "formalis",
-    "cadre",
-    "tableau de bord",
-    "indicateur",
-    "standard",
-    "méthode",
-  ],
-  dependency: [
-    "dépend",
-    "dépendance",
-    "personne clé",
-    "personnes clés",
-    "clé",
-    "seul",
-    "unique",
-    "indispensable",
-    "blocage",
-    "goulot",
-  ],
-  mechanism: [],
-};
-
-function normalizeText(value: string): string {
-  return String(value ?? "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase();
-}
-
-function tokenize(value: string): string[] {
-  return normalizeText(value)
-    .split(/[^a-z0-9]+/)
-    .filter((token) => token.length >= 3 && !STOP_WORDS.has(token));
-}
-
-function uniqueStrings(values: string[]): string[] {
-  const seen = new Set<string>();
-  const out: string[] = [];
-
-  for (const value of values) {
-    const key = normalizeText(value);
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    out.push(value);
-  }
-
-  return out;
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, value));
-}
-
-function normalizeLlmScore(value: number): number {
-  const safe = clamp(Number(value ?? 0), 0, 100);
-
-  if (safe <= 5) {
-    return clamp(safe * 20, 0, 100);
-  }
-
-  if (safe <= 10) {
-    return clamp(safe * 10, 0, 100);
-  }
-
-  return safe;
-}
-
-function countOccurrences(haystack: string, needle: string): number {
-  if (!haystack || !needle) return 0;
-
-  let count = 0;
-  let start = 0;
-
-  while (start < haystack.length) {
-    const index = haystack.indexOf(needle, start);
-    if (index === -1) break;
-    count += 1;
-    start = index + needle.length;
-  }
-
-  return count;
-}
-
-function findAllPositions(haystack: string, needle: string): number[] {
-  if (!haystack || !needle) return [];
-
-  const positions: number[] = [];
-  let start = 0;
-
-  while (start < haystack.length) {
-    const index = haystack.indexOf(needle, start);
-    if (index === -1) break;
-    positions.push(index);
-    start = index + needle.length;
-  }
-
-  return positions;
-}
-
-function humanizeList(values: string[]): string {
-  const items = uniqueStrings(values).slice(0, 3);
-
-  if (items.length === 0) return "des éléments de pilotage à préciser";
-  if (items.length === 1) return `"${items[0]}"`;
-  if (items.length === 2) return `"${items[0]}" et "${items[1]}"`;
-
-  return `"${items[0]}", "${items[1]}" et "${items[2]}"`;
-}
-
 function makeSignalId(
   dimensionId: DimensionId,
   theme: string,
@@ -511,687 +285,383 @@ function makeSignalId(
     .normalize("NFD")
     .replace(/[^\w\s-]/g, "")
     .replace(/\s+/g, "-")
-    .slice(0, 70);
+    .slice(0, 78);
 
   return `sig-d${dimensionId}-${slug}`;
 }
 
-function buildGenericPenalty(
-  headingTokens: string[],
-  contentTokens: string[],
-  heading: string
-): number {
-  const normalizedHeading = normalizeText(heading);
-  let penalty = 0;
+function sectionId(section: TrameSection): string {
+  return String(section.id ?? section.heading ?? "section").trim() || "section";
+}
 
-  if (
-    GENERIC_HEADING_HINTS.some((hint) =>
-      normalizedHeading.includes(normalizeText(hint))
-    )
-  ) {
-    penalty += 12;
+function sectionText(section: TrameSection): string {
+  return cleanText(`${section.heading ?? ""} ${section.content ?? ""}`);
+}
+
+function scoreSectionForTheme(section: TrameSection, theme: string, keywords: string[]): number {
+  const heading = normalizeText(section.heading);
+  const content = normalizeText(section.content);
+  const combined = `${heading} ${content}`;
+  const themeNormalized = normalizeText(theme);
+
+  let score = 0;
+  if (heading.includes(themeNormalized)) score += 40;
+  if (content.includes(themeNormalized)) score += 24;
+
+  for (const keyword of keywords) {
+    const key = normalizeText(keyword);
+    if (!key) continue;
+    if (heading.includes(key)) score += 12;
+    if (content.includes(key)) score += 7;
   }
 
-  if (headingTokens.length <= 2) penalty += 4;
-  if (contentTokens.length < 25) penalty += 8;
-  if (contentTokens.length < 12) penalty += 6;
-  if (normalizedHeading.length < 12) penalty += 4;
+  if (content.length >= 120) score += 4;
+  if (content.length >= 260) score += 4;
 
-  return Math.min(penalty, 24);
+  if (combined.includes("commentaire") || combined.includes("observation")) score -= 5;
+
+  return score;
 }
 
-function indexSections(snapshot: BaseTrameSnapshot): IndexedSection[] {
-  return snapshot.sections.map((section) => {
-    const heading = String(section.heading ?? "").replace(/\s+/g, " ").trim();
-    const content = String(section.content ?? "").replace(/\s+/g, " ").trim();
-
-    const normalizedHeading = normalizeText(heading);
-    const normalizedContent = normalizeText(content);
-    const normalizedCombined = `${normalizedHeading}\n${normalizedContent}`.trim();
-
-    const headingTokens = tokenize(heading);
-    const contentTokens = tokenize(content);
-    const combinedTokenSet = new Set<string>([...headingTokens, ...contentTokens]);
-
-    return {
-      section,
-      heading,
-      content,
-      normalizedHeading,
-      normalizedContent,
-      normalizedCombined,
-      headingTokens,
-      contentTokens,
-      combinedTokenSet,
-      genericPenalty: buildGenericPenalty(headingTokens, contentTokens, heading),
-      textLength: content.length,
-    };
-  });
-}
-
-function scoreKeywordProximity(
-  normalizedContent: string,
-  normalizedKeywords: string[]
-): number {
-  const positions = normalizedKeywords.flatMap((keyword) =>
-    findAllPositions(normalizedContent, keyword).slice(0, 2)
-  );
-
-  if (positions.length < 2) return 0;
-
-  positions.sort((a, b) => a - b);
-
-  let minGap = Number.POSITIVE_INFINITY;
-
-  for (let i = 1; i < positions.length; i += 1) {
-    minGap = Math.min(minGap, positions[i] - positions[i - 1]);
-  }
-
-  if (minGap <= 80) return 14;
-  if (minGap <= 160) return 10;
-  if (minGap <= 280) return 6;
-
-  return 0;
-}
-
-function findExcerptAnchor(
-  content: string,
+function findBestSectionsForTheme(
+  snapshot: BaseTrameSnapshot,
   theme: string,
-  matchedKeywords: string[]
-): number | null {
-  const lowered = content.toLowerCase();
+  keywords: string[]
+): Array<{ section: TrameSection; score: number }> {
+  return snapshot.sections
+    .map((section) => ({
+      section,
+      score: scoreSectionForTheme(section, theme, keywords),
+    }))
+    .filter((item) => item.score >= 16)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, MAX_SIGNALS_PER_THEME);
+}
 
-  const candidates = [theme, ...matchedKeywords]
-    .map((value) => value.trim())
+function buildExcerpt(section: TrameSection, theme: string, keywords: string[]): string {
+  const content = cleanText(section.content || section.heading || "");
+  if (!content) return "";
+
+  const lowered = content.toLowerCase();
+  const anchors = [theme, ...keywords]
+    .map((item) => cleanText(item))
     .filter(Boolean)
     .sort((a, b) => b.length - a.length);
 
-  for (const candidate of candidates) {
-    const index = lowered.indexOf(candidate.toLowerCase());
-    if (index >= 0) return index;
+  let anchorIndex = -1;
+  for (const anchor of anchors) {
+    anchorIndex = lowered.indexOf(anchor.toLowerCase());
+    if (anchorIndex >= 0) break;
   }
 
-  return null;
+  if (anchorIndex < 0) return truncate(content);
+
+  const start = Math.max(0, anchorIndex - 120);
+  const end = Math.min(content.length, anchorIndex + 300);
+  const prefix = start > 0 ? "…" : "";
+  const suffix = end < content.length ? "…" : "";
+  return truncate(`${prefix}${content.slice(start, end).trim()}${suffix}`);
 }
 
-function trimSnippet(text: string, start: number, end: number): string {
-  let safeStart = Math.max(0, start);
-  let safeEnd = Math.min(text.length, end);
+function pickEntryAngle(theme: string, source: string): DiagnosticSignal["entryAngle"] {
+  const text = normalizeText(`${theme} ${source}`);
 
-  while (safeStart > 0 && text[safeStart] !== " ") {
-    safeStart -= 1;
+  if (includesAny(text, ["naval group", "responsable historique", "personne clé", "personne cle", "dépend", "depend", "relais", "absence", "départ", "démission"])) {
+    return "dependency";
   }
-
-  while (safeEnd < text.length && text[safeEnd] !== " ") {
-    safeEnd += 1;
+  if (includesAny(text, ["arbitr", "qui décide", "decision", "décision", "validation", "priorité", "priorite", "affectation"])) {
+    return "arbitration";
   }
-
-  let snippet = text.slice(safeStart, safeEnd).trim();
-
-  if (snippet.length > MAX_EXCERPT_LENGTH) {
-    snippet = `${snippet.slice(0, MAX_EXCERPT_LENGTH - 1).trim()}…`;
+  if (includesAny(text, ["marge", "cash", "résultat", "resultat", "coût", "cout", "prix", "rentabilité", "rentabilite", "volume", "facturable", "activité produite", "activite produite"])) {
+    return "economics";
   }
-
-  if (safeStart > 0 && !snippet.startsWith("…")) {
-    snippet = `…${snippet}`;
+  if (includesAny(text, ["formalis", "cadre", "rituel", "procédure", "procedure", "processus", "indicateur", "règle", "regle"])) {
+    return "formalization";
   }
-
-  if (safeEnd < text.length && !snippet.endsWith("…")) {
-    snippet = `${snippet}…`;
-  }
-
-  return snippet;
-}
-
-function buildContextExcerpt(
-  content: string,
-  theme: string,
-  matchedKeywords: string[]
-): string {
-  const clean = String(content ?? "").replace(/\s+/g, " ").trim();
-  if (!clean) return "";
-
-  const anchor = findExcerptAnchor(clean, theme, matchedKeywords);
-
-  if (anchor === null) {
-    return clean.length <= MAX_EXCERPT_LENGTH
-      ? clean
-      : `${clean.slice(0, MAX_EXCERPT_LENGTH - 1).trim()}…`;
-  }
-
-  const start = anchor - 100;
-  const end = anchor + 180;
-
-  return trimSnippet(clean, start, end);
-}
-
-function pickEntryAngle(
-  theme: string,
-  sectionHeading: string,
-  excerpt: string,
-  matchedKeywords: string[]
-): DiagnosticSignal["entryAngle"] {
-  const text = normalizeText(
-    [theme, sectionHeading, excerpt, ...matchedKeywords].join(" | ")
-  );
-
-  const scoreByAngle = (
-    Object.keys(ENTRY_ANGLE_HINTS) as DiagnosticSignal["entryAngle"][]
-  ).map((angle) => {
-    const hits = ENTRY_ANGLE_HINTS[angle].reduce((sum, hint) => {
-      return sum + (text.includes(normalizeText(hint)) ? 1 : 0);
-    }, 0);
-
-    return { angle, hits };
-  });
-
-  scoreByAngle.sort((a, b) => b.hits - a.hits);
-
-  if (scoreByAngle[0] && scoreByAngle[0].hits > 0) {
-    return scoreByAngle[0].angle;
+  if (includesAny(text, ["cause", "explique", "origine", "parce que", "manque de", "défaut", "defaut"])) {
+    return "causality";
   }
 
   return "mechanism";
 }
 
-function inferConstatFromExcerpt(params: {
-  theme: string;
-  excerpt: string;
-  matchedKeywords: string[];
-}): string {
-  const theme = params.theme;
-  const text = normalizeText(
-    [params.excerpt, ...params.matchedKeywords].join(" | ")
-  );
+function hasPositiveEncadrementCapacity(text: string): boolean {
+  const normalized = normalizeText(text);
+  const capacitySignal = includesAny(normalized, [
+    "surdimensionne",
+    "surdimensionnes",
+    "surstaffe",
+    "surstaffes",
+    "equipes d encadrement",
+    "equipe d encadrement",
+    "encadrement actuel",
+    "avec cet encadrement",
+    "absorber 30",
+    "30% de charge",
+    "30 % de charge",
+    "30% de charges",
+    "30 % de charges",
+    "charges supplementaires avec cet encadrement",
+    "charges supplémentaires avec cet encadrement",
+  ]);
 
-  const hasGrowthProjection =
-    text.includes("croissance") ||
-    text.includes("montee en charge") ||
-    text.includes("montée en charge") ||
-    text.includes("si la croissance") ||
-    text.includes("aura besoin") ||
-    text.includes("aurons besoin") ||
-    text.includes("besoin de recruter") ||
-    text.includes("si on gagne") ||
-    text.includes("si nous gagnons");
+  const notEnoughVolumeSignal = includesAny(normalized, [
+    "pas encore le volume",
+    "volume necessaire",
+    "volume nécessaire",
+    "pas encore le volume necessaire",
+    "pas encore le volume nécessaire",
+    "soutenir la croissance mais pas encore",
+  ]);
 
-  const hasRecruitmentTension =
-    text.includes("recrut") ||
-    text.includes("embauche") ||
-    text.includes("integration") ||
-    text.includes("intégration") ||
-    text.includes("apprentissage") ||
-    text.includes("montee en competence") ||
-    text.includes("montée en compétence");
-
-  const hasLoadTension =
-    text.includes("charge") ||
-    text.includes("ressource") ||
-    text.includes("capacite") ||
-    text.includes("capacité") ||
-    text.includes("planning") ||
-    text.includes("surcharge") ||
-    text.includes("disponibilite") ||
-    text.includes("disponibilité");
-
-  const hasRoleTension =
-    text.includes("role") ||
-    text.includes("rôle") ||
-    text.includes("responsabilite") ||
-    text.includes("responsabilité") ||
-    text.includes("delegation") ||
-    text.includes("délégation") ||
-    text.includes("qui decide") ||
-    text.includes("qui décide");
-
-  const hasFragilitySignal =
-    text.includes("peu") ||
-    text.includes("manque") ||
-    text.includes("difficile") ||
-    text.includes("fragile") ||
-    text.includes("pas suffisamment") ||
-    text.includes("insuffisant") ||
-    text.includes("insuffisante") ||
-    text.includes("tension");
-
-  if (theme === "qualité et adéquation des équipes") {
-    if (hasGrowthProjection || hasRecruitmentTension) {
-      return `Les équipes paraissent adaptées au niveau d’activité actuel, mais la capacité à suivre une montée en charge ou à recruter au bon niveau n’est pas encore sécurisée.`;
-    }
-    if (hasFragilitySignal) {
-      return `L’adéquation actuelle des équipes repose sur un équilibre encore fragile en cas d’évolution de l’activité ou des besoins.`;
-    }
-    return `Le niveau actuel des équipes semble tenir l’activité présente, sans visibilité encore solide sur leur capacité à absorber une évolution du besoin.`;
-  }
-
-  if (theme === "ressources vs charge") {
-    if (hasLoadTension) {
-      return `L’ajustement entre charge et ressources existe, mais il semble reposer sur des arbitrages rapprochés plus que sur un pilotage stabilisé.`;
-    }
-    return `La capacité à ajuster durablement les ressources à la charge reste encore peu objectivée.`;
-  }
-
-  if (theme === "recrutement et intégration") {
-    if (hasRecruitmentTension || hasGrowthProjection) {
-      return `Le recrutement et l’intégration apparaissent comme un point sensible dès qu’il faut renforcer rapidement les équipes ou préparer une montée en charge.`;
-    }
-    return `Le processus de recrutement et d’intégration n’apparaît pas encore suffisamment robuste pour sécuriser les besoins futurs.`;
-  }
-
-  if (theme === "clarté des rôles") {
-    if (hasRoleTension) {
-      return `La répartition des rôles semble fonctionner au quotidien, mais certains arbitrages ou zones de responsabilité restent potentiellement sensibles.`;
-    }
-    return `La clarté réelle des rôles et des responsabilités n’est pas encore suffisamment objectivée dans le fonctionnement décrit.`;
-  }
-
-  if (theme === "turnover absentéisme stabilité") {
-    return `La stabilité de fonctionnement peut être fragilisée dès que surviennent des absences, des départs ou des tensions de disponibilité.`;
-  }
-
-  if (hasGrowthProjection) {
-    return `Le fonctionnement actuel semble tenir, mais sa robustesse n’est pas démontrée en cas d’accélération de l’activité ou de changement d’échelle.`;
-  }
-
-  if (hasFragilitySignal) {
-    return `Le fonctionnement décrit sur "${theme}" repose sur des équilibres encore fragiles ou peu sécurisés.`;
-  }
-
-  return `Le fonctionnement réel sur "${theme}" n’est pas encore assez objectivé pour apprécier sa robustesse dans la durée.`;
+  return capacitySignal && (notEnoughVolumeSignal || normalized.includes("30"));
 }
 
-function buildExplicitConstat(params: {
-  theme: string;
-  sectionHeading: string;
-  matchedKeywords: string[];
-  headingHitCount: number;
-  excerpt?: string;
-}): string {
-  const { theme, excerpt, matchedKeywords } = params;
-
-  return inferConstatFromExcerpt({
-    theme,
-    excerpt: excerpt ?? "",
-    matchedKeywords,
-  });
+function hasNavalGroupDependency(text: string): boolean {
+  const normalized = normalizeText(text);
+  return normalized.includes("naval group") && includesAny(normalized, ["responsable", "historique", "cle", "clé", "dispositif"]);
 }
 
-function buildManagerialRisk(
-  theme: string,
-  isAbsence: boolean,
-  entryAngle?: DiagnosticSignal["entryAngle"]
-): string {
-  const t = theme.toLowerCase();
+function isLoadResourceTheme(theme: string): boolean {
+  return normalizeText(theme) === normalizeText("ressources vs charge");
+}
+
+function buildLoadCapacityConstat(source: string): string {
+  if (hasNavalGroupDependency(source)) {
+    return "La structure dispose d’une capacité d’encadrement supérieure à la charge actuelle et estime pouvoir absorber environ 30 % de charge supplémentaire ; le point à sécuriser n’est donc pas le volume d’encadrement, mais la conversion de cette capacité en activité réellement produite et la dépendance au responsable historique Naval Group.";
+  }
+
+  return "La structure dispose d’une capacité d’encadrement supérieure à la charge actuelle et estime pouvoir absorber environ 30 % de charge supplémentaire ; le point à sécuriser n’est donc pas le volume d’encadrement, mais la transformation de cette capacité disponible en activité réellement produite et facturable.";
+}
+
+function buildLoadCapacityRisk(source: string): string {
+  if (hasNavalGroupDependency(source)) {
+    return "Le risque principal n’est pas un manque d’encadrement, mais la capacité à transformer cette marge d’encadrement en activité facturable et à sécuriser les relais autour du contrat Naval Group.";
+  }
+
+  return "Le risque principal n’est pas un manque d’encadrement, mais la capacité à générer le volume d’affaires, mobiliser les équipes opérationnelles et transformer cette marge de capacité en production facturable.";
+}
+
+function buildLoadCapacityConsequence(source: string): string {
+  if (hasNavalGroupDependency(source)) {
+    return "Capacité d’encadrement disponible mais croissance non matérialisée, avec fragilité de continuité si le relais clé Naval Group devient indisponible.";
+  }
+
+  return "Capacité d’encadrement disponible mais croissance non matérialisée, avec risque de sous-utilisation managériale et de décalage entre potentiel de charge et activité réellement produite.";
+}
+
+function inferConstatFromSource(theme: string, source: string): string {
+  const text = normalizeText(source);
+
+  if (isLoadResourceTheme(theme) && hasPositiveEncadrementCapacity(source)) {
+    return buildLoadCapacityConstat(source);
+  }
+
+  if (isLoadResourceTheme(theme)) {
+    if (includesAny(text, ["5 semaines", "6 mois", "prévision", "prevision", "planification"])) {
+      return "Le pilotage charge / ressources fonctionne à court terme, mais la prévision au-delà de quelques semaines reste moins sécurisée.";
+    }
+    return "L’ajustement entre charge et ressources existe, mais il semble reposer sur des arbitrages rapprochés plus que sur un pilotage stabilisé.";
+  }
+
+  if (normalizeText(theme) === normalizeText("qualité et adéquation des équipes")) {
+    if (includesAny(text, ["profil", "technicien", "recrutable", "canaux", "cv", "cible", "identification"])) {
+      return "Les équipes tiennent l’activité actuelle, mais la capacité à identifier et sécuriser les bons profils reste un point sensible pour accompagner la croissance.";
+    }
+    return "Les équipes paraissent adaptées au niveau d’activité actuel, mais la robustesse en cas d’évolution de charge ou de besoin de compétences reste à confirmer.";
+  }
+
+  if (normalizeText(theme) === normalizeText("recrutement et intégration")) {
+    if (includesAny(text, ["outils", "qualité", "qualite", "formation", "autonomie", "intégration", "integration"])) {
+      return "Le recrutement et l’intégration apparaissent comme un point sensible, notamment pour rendre rapidement les nouveaux recrutés autonomes sur les outils et standards attendus.";
+    }
+    return "Le recrutement et l’intégration apparaissent comme un point sensible dès qu’il faut renforcer rapidement les équipes ou préparer une montée en charge.";
+  }
+
+  if (normalizeText(theme) === normalizeText("clarté des rôles")) {
+    return "La répartition des rôles semble fonctionner au quotidien, mais certaines décisions ou relais de responsabilité restent à clarifier dans les situations sensibles.";
+  }
+
+  if (normalizeText(theme) === normalizeText("turnover absentéisme stabilité")) {
+    return "La stabilité de fonctionnement peut être fragilisée dès que surviennent des absences, des départs ou une dépendance excessive à quelques relais.";
+  }
+
+  if (includesAny(text, ["marge", "cash", "résultat", "resultat", "rentabilité", "rentabilite", "coût", "cout", "prix"])) {
+    return `Le thème "${theme}" présente un enjeu économique à objectiver pour éviter des décisions insuffisamment reliées à leur impact réel.`;
+  }
+
+  if (includesAny(text, ["arbitr", "validation", "décision", "decision", "délégation", "delegation"])) {
+    return `Le thème "${theme}" fait apparaître un enjeu d’arbitrage ou de décision à clarifier dans le fonctionnement réel.`;
+  }
+
+  return `Le fonctionnement réel sur "${theme}" doit être objectivé pour apprécier sa robustesse, ses dépendances et ses limites de pilotage.`;
+}
+
+function buildManagerialRisk(theme: string, source: string, isAbsence = false): string {
+  const text = normalizeText(source);
 
   if (isAbsence) {
-    return `Vous pilotez aujourd’hui le sujet "${theme}" sans base réellement objectivée, ce qui signifie que vos décisions reposent davantage sur des ajustements empiriques que sur des repères fiables, avec un risque direct de dérive non anticipée.`;
+    return `Le sujet "${theme}" reste insuffisamment documenté, ce qui oblige à piloter par perception plus que par repères objectivés.`;
   }
 
-  switch (entryAngle) {
-    case "causality":
-      return `La situation sur "${theme}" semble aujourd’hui produite par des mécanismes que vous ne maîtrisez pas complètement, ce qui signifie que vous corrigez les effets sans traiter la cause réelle, avec un risque de reproduction continue des mêmes déséquilibres.`;
-
-    case "arbitration":
-      return `Les décisions liées à "${theme}" reposent sur une chaîne d’arbitrage qui n’est pas clairement structurée, ce qui vous expose à des choix tardifs, incohérents ou dépendants de personnes clés, avec un impact direct sur la qualité d’exécution.`;
-
-    case "dependency":
-      return `Le fonctionnement sur "${theme}" dépend fortement de quelques personnes ou points de passage clés, ce qui crée une fragilité structurelle : à la moindre indisponibilité ou surcharge, l’ensemble du système peut se désorganiser.`;
-
-    case "economics":
-      return `Les décisions prises sur "${theme}" ne semblent pas suffisamment reliées à leur impact économique réel, ce qui vous expose à des écarts non maîtrisés entre ce que vous pensez gagner et ce que vous produisez effectivement.`;
-
-    case "formalization":
-      return `Le sujet "${theme}" repose aujourd’hui davantage sur des pratiques implicites que sur un cadre structuré, ce qui vous oblige à réintervenir régulièrement et empêche toute montée en charge sécurisée.`;
-
-    default:
-      if (t.includes("charge") || t.includes("ressource")) {
-        return `L’ajustement entre charge et ressources semble aujourd’hui reposer sur des arbitrages rapprochés plutôt que sur un pilotage stabilisé, ce qui vous expose à des déséquilibres rapides dès que l’activité évolue.`;
-      }
-
-      if (t.includes("recrutement") || t.includes("équipe")) {
-        return `Le fonctionnement autour de "${theme}" tient aujourd’hui, mais sans sécurisation réelle de la montée en charge, ce qui vous expose à un décalage rapide entre les besoins et la capacité réelle des équipes.`;
-      }
-
-      if (t.includes("rôle")) {
-        return `Le manque de clarté opérationnelle sur "${theme}" vous expose à des zones de flou dans la prise de décision, avec un risque de dilution des responsabilités et de reprises managériales fréquentes.`;
-      }
-
-      return `Le fonctionnement observé sur "${theme}" repose sur des équilibres qui ne sont pas totalement maîtrisés, ce qui vous expose à des pertes de contrôle dès que les conditions d’activité évoluent.`;
+  if (isLoadResourceTheme(theme) && hasPositiveEncadrementCapacity(source)) {
+    return buildLoadCapacityRisk(source);
   }
+
+  if (isLoadResourceTheme(theme)) {
+    return "L’ajustement charge / ressources peut rester dépendant d’arbitrages rapprochés, avec un risque de perte d’anticipation dès que l’activité évolue.";
+  }
+
+  if (normalizeText(theme).includes("recrutement") || normalizeText(theme).includes("équipe") || normalizeText(theme).includes("equipe")) {
+    return `Le fonctionnement autour de "${theme}" tient aujourd’hui, mais sans sécurisation réelle des relais, des compétences ou de l’intégration, ce qui peut créer un décalage rapide entre les besoins et la capacité réelle.`;
+  }
+
+  if (normalizeText(theme).includes("rôle") || normalizeText(theme).includes("role")) {
+    return "Le flou sur certains rôles ou relais peut générer des reprises managériales, des décisions retardées et une dilution des responsabilités.";
+  }
+
+  if (includesAny(text, ["marge", "cash", "rentabilité", "rentabilite", "prix", "coût", "cout"])) {
+    return `Les décisions prises sur "${theme}" ne semblent pas toujours reliées à leur impact économique réel, ce qui expose à des écarts de marge, de coût ou de cash.`;
+  }
+
+  return `Le fonctionnement sur "${theme}" peut reposer sur des pratiques implicites ou des équilibres personnels, avec un risque de perte de maîtrise lorsque les conditions changent.`;
 }
 
-function buildProbableConsequence(theme: string): string {
-  const lower = theme.toLowerCase();
+function buildProbableConsequence(theme: string, source: string): string {
+  const text = normalizeText(`${theme} ${source}`);
 
-  if (lower.includes("prix") || lower.includes("chiffrage")) {
+  if (isLoadResourceTheme(theme) && hasPositiveEncadrementCapacity(source)) {
+    return buildLoadCapacityConsequence(source);
+  }
+
+  if (includesAny(text, ["prix", "chiffrage", "devis", "marge", "coût", "cout"])) {
     return "Probable dérive de marge, décisions commerciales fragiles ou perte de rentabilité.";
   }
 
-  if (lower.includes("commercial") || lower.includes("croissance")) {
+  if (includesAny(text, ["commercial", "croissance", "pipeline", "prospection", "offre"])) {
     return "Probable inefficacité commerciale, croissance non rentable ou visibilité insuffisante sur le pipeline.";
   }
 
-  if (
-    lower.includes("cash") ||
-    lower.includes("marge") ||
-    lower.includes("résultat")
-  ) {
+  if (includesAny(text, ["cash", "trésorerie", "tresorerie", "résultat", "resultat"])) {
     return "Probable dégradation du cash, du résultat ou de la visibilité économique.";
   }
 
-  if (
-    lower.includes("rôle") ||
-    lower.includes("équipe") ||
-    lower.includes("recrutement")
-  ) {
+  if (includesAny(text, ["rôle", "role", "équipe", "equipe", "recrutement", "intégration", "integration"])) {
     return "Probables reprises managériales, flou de responsabilités ou fragilité d’exécution.";
   }
 
   return "Probable dégradation de l’exécution, de la coordination ou de la robustesse de pilotage.";
 }
 
-function scoreConfidenceFromCandidate(candidate: ThemeCandidate): number {
-  const raw =
-    48 +
-    Math.round(candidate.score / 2) +
-    candidate.matchedKeywords.length * 3 +
-    candidate.headingHitCount * 4 -
-    Math.round(candidate.genericPenalty / 2);
+function scoreCriticality(theme: string, source: string, isAbsence = false): number {
+  const text = normalizeText(`${theme} ${source}`);
+  let score = isAbsence ? 72 : 76;
 
-  return clamp(raw, 55, 94);
+  if (isLoadResourceTheme(theme) && hasPositiveEncadrementCapacity(source)) score = 78;
+  if (includesAny(text, ["naval group", "personne clé", "personne cle", "dépendance", "dependance"])) score += 8;
+  if (includesAny(text, ["marge", "cash", "prix", "coût", "cout", "rentabilité", "rentabilite"])) score += 8;
+  if (includesAny(text, ["sécurité", "securite", "qualité", "qualite"])) score += 4;
+
+  return clamp(score, 55, 94);
 }
 
-function scoreCriticality(
-  theme: string,
-  isAbsence: boolean,
-  entryAngle?: DiagnosticSignal["entryAngle"]
-): number {
-  const lower = theme.toLowerCase();
-
-  let base = 72;
-
-  if (isAbsence) base = 78;
-  if (
-    lower.includes("cash") ||
-    lower.includes("marge") ||
-    lower.includes("prix")
-  ) {
-    base = 90;
-  }
-  if (
-    lower.includes("rôle") ||
-    lower.includes("équipe") ||
-    lower.includes("sécurité")
-  ) {
-    base = 84;
-  }
-
-  if (!isAbsence && (entryAngle === "economics" || entryAngle === "causality")) {
-    base += 4;
-  }
-
-  return clamp(base, 60, 94);
-}
-
-function overlapCount(tokens: string[], tokenSet: Set<string>): number {
-  let count = 0;
-
-  for (const token of tokens) {
-    if (tokenSet.has(token)) count += 1;
-  }
-
-  return count;
-}
-
-function buildThemeCandidate(params: {
+function normalizeSignalSemantics(params: {
   dimensionId: DimensionId;
   theme: string;
-  keywords: string[];
-  indexedSection: IndexedSection;
-}): ThemeCandidate | null {
-  const { dimensionId, theme, keywords, indexedSection } = params;
-
-  const normalizedTheme = normalizeText(theme);
-  const normalizedKeywords = keywords.map((keyword) => normalizeText(keyword));
-  const themeTokens = tokenize(theme);
-
-  const matchedKeywords = keywords.filter((keyword, index) => {
-    const normalizedKeyword = normalizedKeywords[index];
-    return indexedSection.normalizedCombined.includes(normalizedKeyword);
-  });
-
-  const headingHitCount = normalizedKeywords.reduce((sum, keyword) => {
-    return sum + (indexedSection.normalizedHeading.includes(keyword) ? 1 : 0);
-  }, 0);
-
-  const contentHitCount = normalizedKeywords.reduce((sum, keyword) => {
-    return sum + Math.min(2, countOccurrences(indexedSection.normalizedContent, keyword));
-  }, 0);
-
-  const exactHeadingTheme = indexedSection.normalizedHeading.includes(normalizedTheme);
-  const exactContentTheme = indexedSection.normalizedContent.includes(normalizedTheme);
-  const tokenOverlap = overlapCount(themeTokens, indexedSection.combinedTokenSet);
-
-  if (
-    !exactHeadingTheme &&
-    !exactContentTheme &&
-    matchedKeywords.length === 0 &&
-    tokenOverlap < 2
-  ) {
-    return null;
-  }
-
-  let score = 0;
-
-  score += Math.min(matchedKeywords.length, 4) * 12;
-  score += Math.min(headingHitCount, 3) * 14;
-  score += Math.min(contentHitCount, 5) * 7;
-  score += Math.min(tokenOverlap, 4) * 5;
-  score += exactHeadingTheme ? 24 : 0;
-  score += exactContentTheme ? 16 : 0;
-  score += scoreKeywordProximity(indexedSection.normalizedContent, normalizedKeywords);
-
-  if (indexedSection.textLength >= 140) score += 4;
-  if (indexedSection.textLength >= 260) score += 3;
-
-  score -= indexedSection.genericPenalty;
-
-  if (headingHitCount === 0 && matchedKeywords.length === 1 && tokenOverlap < 2) {
-    score -= 10;
-  }
-
-  if (score < 20) {
-    return null;
-  }
-
-  const excerpt = buildContextExcerpt(indexedSection.content, theme, matchedKeywords);
-  const entryAngle = pickEntryAngle(
-    theme,
-    indexedSection.heading,
-    excerpt,
-    matchedKeywords
+  sourceSection: string | null;
+  sourceExcerpt: string;
+  signalKind: DiagnosticSignal["signalKind"];
+  constat?: string | null;
+  managerialRisk?: string | null;
+  probableConsequence?: string | null;
+  entryAngle?: DiagnosticSignal["entryAngle"] | null;
+  confidenceScore?: number | null;
+  criticalityScore?: number | null;
+  index: number;
+}): DiagnosticSignal {
+  const combinedSource = cleanText(
+    `${params.sourceExcerpt} ${params.constat ?? ""} ${params.managerialRisk ?? ""} ${params.probableConsequence ?? ""}`
   );
-  const constat = buildExplicitConstat({
-    theme,
-    sectionHeading: indexedSection.heading,
-    matchedKeywords,
-    headingHitCount,
-    excerpt,
-  });
+  const sourceExcerpt = normalizeExtractionText(params.sourceExcerpt) || truncate(combinedSource);
+
+  const shouldOverridePositiveCapacity =
+    params.signalKind === "explicit" &&
+    isLoadResourceTheme(params.theme) &&
+    hasPositiveEncadrementCapacity(combinedSource);
+
+  const entryAngle = shouldOverridePositiveCapacity
+    ? (hasNavalGroupDependency(combinedSource) ? "dependency" : "economics")
+    : params.entryAngle ?? pickEntryAngle(params.theme, combinedSource);
+
+  const constat = shouldOverridePositiveCapacity
+    ? buildLoadCapacityConstat(combinedSource)
+    : normalizeExtractionText(params.constat) || inferConstatFromSource(params.theme, combinedSource);
+
+  const managerialRisk = shouldOverridePositiveCapacity
+    ? buildLoadCapacityRisk(combinedSource)
+    : normalizeExtractionText(params.managerialRisk) || buildManagerialRisk(params.theme, combinedSource, params.signalKind === "absence");
+
+  const probableConsequence = shouldOverridePositiveCapacity
+    ? buildLoadCapacityConsequence(combinedSource)
+    : normalizeExtractionText(params.probableConsequence) || buildProbableConsequence(params.theme, combinedSource);
 
   return {
-    dimensionId,
-    theme,
-    section: indexedSection.section,
-    sectionHeading: indexedSection.heading,
-    excerpt,
-    matchedKeywords: uniqueStrings(matchedKeywords),
-    headingHitCount,
-    contentHitCount,
-    genericPenalty: indexedSection.genericPenalty,
-    score,
-    entryAngle,
+    id: makeSignalId(
+      params.dimensionId,
+      params.theme,
+      `${params.sourceSection ?? params.signalKind}-${entryAngle}`,
+      params.index
+    ),
+    dimensionId: params.dimensionId,
+    theme: params.theme,
+    signalKind: params.signalKind,
+    sourceType: "trame",
+    sourceSection: params.sourceSection,
+    sourceExcerpt,
     constat,
+    managerialRisk,
+    probableConsequence,
+    entryAngle,
+    confidenceScore: clamp(params.confidenceScore ?? 72, 50, 95),
+    criticalityScore: clamp(
+      Math.max(params.criticalityScore ?? 0, scoreCriticality(params.theme, combinedSource, params.signalKind === "absence")),
+      55,
+      95
+    ),
   };
-}
-
-function candidateDiscriminationScore(candidates: ThemeCandidate[]): number {
-  if (candidates.length === 0) return Number.NEGATIVE_INFINITY;
-
-  const best = candidates[0].score;
-  const second = candidates[1]?.score ?? 0;
-  const spread = best - second;
-  const scarcityBonus = Math.max(0, 4 - candidates.length) * 6;
-
-  return spread + scarcityBonus + best;
-}
-
-function adjustedCandidateScore(
-  candidate: ThemeCandidate,
-  usageBySection: Map<string, number>
-): number {
-  const usageCount = usageBySection.get(candidate.section.id) ?? 0;
-
-  if (usageCount === 0) return candidate.score;
-
-  let penalty = usageCount * SECTION_REUSE_PENALTY;
-  penalty += candidate.genericPenalty + GENERIC_REUSE_EXTRA_PENALTY;
-
-  if (candidate.headingHitCount === 0) {
-    penalty += 6;
-  }
-
-  return candidate.score - penalty;
-}
-
-function sameDeterministicIdea(left: ThemeCandidate, right: ThemeCandidate): boolean {
-  return (
-    left.section.id === right.section.id &&
-    left.entryAngle === right.entryAngle &&
-    normalizeText(left.excerpt) === normalizeText(right.excerpt)
-  );
-}
-
-function canAddDeterministicCandidate(
-  selected: ThemeCandidate[],
-  candidate: ThemeCandidate
-): boolean {
-  return !selected.some((existing) => sameDeterministicIdea(existing, candidate));
-}
-
-function selectCandidatesForTheme(
-  candidates: ThemeCandidate[],
-  usageBySection: Map<string, number>
-): ThemeCandidate[] {
-  if (candidates.length === 0) return [];
-
-  const adjusted = candidates
-    .map((candidate) => ({
-      candidate,
-      adjustedScore: adjustedCandidateScore(candidate, usageBySection),
-    }))
-    .sort((a, b) => b.adjustedScore - a.adjustedScore);
-
-  const primary = adjusted[0];
-  if (!primary) return [];
-
-  const selected: ThemeCandidate[] = [];
-  if (
-    primary.adjustedScore >= MIN_EXPLICIT_SCORE ||
-    primary.candidate.score >= STRONG_EXPLICIT_SCORE
-  ) {
-    selected.push(primary.candidate);
-  }
-
-  if (selected.length === 0) return [];
-
-  for (const { candidate, adjustedScore } of adjusted.slice(1)) {
-    if (selected.length >= MAX_EXPLICIT_SIGNALS_PER_THEME) break;
-    if (!canAddDeterministicCandidate(selected, candidate)) continue;
-
-    const distinctFromPrimary =
-      selected[0].section.id !== candidate.section.id ||
-      selected[0].entryAngle !== candidate.entryAngle;
-
-    if (!distinctFromPrimary && adjustedScore < STRONG_EXPLICIT_SCORE + 4) {
-      continue;
-    }
-
-    const strongEnough =
-      adjustedScore >=
-        Math.max(MIN_EXPLICIT_SCORE - 2, primary.adjustedScore - SECONDARY_DETERMINISTIC_GAP) ||
-      candidate.score >= STRONG_EXPLICIT_SCORE + 4;
-
-    if (!strongEnough) continue;
-    selected.push(candidate);
-  }
-
-  return selected;
 }
 
 function buildExplicitSignalsDeterministic(snapshot: BaseTrameSnapshot): DiagnosticSignal[] {
   const signals: DiagnosticSignal[] = [];
-  const indexedSections = indexSections(snapshot);
   let runningIndex = 1;
 
   for (const dimension of DIAGNOSTIC_DIMENSIONS) {
     const themeMap = KEYWORDS_BY_DIMENSION[dimension.id];
 
-    const themeBuckets = Object.entries(themeMap)
-      .map(([theme, keywords]) => {
-        const candidates = indexedSections
-          .map((indexedSection) =>
-            buildThemeCandidate({
-              dimensionId: dimension.id,
-              theme,
-              keywords,
-              indexedSection,
-            })
-          )
-          .filter((candidate): candidate is ThemeCandidate => candidate !== null)
-          .sort((a, b) => b.score - a.score);
+    for (const [theme, keywords] of Object.entries(themeMap)) {
+      const bestSections = findBestSectionsForTheme(snapshot, theme, keywords);
 
-        return { theme, candidates };
-      })
-      .filter((bucket) => bucket.candidates.length > 0)
-      .sort(
-        (a, b) =>
-          candidateDiscriminationScore(b.candidates) -
-          candidateDiscriminationScore(a.candidates)
-      );
+      for (const { section, score } of bestSections) {
+        const excerpt = buildExcerpt(section, theme, keywords);
+        const sectionKey = sectionId(section);
+        const source = `${section.heading ?? ""} ${excerpt}`;
 
-    const usageBySection = new Map<string, number>();
-
-    for (const bucket of themeBuckets) {
-      const selectedCandidates = selectCandidatesForTheme(bucket.candidates, usageBySection);
-      if (selectedCandidates.length === 0) continue;
-
-      for (const selected of selectedCandidates) {
-        usageBySection.set(
-          selected.section.id,
-          (usageBySection.get(selected.section.id) ?? 0) + 1
+        signals.push(
+          normalizeSignalSemantics({
+            dimensionId: dimension.id,
+            theme,
+            sourceSection: sectionKey,
+            sourceExcerpt: excerpt,
+            signalKind: "explicit",
+            constat: inferConstatFromSource(theme, source),
+            managerialRisk: buildManagerialRisk(theme, source),
+            probableConsequence: buildProbableConsequence(theme, source),
+            entryAngle: pickEntryAngle(theme, source),
+            confidenceScore: clamp(56 + Math.round(score / 2), 55, 92),
+            criticalityScore: scoreCriticality(theme, source),
+            index: runningIndex++,
+          })
         );
-
-        signals.push({
-          id: makeSignalId(
-            dimension.id,
-            bucket.theme,
-            `${selected.section.id}-${selected.entryAngle}`,
-            runningIndex++
-          ),
-          dimensionId: dimension.id,
-          theme: bucket.theme,
-          signalKind: "explicit",
-          sourceType: "trame",
-          sourceSection: selected.section.id,
-          sourceExcerpt: selected.excerpt || "",
-          constat: selected.constat,
-          managerialRisk: buildManagerialRisk(bucket.theme, false, selected.entryAngle),
-          probableConsequence: buildProbableConsequence(bucket.theme),
-          entryAngle: selected.entryAngle,
-          confidenceScore: scoreConfidenceFromCandidate(selected),
-          criticalityScore: scoreCriticality(bucket.theme, false, selected.entryAngle),
-        });
       }
     }
   }
@@ -1200,19 +670,12 @@ function buildExplicitSignalsDeterministic(snapshot: BaseTrameSnapshot): Diagnos
 }
 
 function scoreMissingFieldHit(field: MissingField, theme: string): number {
-  const themeTokens = tokenize(theme);
   const haystack = normalizeText(`${field.label ?? ""} ${field.sourceText ?? ""}`);
-
   let score = 0;
 
-  if (haystack.includes(normalizeText(theme))) {
-    score += 20;
-  }
-
-  for (const token of themeTokens) {
-    if (haystack.includes(token)) {
-      score += token.length >= 6 ? 6 : 4;
-    }
+  if (haystack.includes(normalizeText(theme))) score += 20;
+  for (const token of normalizeText(theme).split(/[^a-z0-9]+/).filter((item) => item.length >= 4)) {
+    if (haystack.includes(token)) score += 5;
   }
 
   return score;
@@ -1223,40 +686,11 @@ function findBestMissingFieldHit(
   dimensionId: DimensionId,
   theme: string
 ): MissingField | undefined {
-  const candidates = snapshot.missingFields
+  return snapshot.missingFields
     .filter((field) => field.dimensionId === dimensionId)
-    .map((field) => ({
-      field,
-      score: scoreMissingFieldHit(field, theme),
-    }))
+    .map((field) => ({ field, score: scoreMissingFieldHit(field, theme) }))
     .filter((item) => item.score > 0)
-    .sort((a, b) => b.score - a.score);
-
-  return candidates[0]?.field;
-}
-
-function buildAbsenceConstat(
-  theme: string,
-  llmMissing?: { reason: LlmUncoveredTheme["reason"]; whyMissing: string },
-  missingFieldHit?: MissingField
-): string {
-  if (llmMissing?.reason === "only_illustrative" || llmMissing?.reason === "too_weak") {
-    return `Le thème "${theme}" reste insuffisamment consolidé dans la trame : la matière disponible existe mais demeure trop partielle pour établir un pilotage clairement objectivé.`;
-  }
-
-  if (llmMissing?.reason === "not_enough_material") {
-    return `Le thème "${theme}" apparaît encore trop peu documenté dans la trame pour établir un signal managérial suffisamment robuste.`;
-  }
-
-  if (llmMissing) {
-    return `Le thème "${theme}" ressort comme insuffisamment étayé dans la trame (${llmMissing.reason}).`;
-  }
-
-  if (missingFieldHit) {
-    return `Le thème "${theme}" ressort comme absent, incomplet ou insuffisamment documenté dans la trame, notamment via le champ "${missingFieldHit.label}".`;
-  }
-
-  return `Le thème "${theme}" est absent, peu documenté ou insuffisamment suivi dans la trame.`;
+    .sort((a, b) => b.score - a.score)[0]?.field;
 }
 
 function buildAbsenceSignals(
@@ -1276,45 +710,37 @@ function buildAbsenceSignals(
 
   for (const dimension of DIAGNOSTIC_DIMENSIONS) {
     for (const theme of dimension.requiredThemes) {
-      const alreadyCovered = explicitSignals.some(
-        (signal) =>
-          signal.dimensionId === dimension.id &&
-          normalizeText(signal.theme) === normalizeText(theme)
+      const covered = explicitSignals.some(
+        (signal) => signal.dimensionId === dimension.id && normalizeText(signal.theme) === normalizeText(theme)
       );
+      if (covered) continue;
 
-      if (alreadyCovered) {
-        continue;
-      }
-
-      const missingFieldHit = findBestMissingFieldHit(snapshot, dimension.id, theme);
+      const missingField = findBestMissingFieldHit(snapshot, dimension.id, theme);
       const llmMissing = llmUncovered.get(`${dimension.id}|${normalizeText(theme)}`);
-
       const sourceExcerpt =
         normalizeExtractionText(llmMissing?.whyMissing) ||
-        normalizeExtractionText(missingFieldHit?.sourceText) ||
+        normalizeExtractionText(missingField?.sourceText) ||
         `Aucun signal suffisamment explicite trouvé dans la trame sur le thème "${theme}".`;
 
-      const constat = buildAbsenceConstat(theme, llmMissing, missingFieldHit);
-
-      results.push({
-        id: makeSignalId(dimension.id, theme, "absence", runningIndex++),
-        dimensionId: dimension.id,
-        theme,
-        signalKind: "absence",
-        sourceType: "trame",
-        sourceSection: null,
-        sourceExcerpt: sourceExcerpt || "",
-        constat,
-        managerialRisk: buildManagerialRisk(theme, true),
-        probableConsequence: buildProbableConsequence(theme),
-        entryAngle: "formalization",
-        confidenceScore: clamp(
-          llmMissing?.confidenceScore ?? (missingFieldHit ? 82 : 78),
-          55,
-          92
-        ),
-        criticalityScore: scoreCriticality(theme, true),
-      });
+      results.push(
+        normalizeSignalSemantics({
+          dimensionId: dimension.id,
+          theme,
+          sourceSection: null,
+          sourceExcerpt,
+          signalKind: "absence",
+          constat:
+            llmMissing?.reason === "not_enough_material"
+              ? `Le thème "${theme}" apparaît encore trop peu documenté dans la trame pour établir un signal managérial suffisamment robuste.`
+              : `Le thème "${theme}" reste insuffisamment documenté ou consolidé dans la trame.`,
+          managerialRisk: buildManagerialRisk(theme, sourceExcerpt, true),
+          probableConsequence: buildProbableConsequence(theme, sourceExcerpt),
+          entryAngle: "formalization",
+          confidenceScore: clamp(llmMissing?.confidenceScore ?? (missingField ? 82 : 76), 55, 92),
+          criticalityScore: scoreCriticality(theme, sourceExcerpt, true),
+          index: runningIndex++,
+        })
+      );
     }
   }
 
@@ -1330,9 +756,9 @@ function dedupeSignals(signals: DiagnosticSignal[]): DiagnosticSignal[] {
       signal.dimensionId,
       normalizeText(signal.theme),
       signal.signalKind,
-      String(signal.sourceSection ?? "none").toLowerCase(),
+      String(signal.sourceSection ?? "none"),
       signal.entryAngle,
-      normalizeText(String(signal.sourceExcerpt ?? "")),
+      normalizeText(signal.sourceExcerpt),
     ].join("|");
 
     if (seen.has(key)) continue;
@@ -1343,293 +769,58 @@ function dedupeSignals(signals: DiagnosticSignal[]): DiagnosticSignal[] {
   return out;
 }
 
-function findSectionById(
-  snapshot: BaseTrameSnapshot,
-  sectionId: string
-): TrameSection | undefined {
-  return snapshot.sections.find((section) => String(section.id ?? "").trim() === sectionId);
+function findSectionById(snapshot: BaseTrameSnapshot, sectionIdToFind: string): TrameSection | undefined {
+  return snapshot.sections.find((section) => sectionId(section) === cleanText(sectionIdToFind));
 }
 
-function initLlmFilterStats(): LlmFilterStats {
-  return {
-    total: 0,
-    acceptedNonAnecdotal: 0,
-    rejectedNoSection: 0,
-    rejectedAnecdotal: 0,
-  };
+function normalizeLlmScore(value: number | null | undefined): number {
+  const safe = clamp(Number(value ?? 0), 0, 100);
+  if (safe <= 5) return clamp(safe * 20, 0, 100);
+  if (safe <= 10) return clamp(safe * 10, 0, 100);
+  return safe;
 }
 
-function registerLlmDecision(
-  stats: LlmFilterStats,
-  decision: LlmFilterDecision
-): void {
-  stats.total += 1;
-
-  switch (decision) {
-    case "accepted_non_anecdotal":
-      stats.acceptedNonAnecdotal += 1;
-      break;
-    case "rejected_no_section":
-      stats.rejectedNoSection += 1;
-      break;
-    case "rejected_anecdotal":
-      stats.rejectedAnecdotal += 1;
-      break;
-  }
-}
-
-function evaluateLlmSignalAcceptance(
-  item: LlmExtractedExplicitSignal
-): LlmFilterDecision {
-  if (item.evidenceNature === "anecdotal") {
-    return "rejected_anecdotal";
-  }
-
-  return "accepted_non_anecdotal";
-}
-
-function logLlmCandidateSample(params: {
-  dimensionId: DimensionId;
-  item: LlmExtractedExplicitSignal;
-  decision: LlmFilterDecision;
-}): void {
-  console.info("[BilanSante][SignalExtraction] llm_candidate_sample", {
-    dimensionId: params.dimensionId,
-    theme: params.item.theme,
-    evidenceNature: params.item.evidenceNature,
-    relevanceScoreRaw: params.item.relevanceScore,
-    confidenceScoreRaw: params.item.confidenceScore,
-    criticalityScoreRaw: params.item.criticalityScore,
-    relevanceScoreNormalized: normalizeLlmScore(params.item.relevanceScore),
-    confidenceScoreNormalized: normalizeLlmScore(params.item.confidenceScore),
-    criticalityScoreNormalized: normalizeLlmScore(params.item.criticalityScore),
-    decision: params.decision,
-  });
-}
-
-function toAcceptedLlmCandidate(
-  snapshot: BaseTrameSnapshot,
-  dimensionId: DimensionId,
-  item: LlmExtractedExplicitSignal,
-  stats?: LlmFilterStats
-): LlmAcceptedCandidate | null {
-  const section = findSectionById(snapshot, item.sourceSectionId);
-  if (!section) {
-    if (stats) registerLlmDecision(stats, "rejected_no_section");
-    return null;
-  }
-
-  const decision = evaluateLlmSignalAcceptance(item);
-
-  if (stats) registerLlmDecision(stats, decision);
-
-  logLlmCandidateSample({
-    dimensionId,
-    item,
-    decision,
-  });
-
-  if (decision !== "accepted_non_anecdotal") {
-    return null;
-  }
-
-  return {
-    dimensionId,
-    theme: item.theme,
-    section,
-    sourceExcerpt: item.sourceExcerpt,
-    evidenceNature: item.evidenceNature,
-    entryAngle: item.entryAngle,
-    relevanceScore: normalizeLlmScore(item.relevanceScore),
-    confidenceScore: normalizeLlmScore(item.confidenceScore),
-    criticalityScore: normalizeLlmScore(item.criticalityScore),
-    constat: item.constat,
-    managerialRisk: item.managerialRisk,
-    probableConsequence: item.probableConsequence,
-    whyRelevant: item.whyRelevant,
-  };
-}
-
-function llmCandidateBaseScore(candidate: LlmAcceptedCandidate): number {
-  return (
-    evidenceNatureRank(candidate.evidenceNature) * 1000 +
-    candidate.relevanceScore * 5 +
-    candidate.confidenceScore * 3 +
-    candidate.criticalityScore * 2
-  );
-}
-
-function adjustedLlmCandidateScore(
-  candidate: LlmAcceptedCandidate,
-  usageBySection: Map<string, number>
-): number {
-  const usageCount = usageBySection.get(candidate.section.id) ?? 0;
-  let penalty = 0;
-
-  if (usageCount > 0) {
-    penalty += usageCount * SECTION_REUSE_PENALTY;
-  }
-
-  if (usageCount >= MAX_SECTION_REUSE_BEFORE_HARD_PENALTY) {
-    penalty += 30;
-  }
-
-  if (candidate.evidenceNature === "illustrative") {
-    penalty += 12;
-  }
-
-  if (candidate.evidenceNature === "unclear") {
-    penalty += 6;
-  }
-
-  return llmCandidateBaseScore(candidate) - penalty;
-}
-
-function sameLlmIdea(left: LlmAcceptedCandidate, right: LlmAcceptedCandidate): boolean {
-  return (
-    left.section.id === right.section.id &&
-    left.entryAngle === right.entryAngle &&
-    normalizeText(left.sourceExcerpt) === normalizeText(right.sourceExcerpt)
-  );
-}
-
-function canAddLlmCandidate(
-  selected: LlmAcceptedCandidate[],
-  candidate: LlmAcceptedCandidate
-): boolean {
-  return !selected.some((existing) => sameLlmIdea(existing, candidate));
-}
-
-function selectLlmCandidatesForTheme(
-  candidates: LlmAcceptedCandidate[],
-  usageBySection: Map<string, number>
-): LlmAcceptedCandidate[] {
-  if (candidates.length === 0) return [];
-
-  const ranked = candidates
-    .map((candidate) => ({
-      candidate,
-      score: adjustedLlmCandidateScore(candidate, usageBySection),
-      base: llmCandidateBaseScore(candidate),
-    }))
-    .sort((a, b) => b.score - a.score);
-
-  const primary = ranked[0];
-  if (!primary) return [];
-
-  const selected: LlmAcceptedCandidate[] = [primary.candidate];
-
-  for (const item of ranked.slice(1)) {
-    if (selected.length >= MAX_EXPLICIT_SIGNALS_PER_THEME) break;
-    if (!canAddLlmCandidate(selected, item.candidate)) continue;
-
-    const strongEnough =
-      item.score >= primary.score * SECONDARY_LLM_RATIO ||
-      item.base >= primary.base * SECONDARY_LLM_RATIO;
-
-    if (!strongEnough) continue;
-    selected.push(item.candidate);
-  }
-
-  return selected;
+function isAcceptedLlmSignal(item: LlmExtractedExplicitSignal): boolean {
+  return item.evidenceNature !== "anecdotal";
 }
 
 function buildExplicitSignalsFromLlm(params: {
   snapshot: BaseTrameSnapshot;
   responses: LlmSignalExtractionResponse[];
-  logContext?: string;
 }): DiagnosticSignal[] {
-  const allCandidates: LlmAcceptedCandidate[] = [];
-  const filterStats = initLlmFilterStats();
+  const signals: DiagnosticSignal[] = [];
+  let runningIndex = 1;
 
   for (const response of params.responses) {
     for (const item of response.explicitSignals) {
-      const candidate = toAcceptedLlmCandidate(
-        params.snapshot,
-        response.dimensionId,
-        item,
-        filterStats
+      if (!isAcceptedLlmSignal(item)) continue;
+      const section = findSectionById(params.snapshot, item.sourceSectionId);
+      if (!section) continue;
+
+      const sectionSource = sectionText(section);
+      const sourceExcerpt = normalizeExtractionText(item.sourceExcerpt) || buildExcerpt(section, item.theme, [item.theme]);
+      const source = `${sectionSource} ${sourceExcerpt} ${item.constat} ${item.managerialRisk}`;
+
+      signals.push(
+        normalizeSignalSemantics({
+          dimensionId: response.dimensionId,
+          theme: normalizeExtractionText(item.theme) || item.theme,
+          sourceSection: sectionId(section),
+          sourceExcerpt,
+          signalKind: "explicit",
+          constat: item.constat,
+          managerialRisk: item.managerialRisk,
+          probableConsequence: item.probableConsequence,
+          entryAngle: item.entryAngle,
+          confidenceScore: normalizeLlmScore(item.confidenceScore),
+          criticalityScore: normalizeLlmScore(item.criticalityScore),
+          index: runningIndex++,
+        })
       );
-      if (candidate) {
-        allCandidates.push(candidate);
-      }
     }
   }
 
-  logInfo("llm_candidate_filter_summary", {
-    context: params.logContext ?? "default",
-    totalCandidates: filterStats.total,
-    acceptedNonAnecdotal: filterStats.acceptedNonAnecdotal,
-    rejectedNoSection: filterStats.rejectedNoSection,
-    rejectedAnecdotal: filterStats.rejectedAnecdotal,
-    acceptedCandidates: filterStats.acceptedNonAnecdotal,
-  });
-
-  const buckets = new Map<string, LlmAcceptedCandidate[]>();
-
-  for (const candidate of allCandidates) {
-    const key = `${candidate.dimensionId}|${normalizeText(candidate.theme)}`;
-    const current = buckets.get(key) ?? [];
-    current.push(candidate);
-    buckets.set(key, current);
-  }
-
-  const orderedBuckets = [...buckets.entries()]
-    .map(([key, candidates]) => ({
-      key,
-      candidates: [...candidates].sort(
-        (a, b) => llmCandidateBaseScore(b) - llmCandidateBaseScore(a)
-      ),
-    }))
-    .sort(
-      (a, b) =>
-        llmCandidateBaseScore(b.candidates[0]) - llmCandidateBaseScore(a.candidates[0])
-    );
-
-  const usageBySection = new Map<string, number>();
-  const explicitSignals: DiagnosticSignal[] = [];
-  let runningIndex = 1;
-
-  for (const bucket of orderedBuckets) {
-    const selectedCandidates = selectLlmCandidatesForTheme(bucket.candidates, usageBySection);
-    if (selectedCandidates.length === 0) continue;
-
-    for (const selected of selectedCandidates) {
-      usageBySection.set(
-        selected.section.id,
-        (usageBySection.get(selected.section.id) ?? 0) + 1
-      );
-
-      explicitSignals.push({
-        id: makeSignalId(
-          selected.dimensionId,
-          selected.theme,
-          `${selected.section.id}-${selected.entryAngle}`,
-          runningIndex++
-        ),
-        dimensionId: selected.dimensionId,
-        theme: selected.theme,
-        signalKind: "explicit",
-        sourceType: "trame",
-        sourceSection: selected.section.id,
-        sourceExcerpt: normalizeExtractionText(selected.sourceExcerpt),
-        constat:
-          normalizeExtractionText(selected.constat) ||
-          `La trame fournit un appui exploitable sur le thème "${selected.theme}".`,
-        managerialRisk:
-          normalizeExtractionText(selected.managerialRisk) ||
-          buildManagerialRisk(selected.theme, false, selected.entryAngle),
-        probableConsequence:
-          normalizeExtractionText(selected.probableConsequence) ||
-          buildProbableConsequence(selected.theme),
-        entryAngle: selected.entryAngle,
-        confidenceScore: clamp(Math.max(selected.confidenceScore, 50), 50, 95),
-        criticalityScore: clamp(Math.max(selected.criticalityScore, 60), 60, 95),
-      });
-    }
-  }
-
-  return dedupeSignals(explicitSignals);
+  return dedupeSignals(signals);
 }
 
 function buildLlmUncoveredMap(
@@ -1656,7 +847,7 @@ function buildLlmUncoveredMap(
       out.set(`${response.dimensionId}|${normalizeText(item.theme)}`, {
         reason: item.reason,
         whyMissing: item.whyMissing,
-        confidenceScore: item.confidenceScore,
+        confidenceScore: normalizeLlmScore(item.confidenceScore),
       });
     }
   }
@@ -1668,54 +859,42 @@ function signalThemeKey(signal: DiagnosticSignal): string {
   return `${signal.dimensionId}|${normalizeText(signal.theme)}`;
 }
 
-function signalSignatureKey(signal: DiagnosticSignal): string {
-  return [
-    signal.dimensionId,
-    normalizeText(signal.theme),
-    String(signal.sourceSection ?? "none"),
-    signal.entryAngle,
-    normalizeText(signal.sourceExcerpt),
-  ].join("|");
-}
-
 function mergeExplicitSignalsWithDeterministicRescue(params: {
   llmSignals: DiagnosticSignal[];
   deterministicSignals: DiagnosticSignal[];
-}): {
-  explicitSignals: DiagnosticSignal[];
-  rescuedSignals: DiagnosticSignal[];
-} {
-  const llmSignatures = new Set(params.llmSignals.map(signalSignatureKey));
-  const themeCounts = new Map<string, number>();
-  for (const signal of params.llmSignals) {
+}): DiagnosticSignal[] {
+  const out = [...params.llmSignals];
+  const countByTheme = new Map<string, number>();
+
+  for (const signal of out) {
     const key = signalThemeKey(signal);
-    themeCounts.set(key, (themeCounts.get(key) ?? 0) + 1);
+    countByTheme.set(key, (countByTheme.get(key) ?? 0) + 1);
   }
 
-  const rescuedSignals = params.deterministicSignals.filter((signal) => {
-    if (signal.signalKind !== "explicit") return false;
-    if (signal.confidenceScore < 58) return false;
-    const signature = signalSignatureKey(signal);
-    if (llmSignatures.has(signature)) return false;
-    const themeKey = signalThemeKey(signal);
-    const currentCount = themeCounts.get(themeKey) ?? 0;
-    if (currentCount >= MAX_EXPLICIT_SIGNALS_PER_THEME) return false;
-    themeCounts.set(themeKey, currentCount + 1);
-    return true;
-  });
+  for (const signal of params.deterministicSignals) {
+    const key = signalThemeKey(signal);
+    const count = countByTheme.get(key) ?? 0;
+    if (count >= MAX_SIGNALS_PER_THEME) continue;
 
-  return {
-    explicitSignals: dedupeSignals([...params.llmSignals, ...rescuedSignals]),
-    rescuedSignals,
-  };
+    const sameSourceAlreadyPresent = out.some(
+      (existing) =>
+        existing.dimensionId === signal.dimensionId &&
+        normalizeText(existing.theme) === normalizeText(signal.theme) &&
+        normalizeText(existing.sourceExcerpt) === normalizeText(signal.sourceExcerpt)
+    );
+    if (sameSourceAlreadyPresent) continue;
+
+    out.push(signal);
+    countByTheme.set(key, count + 1);
+  }
+
+  return dedupeSignals(out);
 }
 
 function buildRegistryFromSignals(signals: DiagnosticSignal[]): SignalRegistry {
-  const allSignals = [...signals].sort((a, b) => {
+  const allSignals = dedupeSignals(signals).sort((a, b) => {
     if (a.dimensionId !== b.dimensionId) return a.dimensionId - b.dimensionId;
-    if (a.signalKind !== b.signalKind) {
-      return a.signalKind === "explicit" ? -1 : 1;
-    }
+    if (a.signalKind !== b.signalKind) return a.signalKind === "explicit" ? -1 : 1;
     return b.criticalityScore - a.criticalityScore;
   });
 
@@ -1733,12 +912,8 @@ function buildRegistryFromSignals(signals: DiagnosticSignal[]): SignalRegistry {
 
 function summarizeRegistry(registry: SignalRegistry) {
   const allSignals: DiagnosticSignal[] = registry.allSignals;
-  const explicitSignals = allSignals.filter(
-    (signal: DiagnosticSignal) => signal.signalKind === "explicit"
-  );
-  const absenceSignals = allSignals.filter(
-    (signal: DiagnosticSignal) => signal.signalKind === "absence"
-  );
+  const explicitSignals = allSignals.filter((signal) => signal.signalKind === "explicit");
+  const absenceSignals = allSignals.filter((signal) => signal.signalKind === "absence");
 
   return {
     totalSignals: allSignals.length,
@@ -1754,7 +929,6 @@ function summarizeRegistry(registry: SignalRegistry) {
 function buildDeterministicRegistry(snapshot: BaseTrameSnapshot): SignalRegistry {
   const explicitSignals = buildExplicitSignalsDeterministic(snapshot);
   const absenceSignals = buildAbsenceSignals(snapshot, explicitSignals);
-
   return buildRegistryFromSignals([...explicitSignals, ...absenceSignals]);
 }
 
@@ -1773,15 +947,14 @@ export async function buildSignalRegistryWithLlm(
     missingFields: snapshot.missingFields.length,
   });
 
-  if (!hasOpenAiKey) {
-    const deterministicRegistry = buildDeterministicRegistry(snapshot);
+  const deterministicRegistry = buildDeterministicRegistry(snapshot);
 
+  if (!hasOpenAiKey) {
     logWarn("fallback_no_api_key", {
       hasOpenAiKey: false,
       fallbackUsed: true,
       ...summarizeRegistry(deterministicRegistry),
     });
-
     return deterministicRegistry;
   }
 
@@ -1795,72 +968,44 @@ export async function buildSignalRegistryWithLlm(
           })
         )
       )
-    ).filter(
-      (item): item is LlmSignalExtractionResponse => item !== null
-    );
-
-    const rawExplicitSignals = responses.reduce(
-      (sum, response) => sum + response.explicitSignals.length,
-      0
-    );
-    const rawUncoveredThemes = responses.reduce(
-      (sum, response) => sum + response.uncoveredThemes.length,
-      0
-    );
+    ).filter((item): item is LlmSignalExtractionResponse => item !== null);
 
     if (responses.length === 0) {
-      const deterministicRegistry = buildDeterministicRegistry(snapshot);
-
       logWarn("fallback_no_llm_response", {
         hasOpenAiKey: true,
         responsesReceived: 0,
-        rawExplicitSignals,
-        rawUncoveredThemes,
         fallbackUsed: true,
         ...summarizeRegistry(deterministicRegistry),
       });
-
       return deterministicRegistry;
     }
 
-    const llmExplicitSignals = buildExplicitSignalsFromLlm({
-      snapshot,
-      responses,
-      logContext: "primary",
+    const llmSignals = buildExplicitSignalsFromLlm({ snapshot, responses });
+    const explicitSignals = mergeExplicitSignalsWithDeterministicRescue({
+      llmSignals,
+      deterministicSignals: deterministicRegistry.allSignals.filter((signal) => signal.signalKind === "explicit"),
     });
-    const deterministicExplicitSignals = buildExplicitSignalsDeterministic(snapshot);
-    const merged = mergeExplicitSignalsWithDeterministicRescue({
-      llmSignals: llmExplicitSignals,
-      deterministicSignals: deterministicExplicitSignals,
-    });
-
     const uncoveredMap = buildLlmUncoveredMap(responses);
-    const absenceSignals = buildAbsenceSignals(snapshot, merged.explicitSignals, uncoveredMap);
-    const llmRegistry = buildRegistryFromSignals([...merged.explicitSignals, ...absenceSignals]);
+    const absenceSignals = buildAbsenceSignals(snapshot, explicitSignals, uncoveredMap);
+    const registry = buildRegistryFromSignals([...explicitSignals, ...absenceSignals]);
 
     logInfo("llm_registry_ready", {
       hasOpenAiKey: true,
       responsesReceived: responses.length,
-      rawExplicitSignals,
-      explicitSignalsFromLlm: llmExplicitSignals.length,
-      explicitSignalsRescuedDeterministically: merged.rescuedSignals.length,
-      explicitSignalsFinal: merged.explicitSignals.length,
-      uncoveredThemes: uncoveredMap.size,
+      explicitSignalsFromLlm: llmSignals.length,
+      explicitSignalsFinal: explicitSignals.length,
       fallbackUsed: false,
-      ...summarizeRegistry(llmRegistry),
+      ...summarizeRegistry(registry),
     });
 
-    return llmRegistry;
+    return registry;
   } catch (error) {
-    const deterministicRegistry = buildDeterministicRegistry(snapshot);
-
     logWarn("fallback_exception", {
       hasOpenAiKey: true,
       error: summarizeError(error),
       fallbackUsed: true,
       ...summarizeRegistry(deterministicRegistry),
     });
-
     return deterministicRegistry;
   }
 }
