@@ -155,6 +155,10 @@ function sourceIncludesAny(source: string, patterns: string[]): boolean {
   return patterns.some((pattern) => source.includes(normalizeForMatch(pattern)));
 }
 
+function sourceSuggestsLoadResourceTopic(source: string): boolean {
+  return sourceIncludesAny(source, ["charge", "charges", "ressource", "ressources", "encadrement", "planning", "planification", "affectation"]);
+}
+
 function recruitmentTargetLabel(source: string): string {
   if (sourceIncludesAny(source, ["technicien", "techniciens"])) return "des techniciens";
   if (sourceIncludesAny(source, ["conducteur de travaux", "conducteurs de travaux"])) {
@@ -185,6 +189,13 @@ function questionLooksTooGeneric(value: string): boolean {
     "qu'est-ce qui risque de bloquer d'abord",
     "entre trouver recruter et integrer",
     "quelle etape reste encore la moins securisee aujourd'hui",
+    "qu'est-ce qui vous empeche de formaliser",
+    "ce qui vous empeche de formaliser",
+    "formaliser ce pilotage pour absorber",
+    "pour absorber 30",
+    "absorber 30%",
+    "absorber ces 30",
+    "charges en plus",
   ].some((pattern) => text.includes(normalizeForMatch(pattern)));
 }
 
@@ -307,6 +318,42 @@ function buildFocusSpecificQuestion(params: {
 
   if ((source.includes("4 semaines") || source.includes("5 semaines")) && source.includes("6 mois")) {
     return "Qu’est-ce qui rend aujourd’hui la prévision à moyen terme plus difficile que celle à quelques semaines ?";
+  }
+
+  if (sourceSuggestsLoadResourceTopic(source)) {
+    const mentionsThirtyPercent = sourceIncludesAny(source, ["30%", "30 %", "trente pour cent"]);
+    const mentionsFormalization = sourceIncludesAny(source, ["formal", "cadre", "rituel", "regle", "règle", "pilotage stabilise", "pilotage stabilisé"]);
+    const mentionsArbitration = sourceIncludesAny(source, ["arbitr", "priorite", "priorité", "decision", "décision", "affectation"]);
+    const mentionsPlanning = sourceIncludesAny(source, ["planning", "planification", "prevision", "prévision", "5 semaines", "6 mois"]);
+    const mentionsManagement = sourceIncludesAny(source, ["encadrement", "chef d'equipe", "chef d’équipe", "responsable", "manager"]);
+
+    if (params.iteration === 1) {
+      if (mentionsThirtyPercent && mentionsManagement) {
+        return "Si la charge augmente fortement, quel point se tend d’abord dans l’encadrement : les priorités, le planning ou les arbitrages terrain ?";
+      }
+      if (mentionsPlanning) {
+        return "Quand la charge change, jusqu’où votre planning reste-t-il fiable avant de devoir réarbitrer au cas par cas ?";
+      }
+      if (mentionsArbitration) {
+        return "Quand la charge change, qui arbitre concrètement l’affectation des équipes et sur quelle base ?";
+      }
+      return "Quand la charge change, comment décidez-vous concrètement où affecter les équipes en priorité ?";
+    }
+
+    if (params.iteration === 2) {
+      if (mentionsFormalization) {
+        return "Quand vous ajustez la charge aujourd’hui, quelle décision reste encore prise au cas par cas faute de règle claire ?";
+      }
+      if (mentionsPlanning) {
+        return "Quand le planning décroche, qu’est-ce qui provoque d’abord le réarbitrage : disponibilité des équipes, urgence client ou manque de visibilité ?";
+      }
+      return "Quand vous devez réaffecter les équipes, qu’est-ce qui vous fait perdre le plus de temps : l’information, l’arbitrage ou la disponibilité réelle ?";
+    }
+
+    if (mentionsFormalization) {
+      return "Sur charge et ressources, quelle règle de décision manque encore pour éviter les arbitrages au cas par cas ?";
+    }
+    return "Sur charge et ressources, quel signal vous manque encore pour voir assez tôt que l’équilibre décroche ?";
   }
 
   const mentionsRecruitment = sourceIncludesAny(source, [
@@ -751,12 +798,15 @@ export async function composeQuestionWithLlm(params: {
     "- ne pas réécrire le risque dans la question",
     "- ne pas utiliser de préambule théorique",
     "- bannir les formulations du type : 'dans un contexte où', 'afin de', 'en tenant compte de', 'comment anticipez-vous efficacement'",
+    "- bannir les formulations du type : 'qu'est-ce qui vous empêche de formaliser ... pour absorber ...'",
     "- bannir les questions génériques qui pourraient s’appliquer à n’importe quel thème",
     "- éviter de reposer une question trop proche de la dernière question déjà posée sur ce thème",
+    "- pour un sujet charge / ressources / encadrement, poser une question sur l'arbitrage réel, l'affectation des équipes, le planning ou la règle de décision ; ne jamais demander de 'formaliser le pilotage pour absorber une charge'",
     "- privilégier des formulations comme :",
     '  * "Quand on regarde ..., qui décide réellement ?" ',
     '  * "Sur ..., qu’est-ce qui se fait encore sans règle claire ?" ',
     '  * "Sur ..., sur qui devez-vous encore vous appuyer ?" ',
+    '  * "Quand la charge change, qui arbitre concrètement l’affectation des équipes et sur quelle base ?" ',
     '  * "Quand on regarde la prévision à 6 mois, qu’est-ce qui vous manque pour la fiabiliser ?" ',
     '  * "Quand un recruté arrive, qu’est-ce qui empêche de sécuriser correctement son intégration ?" ',
     "",
@@ -764,6 +814,7 @@ export async function composeQuestionWithLlm(params: {
     '  * "Quel serait le premier frein ... ?" sauf si l’évidence parle explicitement d’un risque futur',
     '  * "Qu’est-ce qui explique surtout la situation actuelle ?"',
     '  * "Qu’est-ce qui empêche vos équipes de bien comprendre ... ?"',
+    '  * "Qu’est-ce qui vous empêche de formaliser ce pilotage pour absorber 30 % de charge ?"',
     '  * "Quel est aujourd’hui le point le moins maîtrisé ?" si une formulation plus concrète est possible',
     "",
     "Réponds uniquement avec le texte final de la question.",
