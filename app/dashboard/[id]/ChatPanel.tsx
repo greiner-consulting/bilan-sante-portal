@@ -150,6 +150,8 @@ type ContextApiResponse = {
   ok: boolean;
   session?: SessionState;
   engine_state?: {
+    assistant_message?: string | null;
+    needs_validation?: boolean;
     question_batch_json?: StructuredQuestion[];
     final_objectives_json?: FinalObjectiveSet | null;
     consolidation_json?: FrozenDimension[];
@@ -176,6 +178,11 @@ type BuildReportApiResponse = {
   warnings?: Array<{ code?: string; message?: string }>;
   summary?: string[];
   error?: string;
+};
+
+type ContextSyncOptions = {
+  syncInteractive?: boolean;
+  syncHistory?: boolean;
 };
 
 type Props = { sessionId: string };
@@ -354,7 +361,10 @@ function buildPlaceholder(params: {
   return "Votre réponse...";
 }
 
-function buildMessagesFromHistory(turns: PersistedTurn[]): DisplayMessage[] {
+function buildMessagesFromHistory(
+  turns: PersistedTurn[],
+  fallbackAssistantMessage?: string | null
+): DisplayMessage[] {
   const out: DisplayMessage[] = [];
 
   for (const turn of turns) {
@@ -387,9 +397,24 @@ function buildMessagesFromHistory(turns: PersistedTurn[]): DisplayMessage[] {
     });
   }
 
-  return out.length > 0
-    ? out
-    : [{ role: "assistant", key: "initial-assistant", text: initialAssistantMessage() }];
+  if (out.length > 0) {
+    return out;
+  }
+
+  const fallback = normalizeText(fallbackAssistantMessage) || initialAssistantMessage();
+  return [{ role: "assistant", key: "initial-assistant", text: fallback }];
+}
+
+function shouldAdoptServerHistory(current: DisplayMessage[], next: DisplayMessage[]): boolean {
+  if (current.length === 0) return true;
+  if (current.length === 1 && current[0]?.key === "initial-assistant") return true;
+  if (next.length > current.length) return true;
+
+  const currentLast = current[current.length - 1];
+  const nextLast = next[next.length - 1];
+
+  if (!currentLast || !nextLast) return false;
+  return next.length === current.length && nextLast.key !== currentLast.key;
 }
 
 function buildConversationBlocks(messages: DisplayMessage[]): ConversationBlock[] {
@@ -831,23 +856,37 @@ export default function ChatPanel({ sessionId }: Props) {
     setAwaitingValidation(needsValidation);
   }
 
-  function applyContextData(data: ContextApiResponse) {
+  function applyContextData(data: ContextApiResponse, options?: ContextSyncOptions) {
+    const syncInteractive = options?.syncInteractive ?? true;
+    const syncHistory = options?.syncHistory ?? true;
+
     if (data.session) {
       setSessionState((current) => mergeSessionState(current, data.session, sessionId));
     }
 
     const nextQuestions = normalizeQuestions(data.engine_state?.question_batch_json);
     const nextPhase = String(data.session?.phase ?? "awaiting_trame");
+    const nextNeedsValidation =
+      Boolean(data.engine_state?.needs_validation) ||
+      nextPhase === "iteration_validation" ||
+      nextPhase === "final_objectives_validation";
 
-    if (nextQuestions.length > 0 && nextPhase === "dimension_iteration") {
-      const nextIndex = clampIndex(
-        Number(data.session?.question_index ?? 0),
-        nextQuestions.length
-      );
-      setQuestions([...nextQuestions]);
-      setCurrentIndex(nextIndex);
-    } else {
+    if (syncInteractive) {
+      if (nextQuestions.length > 0 && nextPhase === "dimension_iteration") {
+        const nextIndex = clampIndex(
+          Number(data.session?.question_index ?? 0),
+          nextQuestions.length
+        );
+        setQuestions([...nextQuestions]);
+        setCurrentIndex(nextIndex);
+      } else {
+        resetQuestionState();
+      }
+
+      setAwaitingValidation(nextNeedsValidation);
+    } else if (nextPhase !== "dimension_iteration") {
       resetQuestionState();
+      setAwaitingValidation(nextNeedsValidation);
     }
 
     setFinalObjectives(
@@ -863,16 +902,18 @@ export default function ChatPanel({ sessionId }: Props) {
         : []
     );
 
-    const historyTurns = Array.isArray(data.engine_state?.conversation_history_json)
-      ? (data.engine_state.conversation_history_json as PersistedTurn[])
-      : [];
+    if (syncHistory) {
+      const historyTurns = Array.isArray(data.engine_state?.conversation_history_json)
+        ? (data.engine_state.conversation_history_json as PersistedTurn[])
+        : [];
 
-    setMessages(buildMessagesFromHistory(historyTurns));
+      const fallbackAssistantMessage = normalizeText(data.engine_state?.assistant_message);
+      const nextMessages = buildMessagesFromHistory(historyTurns, fallbackAssistantMessage);
 
-    setAwaitingValidation(
-      nextPhase === "iteration_validation" ||
-        nextPhase === "final_objectives_validation"
-    );
+      setMessages((current) =>
+        shouldAdoptServerHistory(current, nextMessages) ? nextMessages : current
+      );
+    }
   }
 
   async function loadContext() {
@@ -885,7 +926,7 @@ export default function ChatPanel({ sessionId }: Props) {
       });
       const data: ContextApiResponse = await res.json();
       if (!data.ok) throw new Error(data.error || "Erreur de chargement du contexte");
-      applyContextData(data);
+      applyContextData(data, { syncInteractive: true, syncHistory: true });
     } catch (e: any) {
       pushMessage(
         "system",
@@ -905,7 +946,7 @@ export default function ChatPanel({ sessionId }: Props) {
       });
       const data: ContextApiResponse = await res.json();
       if (!data.ok) return;
-      applyContextData(data);
+      applyContextData(data, { syncInteractive: false, syncHistory: true });
     } catch {
       // silence volontaire
     }
