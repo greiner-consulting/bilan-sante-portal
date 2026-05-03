@@ -1,4 +1,5 @@
 import JSZip from "jszip";
+import { extractDocument } from "./improvedDocumentExtractor";
 
 export type SupportedLegacyMime =
   | "text/plain"
@@ -61,6 +62,15 @@ function extractPdfTextFallback(buffer: ArrayBuffer): string {
   return normalizeExtractedText(extracted);
 }
 
+/**
+ * Extract legacy document text.  This function first attempts to delegate to
+ * improvedDocumentExtractor.extractDocument, which uses robust parsers such as
+ * pdf-parse and JSZip.  If that call fails (e.g. unsupported type or
+ * extraction error), the function falls back to the original heuristics.  The
+ * returned detected_format reflects the format guessed by the improved
+ * extractor when available; otherwise it is derived from MIME type or
+ * filename.
+ */
 export async function extractLegacyDocumentText(params: {
   buffer: ArrayBuffer;
   mimeType?: string;
@@ -69,22 +79,25 @@ export async function extractLegacyDocumentText(params: {
   const mimeType = String(params.mimeType || "").toLowerCase();
   const filename = String(params.filename || "").toLowerCase();
 
-  const isTxt =
-    mimeType === "text/plain" ||
-    filename.endsWith(".txt");
+  // Try using the improved extractor.  Convert ArrayBuffer to Buffer for the module.
+  try {
+    const { text, detected_format } = await extractDocument({
+      buffer: Buffer.from(params.buffer),
+      mimeType,
+      filename,
+    });
+    return { text, detected_format } as ExtractLegacyTextResult;
+  } catch {
+    // fall back to legacy heuristics below
+  }
 
-  const isMd =
-    mimeType === "text/markdown" ||
-    filename.endsWith(".md");
-
+  const isTxt = mimeType === "text/plain" || filename.endsWith(".txt");
+  const isMd = mimeType === "text/markdown" || filename.endsWith(".md");
   const isDocx =
     mimeType ===
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
     filename.endsWith(".docx");
-
-  const isPdf =
-    mimeType === "application/pdf" ||
-    filename.endsWith(".pdf");
+  const isPdf = mimeType === "application/pdf" || filename.endsWith(".pdf");
 
   if (isTxt) {
     return {

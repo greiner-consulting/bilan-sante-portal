@@ -1,3 +1,17 @@
+// Modified diagnosticEngine.ts to use LLM-based question generation
+
+/*
+ * This file is a copy of the original diagnosticEngine.ts from the
+ * bilan‑sante‑portal repository. It has been modified to replace the
+ * deterministic question generation with an LLM‑powered pipeline.
+ *
+ * All references to buildQuestionBatch now point to the function defined
+ * in questionBatchLLM.ts. This module selects facts via selectFactsForIteration
+ * and uses OpenAI to generate tailored questions. The API surface is
+ * preserved so that consumers of runDiagnosticEngine do not need to
+ * change their usage. See questionBatchLLM.ts for details.
+ */
+
 import { adminSupabase } from "@/lib/supabaseServer";
 import OpenAI from "openai";
 
@@ -46,10 +60,9 @@ import {
   updateFactAskedCounter,
 } from "@/lib/diagnostic/diagnosticState";
 
-import {
-  buildQuestionBatch,
-  ensureFactInventory,
-} from "@/lib/diagnostic/diagnosticQuestionPlanner";
+// Import ensureFactInventory from the original planner but use our LLM based question builder
+import { ensureFactInventory } from "@/lib/diagnostic/diagnosticQuestionPlanner";
+import { buildQuestionBatchLLM as buildQuestionBatch } from "@/lib/diagnostic/questionBatchLLM";
 
 import { consolidateDimensionResult } from "@/lib/diagnostic/diagnosticDimensionConsolidator";
 
@@ -118,9 +131,12 @@ function normalizeAngle(value: string): SignalAngle | null {
   if (["economics", "economic", "economique"].includes(x)) return "economics";
   if (["frequency", "frequence"].includes(x)) return "frequency";
   if (
-    ["feedback", "rex", "retour d'experience", "retour d experience"].includes(
-      x
-    )
+    [
+      "feedback",
+      "rex",
+      "retour d'experience",
+      "retour d experience",
+    ].includes(x)
   ) {
     return "feedback";
   }

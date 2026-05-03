@@ -144,6 +144,8 @@ type AnswerApiResponse = {
   session?: SessionState;
   assistant?: AssistantResponse;
   error?: string;
+  sync_required?: boolean;
+  reason?: string;
 };
 
 type ContextApiResponse = {
@@ -384,22 +386,14 @@ function buildMessagesFromHistory(
     };
 
     if (turn.role === "question") {
-      out.push({
-        role: "question",
-        ...base,
-      });
+      out.push({ role: "question", ...base });
       continue;
     }
 
-    out.push({
-      role: turn.role,
-      ...base,
-    });
+    out.push({ role: turn.role, ...base });
   }
 
-  if (out.length > 0) {
-    return out;
-  }
+  if (out.length > 0) return out;
 
   const fallback = normalizeText(fallbackAssistantMessage) || initialAssistantMessage();
   return [{ role: "assistant", key: "initial-assistant", text: fallback }];
@@ -412,7 +406,6 @@ function shouldAdoptServerHistory(current: DisplayMessage[], next: DisplayMessag
 
   const currentLast = current[current.length - 1];
   const nextLast = next[next.length - 1];
-
   if (!currentLast || !nextLast) return false;
   return next.length === current.length && nextLast.key !== currentLast.key;
 }
@@ -958,6 +951,12 @@ export default function ChatPanel({ sessionId }: Props) {
       const payload: Record<string, unknown> = {
         message,
         client_ts: new Date().toISOString(),
+        client_phase: sessionState?.phase ?? null,
+        client_dimension_id: sessionState?.dimension ?? null,
+        client_iteration: sessionState?.iteration ?? null,
+        client_question_index: currentQuestion ? currentIndex : null,
+        client_fact_id: currentQuestion?.fact_id ?? null,
+        client_question_text: currentQuestion?.question ?? null,
       };
 
       const res = await fetch(`/api/session/${sessionId}/answer`, {
@@ -968,7 +967,19 @@ export default function ChatPanel({ sessionId }: Props) {
       });
 
       const data: AnswerApiResponse = await res.json();
-      if (!data.ok) throw new Error(data.error || "Erreur moteur diagnostic");
+
+      if (!data.ok) {
+        if (data.sync_required || data.error === "SYNC_REQUIRED") {
+          pushMessage(
+            "system",
+            data.assistant_message ||
+              "L’écran et le moteur ne sont plus synchronisés. Je recharge la question active avant d’enregistrer votre réponse."
+          );
+          await loadContext();
+          return;
+        }
+        throw new Error(data.error || "Erreur moteur diagnostic");
+      }
 
       const mergedSession = mergeSessionState(sessionState, data.session, sessionId);
       if (mergedSession) setSessionState(mergedSession);
@@ -1270,7 +1281,7 @@ export default function ChatPanel({ sessionId }: Props) {
         <div className="space-y-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
           <div className="flex items-center justify-between text-sm text-slate-700">
             <div className="font-semibold text-slate-900">
-              Dimension {sessionState?.dimension ?? "?"} — Itération{" "}
+              Dimension {sessionState?.dimension ?? "?"} — Itération {" "}
               {sessionState?.iteration ?? "?"}/3
             </div>
             <div>
