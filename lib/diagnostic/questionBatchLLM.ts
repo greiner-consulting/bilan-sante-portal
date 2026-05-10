@@ -4,7 +4,9 @@ import {
   buildConstatFromFact,
   buildRiskFromFact,
   updateFactAskedCounter,
+  updateCoverageAfterBatch,
 } from "@/lib/diagnostic/diagnosticState";
+import { expectedQuestionCount, toDimensionKey } from "@/lib/diagnostic/diagnosticContracts";
 import { generateQuestionBatch, type FactSummary } from "./questionGeneratorLLM";
 
 /*
@@ -48,7 +50,7 @@ export async function buildQuestionBatchLLM(params: {
   // Select the next facts to question.  Different versions of selectFactsForIteration
   // return either an array directly or an object with a facts/selectedFacts property.
   const selection: any = selectFactsForIteration(coverage, dimension, iteration, mode);
-  const facts: any[] =
+  let facts: any[] =
     Array.isArray(selection)
       ? selection
       : Array.isArray(selection?.facts)
@@ -63,14 +65,43 @@ export async function buildQuestionBatchLLM(params: {
   // a raw signal (constat), the associated managerial risk and the recommended
   // entry angle.  We rely on buildConstatFromFact and buildRiskFromFact for
   // consistency with the rest of the system.
-  const summaries: FactSummary[] = facts.map((fact: any) => {
-    return {
+  // Build fact summaries for the LLM.  The summary includes an ID, theme,
+  // a raw signal (constat), the associated managerial risk, the recommended
+  // entry angle and the current progress on the fact.  When available on
+  // the fact object, we prefer the raw_signal and managerial_risk values
+  // captured during initial extraction (to preserve phrasing), otherwise
+  // fall back to heuristics via buildConstatFromFact and buildRiskFromFact.
+  // Filter out facts that have no remaining angles to explore.  If missing_angles is
+  // defined and empty, it means all angles have been covered; skip these facts.
+  const candidateFacts = facts.filter((f: any) => {
+    if (Array.isArray(f.missing_angles)) {
+      return f.missing_angles.length > 0;
+    }
+    return true;
+  });
+  // Override facts with the filtered list for the rest of the function.  This ensures
+  // that mapping and deduplication operate only on facts that still have missing angles.
+  facts = candidateFacts;
+  // Rebuild summaries for the remaining facts.  Prefer raw_signal or finding when
+  // available to avoid injecting numeric codes from observed_element.  Carry over
+  // progress and missing_angles hints for the question generator.
+  const summaries: FactSummary[] = candidateFacts.map((fact: any) => {
+    const rawSignal = fact.raw_signal || fact.finding || buildConstatFromFact(fact);
+    const managerialRisk = fact.managerial_risk || buildRiskFromFact(fact, dimension);
+    const summary: FactSummary = {
       id: String(fact.id),
       theme: String(fact.theme || ""),
-      raw_signal: buildConstatFromFact(fact),
-      managerial_risk: buildRiskFromFact(fact, dimension),
+      raw_signal: String(rawSignal),
+      managerial_risk: String(managerialRisk),
       recommended_entry_angle: fact.recommended_entry_angle || "mechanism",
     };
+    if (fact.progress) {
+      summary.progress = String(fact.progress);
+    }
+    if (Array.isArray(fact.missing_angles)) {
+      summary.missing_angles = fact.missing_angles.map((a: any) => String(a));
+    }
+    return summary;
   });
   // Generate questions via the LLM.  The generator returns up to two
   // questions per fact in a strict JSON format.
@@ -96,8 +127,53 @@ export async function buildQuestionBatchLLM(params: {
       risque_managerial: buildRiskFromFact(fact, dimension),
     } as FactBackedQuestion;
   });
-  // Update coverage so that the selected facts are marked as asked.  This
-  // prevents the same facts from being reused in subsequent iterations.
-  updateFactAskedCounter(coverage, batch.map((q) => q.fact_id));
-  return batch;
+  // Deduplicate questions both within this batch and against the questions
+  // already asked in the current coverage bucket.  We normalise the question
+  // strings to lowercase to avoid duplicates due to casing or whitespace.
+  const dimKey = toDimensionKey(dimension);
+  const bucket = coverage.dimensions[dimKey];
+  const previouslyAsked: string[] = Array.isArray(bucket?.asked)
+    ? bucket.asked
+    : [];
+  const seen = new Set<string>();
+  const deduped: FactBackedQuestion[] = [];
+  for (const q of batch) {
+    const normalized = String(q.question || "").trim().toLowerCase();
+    if (!normalized) continue;
+    // Build a unique key combining fact_id and intended_angle to avoid asking the
+    // same angle on the same fact again.  Normalise the angle to lower case.
+    const angleKey = `${q.fact_id || ""}::${(q.intended_angle || "").trim().toLowerCase()}`;
+    // Skip if we've already added a question with the same text in this batch.
+    if (seen.has(normalized)) continue;
+    // Skip if we've already asked the same question text in a previous iteration.
+    if (
+      previouslyAsked.some(
+        (x) => String(x || "").trim().toLowerCase() === normalized
+      )
+    ) {
+      continue;
+    }
+    // Skip if the same fact and angle have been targeted previously (fact.asked_angles contains intended angle).
+    const factRef = coverage.fact_inventory.find((f) => String(f.id) === q.fact_id);
+    const lowerAngle = (q.intended_angle || "").trim().toLowerCase();
+    if (
+      factRef &&
+      Array.isArray(factRef.asked_angles) &&
+      factRef.asked_angles.some((a: any) => String(a || "").trim().toLowerCase() === lowerAngle)
+    ) {
+      continue;
+    }
+    seen.add(normalized);
+    deduped.push(q);
+  }
+  // Limit the number of questions to the expected count for this iteration and mode.
+  const expectedCount = expectedQuestionCount(iteration, mode as any);
+  const finalBatch = deduped.slice(0, expectedCount);
+
+  // Update coverage after the batch.  This records the questions, themes,
+  // targeted fact ids and recent angles in the coverage bucket.  It also
+  // increments asked_count for the underlying facts.
+  updateCoverageAfterBatch(coverage, dimension, iteration, finalBatch);
+  updateFactAskedCounter(coverage, finalBatch);
+  return finalBatch;
 }

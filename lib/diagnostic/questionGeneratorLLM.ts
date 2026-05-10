@@ -14,13 +14,35 @@ import OpenAI from "openai";
  * into a list of question objects associated with their originating fact.
  */
 
+/**
+ * A summary of a diagnostic fact used to guide question generation.  In addition
+ * to the core fields describing the theme, raw signal and managerial risk, the
+ * structure may carry the current progress of the fact (identified, questioned,
+ * illustrated, etc.) and the list of remaining angles to explore.  Providing
+ * these hints helps the language model propose questions that target the
+ * unexplored angles instead of repeating what has already been asked.
+ */
 export interface FactSummary {
   id: string;
   theme: string;
   raw_signal: string;
   managerial_risk: string;
   recommended_entry_angle: string;
+  /**
+   * Current progress of this fact in the diagnostic process.  Typical values
+   * include: identified, questioned, illustrated, quantified, causalized,
+   * arbitrated, stabilised, consolidated.  When undefined, the progress is
+   * unknown.
+   */
   progress?: string;
+  /**
+   * Remaining angles that still need to be explored for this fact.  Each
+   * element should be one of the allowed angles (example, magnitude, mechanism,
+   * causality, dependency, arbitration, formalization, transition, economics,
+   * frequency, feedback).  If undefined, the model will select angles
+   * autonomously.
+   */
+  missing_angles?: string[];
 }
 
 export interface GeneratedQuestion {
@@ -47,35 +69,45 @@ export async function generateQuestionBatch(params: {
   if (facts.length === 0) return [];
   // Construct a JSON summary of the facts for the prompt.  Only include
   // fields that are essential for the model to craft relevant questions.
-  const factSummaries = facts.map((f, idx) => {
-    return {
+  // Assemble a list of fact summaries for the prompt.  In addition to the
+  // minimal fields (id, theme, raw_signal, managerial_risk and
+  // recommended_entry_angle), we include optional progress and missing_angles
+  // hints when available.  These hints will help the model tailor the angle
+  // selection to the remaining gaps in the coverage.
+  const factSummaries = facts.map((f) => {
+    const summary: any = {
       fact_id: f.id,
       theme: f.theme,
       raw_signal: f.raw_signal,
       managerial_risk: f.managerial_risk,
       recommended_entry_angle: f.recommended_entry_angle,
     };
+    if (f.progress) summary.progress = f.progress;
+    if (Array.isArray(f.missing_angles) && f.missing_angles.length > 0) {
+      summary.missing_angles = f.missing_angles;
+    }
+    return summary;
   });
   const prompt = `
-Tu es un consultant senior en diagnostic des PME et tu prépares une série de questions pour un entretien dirigeant.
+Tu es un consultant senior en diagnostic des PME et tu prépares une série de questions pour un entretien avec le dirigeant.
 
-Je vais te fournir une liste de signaux (constats) extraits d'une trame initiale.  Pour chaque signal, tu dois proposer
-au maximum deux questions qui permettent de creuser le point de manière concrète et bienveillante.  Chaque question doit
-être concise (une seule phrase) et se concentrer sur un angle précis (exemple, ordre de grandeur, fonctionnement concret,
-cause principale, dépendance, arbitrage, formalisation, transition, impact économique, fréquence, retour d'expérience).
+On te fournit une liste de signaux (constats) extraits d'une trame initiale.  Pour chaque signal, propose au maximum deux questions
+qui permettent de creuser le point de manière concrète et bienveillante.  Chaque question doit être concise (une seule phrase)
+et se concentrer sur un angle précis (exemple, ordre de grandeur, fonctionnement concret, cause principale, dépendance,
+arbitrage, formalisation, transition, impact économique, fréquence, retour d'expérience).
+
+Les résumés des signaux peuvent inclure :
+- le niveau d'avancement actuel (progress) si le signal a déjà été partiellement exploré,
+- la liste des angles restants (missing_angles) lorsqu'ils sont connus.  Dans ce cas, privilégie l'exploration de ces angles
+  plutôt que de répéter un angle déjà couvert.
 
 Règles impératives :
-- Utilise un ton direct mais toujours bienveillant.
-- Évite les formulations vagues ou génériques.
-- Ne répète pas le texte du signal mot à mot, reformule pour guider le dirigeant.
-- Ne produis aucun texte hors de la structure JSON demandée.
-
-Réponds STRICTEMENT en JSON du type suivant :
-{
-  "questions": [
-    { "fact_id": "string", "question": "string", "intended_angle": "string" }
-  ]
-}
+• Utilise un ton direct mais toujours bienveillant.
+• Évite les formulations vagues ou génériques.
+• Ne répète pas le texte du signal mot à mot, reformule pour guider le dirigeant.
+• Si des angles restants sont indiqués, choisis l'un d'entre eux en priorité ; sinon sélectionne l'angle que tu juges le plus pertinent.
+• Retourne STRICTEMENT un objet JSON de la forme : { "questions": [ { "fact_id": "string", "question": "string", "intended_angle": "string" } ] }.
+• Ne produis aucun autre texte ni commentaire hors de cet objet JSON.
 
 FACTS:
 ${JSON.stringify(factSummaries, null, 2)}

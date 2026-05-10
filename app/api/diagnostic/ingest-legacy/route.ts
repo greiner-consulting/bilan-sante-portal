@@ -1,7 +1,10 @@
 import { NextResponse } from "next/server";
 import { adminSupabase, createSupabaseServerClient } from "@/lib/supabaseServer";
 import { ingestLegacyDiagnostics } from "@/lib/diagnostic/legacyDiagnosticIngestion";
-import type { LegacyDiagnosticInput, KnowledgePattern } from "@/lib/diagnostic/knowledgeBase";
+import type {
+  LegacyDiagnosticInput,
+  KnowledgePattern,
+} from "@/lib/diagnostic/knowledgeBase";
 
 export const runtime = "nodejs";
 
@@ -12,13 +15,31 @@ function isBypass() {
   );
 }
 
-async function getUserId(): Promise<string> {
+function isAdminEmail(email: string | undefined | null) {
+  const raw = process.env.ADMIN_EMAILS || "";
+  const allowed = raw
+    .split(",")
+    .map((x) => x.trim().toLowerCase())
+    .filter(Boolean);
+
+  if (allowed.length === 0) {
+    return false;
+  }
+
+  return allowed.includes(String(email || "").trim().toLowerCase());
+}
+
+async function getAdminUser() {
   if (isBypass()) {
     const id = process.env.DEV_BYPASS_USER_ID;
     if (!id) {
       throw new Error("Missing DEV_BYPASS_USER_ID");
     }
-    return id;
+
+    return {
+      id,
+      email: process.env.DEV_BYPASS_USER_EMAIL || "",
+    };
   }
 
   const supabase = await createSupabaseServerClient();
@@ -30,7 +51,14 @@ async function getUserId(): Promise<string> {
     throw new Error("UNAUTHENTICATED");
   }
 
-  return user.id;
+  if (!isAdminEmail(user.email)) {
+    throw new Error("FORBIDDEN");
+  }
+
+  return {
+    id: user.id,
+    email: user.email || "",
+  };
 }
 
 function normalizeLegacyDiagnosticInput(raw: any): LegacyDiagnosticInput | null {
@@ -76,7 +104,7 @@ function toInsertRow(userId: string, pattern: KnowledgePattern) {
 
 export async function POST(req: Request) {
   try {
-    const userId = await getUserId();
+    const adminUser = await getAdminUser();
     const admin = adminSupabase();
     const body = await req.json();
 
@@ -100,7 +128,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const knowledgeBase = ingestLegacyDiagnostics(diagnostics);
+    const knowledgeBase = await ingestLegacyDiagnostics(diagnostics);
     const patterns = knowledgeBase.patterns;
 
     if (patterns.length === 0) {
@@ -113,7 +141,7 @@ export async function POST(req: Request) {
       });
     }
 
-    const rows = patterns.map((pattern) => toInsertRow(userId, pattern));
+    const rows = patterns.map((pattern) => toInsertRow(adminUser.id, pattern));
 
     const { error } = await admin
       .from("diagnostic_knowledge_patterns")
@@ -137,7 +165,13 @@ export async function POST(req: Request) {
     });
   } catch (e: any) {
     const msg = e?.message ?? "Unknown error";
-    const code = msg === "UNAUTHENTICATED" ? 401 : 500;
+
+    const code =
+      msg === "UNAUTHENTICATED"
+        ? 401
+        : msg === "FORBIDDEN"
+        ? 403
+        : 500;
 
     return NextResponse.json(
       { ok: false, error: msg },
