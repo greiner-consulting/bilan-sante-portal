@@ -169,6 +169,28 @@ export async function buildQuestionBatchLLM(params: {
   // Limit the number of questions to the expected count for this iteration and mode.
   const expectedCount = expectedQuestionCount(iteration, mode as any);
   const finalBatch = deduped.slice(0, expectedCount);
+  // Immediately update the asked_angles and missing_angles on each targeted fact.  Without
+  // this, a fact may be selected again in the next iteration for the same angle when
+  // the analysis step fails to mark the angle as covered.  We normalise angles
+  // to lowercase for comparison and ensure asked_angles is initialised.
+  for (const q of finalBatch) {
+    const factRef = coverage.fact_inventory.find((f) => String(f.id) === q.fact_id);
+    if (!factRef) continue;
+    const angle = String(q.intended_angle || "").trim();
+    if (!angle) continue;
+    const lowerAngle = angle.toLowerCase();
+    // Initialise asked_angles and missing_angles arrays if needed.
+    if (!Array.isArray(factRef.asked_angles)) factRef.asked_angles = [];
+    if (!Array.isArray(factRef.missing_angles)) factRef.missing_angles = [];
+    // Append the angle to asked_angles if it hasn't been recorded yet.
+    if (!factRef.asked_angles.some((a: any) => String(a || "").trim().toLowerCase() === lowerAngle)) {
+      factRef.asked_angles.push(angle);
+    }
+    // Remove the angle from missing_angles to avoid reselection in subsequent iterations.
+    factRef.missing_angles = factRef.missing_angles.filter((a: any) => {
+      return String(a || "").trim().toLowerCase() !== lowerAngle;
+    });
+  }
 
   // Update coverage after the batch.  This records the questions, themes,
   // targeted fact ids and recent angles in the coverage bucket.  It also

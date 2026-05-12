@@ -96,6 +96,11 @@ qui permettent de creuser le point de manière concrète et bienveillante.  Chaq
 et se concentrer sur un angle précis (exemple, ordre de grandeur, fonctionnement concret, cause principale, dépendance,
 arbitrage, formalisation, transition, impact économique, fréquence, retour d'expérience).
 
+La progression (`progress`) et les angles restants (`missing_angles`) sont fournis pour certains signaux : utilise-les pour approfondir
+les informations déjà recueillies. Si un signal comporte un niveau d'avancement, veille à ne pas répéter des angles déjà
+explorés et cherche plutôt à obtenir des exemples, des mesures concrètes ou des clarifications. Lorsque des angles restants
+sont listés, choisis-en un en priorité.
+
 Les résumés des signaux peuvent inclure :
 - le niveau d'avancement actuel (progress) si le signal a déjà été partiellement exploré,
 - la liste des angles restants (missing_angles) lorsqu'ils sont connus.  Dans ce cas, privilégie l'exploration de ces angles
