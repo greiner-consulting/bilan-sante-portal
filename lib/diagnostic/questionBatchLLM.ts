@@ -408,7 +408,10 @@ function ensureQuestionIsAnchored(question: string, fact: any) {
   if (!q) return false;
   if (q.length < 25) return false;
 
-  if (numeric && numeric.split(" ").some((token) => token.length >= 2 && q.includes(token))) {
+  if (
+    numeric &&
+    numeric.split(" ").some((token) => token.length >= 2 && q.includes(token))
+  ) {
     return true;
   }
 
@@ -447,6 +450,74 @@ function fallbackQuestionFromFact(fact: any, iteration: number): string {
   }
 
   return `Quel arbitrage ou changement concret permettrait de sécuriser durablement ce point : ${statement} ?`;
+}
+
+function buildFallbackQuestionForFact(params: {
+  fact: any;
+  dimension: number;
+  iteration: number;
+}): FactBackedQuestion {
+  const { fact, dimension, iteration } = params;
+
+  const intendedAngle =
+    normalizeAngleValue(fact?.missing_angles?.[0]) ||
+    normalizeAngleValue(fact?.last_planned_angle) ||
+    normalizeAngleValue(fact?.recommended_entry_angle) ||
+    "mechanism";
+
+  return {
+    fact_id: String(fact.id),
+    theme: String(fact.theme || ""),
+    question: cleanSentence(fallbackQuestionFromFact(fact, iteration), 360),
+    intended_angle: intendedAngle,
+    constat: buildBetterRawSignal(fact, dimension),
+    risque_managerial: cleanSentence(
+      fact.managerial_risk || buildRiskFromFact(fact),
+      360
+    ),
+  } as FactBackedQuestion;
+}
+
+function addFallbackQuestions(params: {
+  finalBatch: FactBackedQuestion[];
+  selectedFacts: any[];
+  expectedCount: number;
+  dimension: number;
+  iteration: number;
+  allowReusingFactIds: boolean;
+}) {
+  const {
+    finalBatch,
+    selectedFacts,
+    expectedCount,
+    dimension,
+    iteration,
+    allowReusingFactIds,
+  } = params;
+
+  const usedFactIds = new Set(finalBatch.map((q) => q.fact_id));
+  const usedQuestions = new Set(finalBatch.map((q) => normalizeText(q.question)));
+
+  for (const fact of selectedFacts) {
+    if (finalBatch.length >= expectedCount) break;
+
+    const factId = String(fact.id);
+    if (!allowReusingFactIds && usedFactIds.has(factId)) continue;
+
+    const fallback = buildFallbackQuestionForFact({
+      fact,
+      dimension,
+      iteration,
+    });
+
+    const normalizedQuestion = normalizeText(fallback.question);
+    if (!normalizedQuestion || usedQuestions.has(normalizedQuestion)) continue;
+    if (isGenericQuestion(fallback.question)) continue;
+
+    finalBatch.push(fallback);
+    usedFactIds.add(factId);
+    usedQuestions.add(normalizedQuestion);
+  }
 }
 
 export async function buildQuestionBatchLLM(params: {
@@ -520,7 +591,7 @@ export async function buildQuestionBatchLLM(params: {
       theme: q.theme || String(fact.theme || ""),
       question: anchored ? candidateQuestion : fallbackQuestion,
       intended_angle: normalizeAngleValue(q.intended_angle) || "mechanism",
-      constat: buildConstatFromFact(fact),
+      constat: buildBetterRawSignal(fact, dimension),
       risque_managerial: cleanSentence(
         fact.managerial_risk || buildRiskFromFact(fact),
         360
@@ -576,7 +647,29 @@ export async function buildQuestionBatchLLM(params: {
     deduped.push(q);
   }
 
-  const finalBatch = deduped.slice(0, expectedCount);
+  const finalBatch: FactBackedQuestion[] = deduped.slice(0, expectedCount);
+
+  if (finalBatch.length < expectedCount) {
+    addFallbackQuestions({
+      finalBatch,
+      selectedFacts,
+      expectedCount,
+      dimension,
+      iteration,
+      allowReusingFactIds: false,
+    });
+  }
+
+  if (finalBatch.length < expectedCount) {
+    addFallbackQuestions({
+      finalBatch,
+      selectedFacts,
+      expectedCount,
+      dimension,
+      iteration,
+      allowReusingFactIds: true,
+    });
+  }
 
   for (const q of finalBatch) {
     rememberPlannedQuestion(coverage, q);

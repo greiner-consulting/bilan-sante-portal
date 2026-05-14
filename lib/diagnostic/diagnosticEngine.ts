@@ -76,6 +76,25 @@ type SessionRow = {
   consolidation_json?: unknown;
 };
 
+type FinalObjectiveForUi = {
+  id: string;
+  dimensionId: string | number;
+  objectiveLabel: string;
+  owner: string;
+  keyIndicator: string;
+  dueDate: string;
+  potentialGain: string;
+  gainHypotheses: string[];
+  validationStatus: "proposed" | "validated" | "adjusted" | "refused";
+  quickWin: string;
+};
+
+type FinalObjectiveSetForUi = {
+  header: string;
+  objectives: FinalObjectiveForUi[];
+  decisionsCapturedAt?: string;
+};
+
 const DEBUG_DIAGNOSTIC = true;
 
 function debugLog(scope: string, payload: Record<string, unknown>) {
@@ -151,6 +170,148 @@ function limitUniqueAngles(values: SignalAngle[], max = 6): SignalAngle[] {
     if (out.length >= max) break;
   }
   return out;
+}
+
+function normalizeStringArray(value: unknown, max = 8): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((x) => String(x ?? "").trim())
+    .filter(Boolean)
+    .slice(0, max);
+}
+
+function normalizeFinalObjectivesForPersistence(
+  raw: unknown
+): FinalObjectiveSetForUi {
+  const fallback: FinalObjectiveSetForUi = {
+    header:
+      "Objectifs finaux à valider à partir des dimensions consolidées du diagnostic.",
+    objectives: [],
+  };
+
+  if (!raw || typeof raw !== "object") return fallback;
+
+  const value = raw as any;
+  const objectives = Array.isArray(value.objectives)
+    ? value.objectives
+        .map((o: any, index: number) => ({
+          id: String(o?.id ?? `objective-${index + 1}`).trim(),
+          dimensionId: o?.dimensionId ?? o?.dimension_id ?? o?.dimension ?? "",
+          objectiveLabel: String(
+            o?.objectiveLabel ?? o?.objectif ?? o?.label ?? ""
+          ).trim(),
+          owner: String(o?.owner ?? o?.responsable ?? "Dirigeant").trim(),
+          keyIndicator: String(
+            o?.keyIndicator ?? o?.indicateur ?? ""
+          ).trim(),
+          dueDate: String(o?.dueDate ?? o?.echeance ?? "").trim(),
+          potentialGain: String(
+            o?.potentialGain ?? o?.gain_potentiel ?? ""
+          ).trim(),
+          gainHypotheses: normalizeStringArray(
+            o?.gainHypotheses ?? o?.hypotheses ?? [],
+            6
+          ),
+          validationStatus:
+            o?.validationStatus === "validated" ||
+            o?.validationStatus === "adjusted" ||
+            o?.validationStatus === "refused" ||
+            o?.validationStatus === "proposed"
+              ? o.validationStatus
+              : "proposed",
+          quickWin: String(o?.quickWin ?? o?.quick_win ?? "").trim(),
+        }))
+        .filter(
+          (o: FinalObjectiveForUi) =>
+            Boolean(o.id) && Boolean(o.objectiveLabel)
+        )
+    : [];
+
+  return {
+    header: String(value.header ?? fallback.header).trim() || fallback.header,
+    objectives,
+    decisionsCapturedAt:
+      String(value.decisionsCapturedAt ?? "").trim() || undefined,
+  };
+}
+
+function normalizeConsolidationForPersistence(raw: unknown): unknown[] {
+  if (!Array.isArray(raw)) return [];
+  return raw;
+}
+
+function buildDefaultFinalObjectivesFromDiagnosticResult(
+  diagnosticResult: DiagnosticResult
+): FinalObjectiveSetForUi {
+  const objectives: FinalObjectiveForUi[] = [];
+
+  for (const dimension of diagnosticResult.dimensions) {
+    const firstFinding =
+      dimension.constats_cles?.[0] ||
+      dimension.zones_non_pilotees?.[0] ||
+      `Sécuriser la dimension ${dimension.dimension}`;
+
+    const firstZone =
+      dimension.zones_non_pilotees?.[0] ||
+      dimension.cause_racine ||
+      "zone de pilotage à renforcer";
+
+    objectives.push({
+      id: `objective-d${dimension.dimension}`,
+      dimensionId: dimension.dimension,
+      objectiveLabel: `Sécuriser ${dimension.name} : ${firstFinding}`,
+      owner: "Dirigeant / responsable désigné",
+      keyIndicator: `Indicateur de maîtrise défini et suivi sur : ${firstZone}`,
+      dueDate: "90 jours",
+      potentialGain:
+        "Gain à préciser après validation dirigeant : réduction des reprises, meilleure maîtrise des dérives et sécurisation du pilotage.",
+      gainHypotheses: [
+        "Objectif construit à partir des constats consolidés de la dimension.",
+        "Gain dépendant du niveau d’appropriation managériale et de la régularité du pilotage.",
+      ],
+      validationStatus: "proposed",
+      quickWin:
+        "Nommer un responsable, définir un indicateur simple et lancer un premier rituel de suivi.",
+    });
+  }
+
+  return {
+    header:
+      "Objectifs finaux proposés à partir des dimensions consolidées. Merci de les valider ou de demander les ajustements nécessaires.",
+    objectives,
+  };
+}
+
+function buildFinalObjectivesForValidation(params: {
+  existing: unknown;
+  diagnosticResult: DiagnosticResult;
+}): FinalObjectiveSetForUi {
+  const existing = normalizeFinalObjectivesForPersistence(params.existing);
+
+  if (existing.objectives.length > 0) {
+    return existing;
+  }
+
+  return buildDefaultFinalObjectivesFromDiagnosticResult(
+    params.diagnosticResult
+  );
+}
+
+function markFinalObjectivesValidated(raw: unknown): FinalObjectiveSetForUi {
+  const current = normalizeFinalObjectivesForPersistence(raw);
+
+  return {
+    ...current,
+    decisionsCapturedAt: new Date().toISOString(),
+    objectives: current.objectives.map((objective) => ({
+      ...objective,
+      validationStatus:
+        objective.validationStatus === "refused" ||
+        objective.validationStatus === "adjusted"
+          ? objective.validationStatus
+          : "validated",
+    })),
+  };
 }
 
 function convertBatchToStructuredQuestions(
@@ -505,7 +666,9 @@ CONTEXTE DE LA QUESTION ACTIVE
 ETAT ACTUEL DU SIGNAL
 - observed_element: ${activeFact?.observed_element ?? "n/a"}
 - source_excerpt: ${activeFact?.source_excerpt ?? "n/a"}
-- numeric_values: ${activeFact?.numeric_values ? JSON.stringify(activeFact.numeric_values) : "n/a"}
+- numeric_values: ${
+    activeFact?.numeric_values ? JSON.stringify(activeFact.numeric_values) : "n/a"
+  }
 - progress: ${activeFact?.progress ?? "n/a"}
 - asked_angles: ${(activeFact?.asked_angles ?? []).join(" | ") || "aucun"}
 - missing_angles: ${(activeFact?.missing_angles ?? []).join(" | ") || "aucun"}
@@ -986,8 +1149,14 @@ export async function runDiagnosticEngine(
     .from("diagnostic_sessions")
     .update({
       coverage_json: coverage,
-      global_analysis_json: coverage.global_analysis,
+      global_analysis_json: coverage.global_analysis ?? {},
       diagnostic_result_json: diagnosticResult,
+      final_objectives_json: normalizeFinalObjectivesForPersistence(
+        s.final_objectives_json
+      ),
+      consolidation_json: normalizeConsolidationForPersistence(
+        s.consolidation_json
+      ),
     })
     .eq("id", sessionId);
 
@@ -1005,7 +1174,8 @@ export async function runDiagnosticEngine(
   if (
     status === "completed" ||
     phase === "completed" ||
-    phase === "diagnostic_complete"
+    phase === "diagnostic_complete" ||
+    phase === "report_ready"
   ) {
     return {
       assistant_message:
@@ -1029,6 +1199,45 @@ export async function runDiagnosticEngine(
     (events ?? []) as Array<{ kind?: string; payload?: any }>
   );
 
+  if (phase === "final_objectives_validation") {
+    if (isYes(normalizedMessage)) {
+      const validatedObjectives = markFinalObjectivesValidated(
+        s.final_objectives_json
+      );
+
+      await admin
+        .from("diagnostic_sessions")
+        .update({
+          phase: "report_ready",
+          status: "report_ready",
+          coverage_json: coverage,
+          global_analysis_json: coverage.global_analysis ?? {},
+          diagnostic_result_json: diagnosticResult,
+          final_objectives_json: validatedObjectives,
+          consolidation_json: normalizeConsolidationForPersistence(
+            s.consolidation_json
+          ),
+          question_batch_json: [],
+          question_index: 0,
+        })
+        .eq("id", sessionId);
+
+      return {
+        assistant_message:
+          "Les objectifs finaux sont validés. Vous pouvez maintenant construire le rapport.",
+        questions: [],
+        needs_validation: false,
+      };
+    }
+
+    return {
+      assistant_message:
+        "Merci. Les ajustements d’objectifs finaux ne sont pas encore automatisés dans cette version. Répondez par oui pour valider les objectifs proposés, ou indiquez précisément les objectifs à modifier pour traitement manuel.",
+      questions: [],
+      needs_validation: true,
+    };
+  }
+
   if (phase === "iteration_validation") {
     if (isYes(normalizedMessage)) {
       if (iteration >= 3) {
@@ -1040,14 +1249,23 @@ export async function runDiagnosticEngine(
         });
 
         if (dimension >= 4) {
+          const finalObjectives = buildFinalObjectivesForValidation({
+            existing: s.final_objectives_json,
+            diagnosticResult,
+          });
+
           await admin
             .from("diagnostic_sessions")
             .update({
-              phase: "diagnostic_complete",
-              status: "completed",
+              phase: "final_objectives_validation",
+              status: "in_progress",
               coverage_json: coverage,
-              global_analysis_json: coverage.global_analysis,
+              global_analysis_json: coverage.global_analysis ?? {},
               diagnostic_result_json: diagnosticResult,
+              final_objectives_json: finalObjectives,
+              consolidation_json: normalizeConsolidationForPersistence(
+                s.consolidation_json
+              ),
               question_batch_json: [],
               question_index: 0,
             })
@@ -1055,9 +1273,9 @@ export async function runDiagnosticEngine(
 
           return {
             assistant_message:
-              "Les 4 dimensions du diagnostic ont été parcourues et consolidées. Le diagnostic conversationnel de cette session est maintenant terminé.",
+              "Les 4 dimensions du diagnostic ont été parcourues et consolidées.\n\nNous passons maintenant à la validation des objectifs finaux. Répondez par oui pour valider les objectifs proposés, ou indiquez les ajustements souhaités.",
             questions: [],
-            needs_validation: false,
+            needs_validation: true,
           };
         }
 
@@ -1085,8 +1303,14 @@ export async function runDiagnosticEngine(
             question_batch_json: nextBatch,
             question_index: 0,
             coverage_json: coverage,
-            global_analysis_json: coverage.global_analysis,
+            global_analysis_json: coverage.global_analysis ?? {},
             diagnostic_result_json: diagnosticResult,
+            final_objectives_json: normalizeFinalObjectivesForPersistence(
+              s.final_objectives_json
+            ),
+            consolidation_json: normalizeConsolidationForPersistence(
+              s.consolidation_json
+            ),
           })
           .eq("id", sessionId);
 
@@ -1123,8 +1347,14 @@ ${buildIterationMessage(
           question_batch_json: nextBatch,
           question_index: 0,
           coverage_json: coverage,
-          global_analysis_json: coverage.global_analysis,
+          global_analysis_json: coverage.global_analysis ?? {},
           diagnostic_result_json: diagnosticResult,
+          final_objectives_json: normalizeFinalObjectivesForPersistence(
+            s.final_objectives_json
+          ),
+          consolidation_json: normalizeConsolidationForPersistence(
+            s.consolidation_json
+          ),
         })
         .eq("id", sessionId);
 
@@ -1157,8 +1387,14 @@ ${buildIterationMessage(
           question_batch_json: relaunchBatch,
           question_index: 0,
           coverage_json: coverage,
-          global_analysis_json: coverage.global_analysis,
+          global_analysis_json: coverage.global_analysis ?? {},
           diagnostic_result_json: diagnosticResult,
+          final_objectives_json: normalizeFinalObjectivesForPersistence(
+            s.final_objectives_json
+          ),
+          consolidation_json: normalizeConsolidationForPersistence(
+            s.consolidation_json
+          ),
         })
         .eq("id", sessionId);
 
@@ -1202,8 +1438,14 @@ ${buildIterationMessage(
           question_batch_json: rebuiltBatch,
           question_index: 0,
           coverage_json: coverage,
-          global_analysis_json: coverage.global_analysis,
+          global_analysis_json: coverage.global_analysis ?? {},
           diagnostic_result_json: diagnosticResult,
+          final_objectives_json: normalizeFinalObjectivesForPersistence(
+            s.final_objectives_json
+          ),
+          consolidation_json: normalizeConsolidationForPersistence(
+            s.consolidation_json
+          ),
         })
         .eq("id", sessionId);
 
@@ -1221,7 +1463,11 @@ ${buildIterationMessage(
 
     safeBatch = batch;
 
-    if (safeBatch.length > 0 && questionIndex < safeBatch.length && normalizedMessage) {
+    if (
+      safeBatch.length > 0 &&
+      questionIndex < safeBatch.length &&
+      normalizedMessage
+    ) {
       const activeQuestion = safeBatch[questionIndex] ?? null;
 
       const resolved = await resolveFactsFromAnswer({
@@ -1277,8 +1523,14 @@ ${buildIterationMessage(
             question_index: nextIndex,
             phase: "iteration_validation",
             coverage_json: coverage,
-            global_analysis_json: coverage.global_analysis,
+            global_analysis_json: coverage.global_analysis ?? {},
             diagnostic_result_json: diagnosticResult,
+            final_objectives_json: normalizeFinalObjectivesForPersistence(
+              s.final_objectives_json
+            ),
+            consolidation_json: normalizeConsolidationForPersistence(
+              s.consolidation_json
+            ),
             question_batch_json: safeBatch,
           })
           .eq("id", sessionId);
@@ -1300,8 +1552,14 @@ ${buildIterationMessage(
           question_index: nextIndex,
           phase: "dimension_questions",
           coverage_json: coverage,
-          global_analysis_json: coverage.global_analysis,
+          global_analysis_json: coverage.global_analysis ?? {},
           diagnostic_result_json: diagnosticResult,
+          final_objectives_json: normalizeFinalObjectivesForPersistence(
+            s.final_objectives_json
+          ),
+          consolidation_json: normalizeConsolidationForPersistence(
+            s.consolidation_json
+          ),
           question_batch_json: safeBatch,
         })
         .eq("id", sessionId);
@@ -1338,8 +1596,14 @@ ${buildIterationMessage(
         question_batch_json: regeneratedBatch,
         question_index: 0,
         coverage_json: coverage,
-        global_analysis_json: coverage.global_analysis,
+        global_analysis_json: coverage.global_analysis ?? {},
         diagnostic_result_json: diagnosticResult,
+        final_objectives_json: normalizeFinalObjectivesForPersistence(
+          s.final_objectives_json
+        ),
+        consolidation_json: normalizeConsolidationForPersistence(
+          s.consolidation_json
+        ),
       })
       .eq("id", sessionId);
 
