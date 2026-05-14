@@ -43,9 +43,7 @@ import {
   refreshDimensionMemory,
   uniquePush,
   updateCoverageWithAnalysis,
-  updateFactAskedCounter,
 } from "@/lib/diagnostic/diagnosticState";
-
 
 import { ensureFactInventory } from "@/lib/diagnostic/diagnosticQuestionPlanner";
 import { buildQuestionBatchLLM as buildQuestionBatch } from "@/lib/diagnostic/questionBatchLLM";
@@ -341,8 +339,6 @@ function registerConsumedQuestion(params: {
 }): CoverageState {
   const { coverage, dimension, iteration, question } = params;
 
-  updateFactAskedCounter(coverage, [question]);
-
   const bucket =
     coverage.dimensions[toDimensionKey(dimension)] ?? defaultBucket(dimension);
 
@@ -369,16 +365,38 @@ function registerConsumedQuestion(params: {
   );
 
   const fact = coverage.fact_inventory.find((f) => f.id === question.fact_id);
+
   if (fact && question.intended_angle) {
     fact.asked_angles = limitUniqueAngles(
       [...(fact.asked_angles ?? []), question.intended_angle],
       8
     );
+
     fact.last_planned_angle = question.intended_angle;
     fact.progress = fact.progress ?? "questioned";
+
     fact.missing_angles = (fact.missing_angles ?? []).filter(
       (angle) => angle !== question.intended_angle
     );
+
+    const mutableFact = fact as any;
+
+    if (!Array.isArray(mutableFact.previous_questions)) {
+      mutableFact.previous_questions = [];
+    }
+
+    const questionText = String(question.question || "").trim();
+
+    if (
+      questionText &&
+      !mutableFact.previous_questions.some(
+        (q: string) =>
+          String(q || "").trim().toLowerCase() === questionText.toLowerCase()
+      )
+    ) {
+      mutableFact.previous_questions.push(questionText);
+      mutableFact.previous_questions = mutableFact.previous_questions.slice(-10);
+    }
   }
 
   return refreshDimensionMemory(coverage, dimension);
@@ -434,8 +452,6 @@ Tu es un consultant senior spécialisé en redressement de PME.
 
 Tu analyses UNE réponse de dirigeant dans un entretien structuré de diagnostic.
 
-Tu ne dois pas inventer une stratégie de questionnement globale.
-
 Tu dois seulement extraire ce que la réponse apporte réellement sur le signal visé.
 
 Réponds STRICTEMENT en JSON :
@@ -488,9 +504,16 @@ CONTEXTE DE LA QUESTION ACTIVE
 
 ETAT ACTUEL DU SIGNAL
 - observed_element: ${activeFact?.observed_element ?? "n/a"}
+- source_excerpt: ${activeFact?.source_excerpt ?? "n/a"}
+- numeric_values: ${activeFact?.numeric_values ? JSON.stringify(activeFact.numeric_values) : "n/a"}
 - progress: ${activeFact?.progress ?? "n/a"}
 - asked_angles: ${(activeFact?.asked_angles ?? []).join(" | ") || "aucun"}
 - missing_angles: ${(activeFact?.missing_angles ?? []).join(" | ") || "aucun"}
+- previous_questions: ${((activeFact as any)?.previous_questions ?? []).join(" | ") || "aucune"}
+- previous_answers: ${((activeFact as any)?.previous_answers ?? []).join(" | ") || "aucune"}
+- answer_summaries: ${((activeFact as any)?.answer_summaries ?? []).join(" | ") || "aucun"}
+- validated_findings_fact: ${((activeFact as any)?.validated_findings ?? []).join(" | ") || "aucun"}
+- open_hypotheses_fact: ${((activeFact as any)?.open_hypotheses ?? []).join(" | ") || "aucune"}
 
 Historique :
 ${history}
@@ -531,9 +554,9 @@ ${knowledgeSnippet}
     const parsed = JSON.parse(raw);
 
     const coveredAngles = Array.isArray(parsed?.covered_angles)
-      ? parsed.covered_angles
+      ? (parsed.covered_angles
           .map((x: unknown) => normalizeAngle(String(x ?? "")))
-          .filter(Boolean) as SignalAngle[]
+          .filter(Boolean) as SignalAngle[])
       : [];
 
     const signalUpdates = Array.isArray(parsed?.signal_updates)
@@ -954,7 +977,9 @@ export async function runDiagnosticEngine(
     coverage.global_analysis
   );
 
-  const batch: FactBackedQuestion[] = normalizeQuestionBatch(s.question_batch_json);
+  const batch: FactBackedQuestion[] = normalizeQuestionBatch(
+    s.question_batch_json
+  );
   const questionIndex = Math.max(Number(s.question_index ?? 0), 0);
 
   await admin

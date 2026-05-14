@@ -1,5 +1,3 @@
-import OpenAI from "openai";
-
 import type {
   CoverageState,
   DiagnosticFact,
@@ -29,10 +27,10 @@ import {
   refreshDimensionMemory,
   selectFactsForIteration,
 } from "@/lib/diagnostic/diagnosticState";
-
-const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY!,
-});
+import {
+  extractFactsFromText,
+  type ExtractedFact,
+} from "@/lib/diagnostic/factExtractorLLM";
 
 const DEBUG_DIAGNOSTIC = true;
 
@@ -46,18 +44,6 @@ type BatchPlannedItem = {
   theme: string;
   intended_angle: SignalAngle;
   planner_rationale: string;
-};
-
-type InitialFactExtractionItem = {
-  theme?: string;
-  raw_signal?: string;
-  managerial_risk?: string;
-  recommended_entry_angle?: string;
-  signal_kind?: string;
-  instruction_goal?: string;
-  proof_level?: number;
-  confidence_score?: number;
-  criticality_score?: number;
 };
 
 type RhPatternId =
@@ -153,11 +139,47 @@ function getSignalKindFromFact(fact: DiagnosticFact): string | null {
 
 function getRawSignalFromFact(fact: DiagnosticFact): string {
   return (
+    getFactTagValue(fact, "diagnostic_statement:") ||
     getFactTagValue(fact, "raw_signal:") ||
     fact.observed_element ||
     fact.theme ||
     ""
   ).trim();
+}
+
+function getSuggestedQuestionsFromFact(fact: DiagnosticFact): string[] {
+  const rawFact = fact as any;
+  if (!Array.isArray(rawFact.suggested_questions)) return [];
+  return rawFact.suggested_questions.map(String).filter(Boolean).slice(0, 5);
+}
+
+function hasNumericValues(fact: DiagnosticFact): boolean {
+  return Boolean(
+    fact.numeric_values &&
+      typeof fact.numeric_values === "object" &&
+      Object.keys(fact.numeric_values).length > 0
+  );
+}
+
+function normalizeNumericValues(value: unknown): Record<string, number | string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+
+  const out: Record<string, number | string> = {};
+
+  for (const [key, rawValue] of Object.entries(value as Record<string, unknown>)) {
+    const cleanKey = String(key || "").trim();
+    if (!cleanKey) continue;
+
+    if (typeof rawValue === "number" && Number.isFinite(rawValue)) {
+      out[cleanKey] = rawValue;
+      continue;
+    }
+
+    const cleanValue = String(rawValue ?? "").replace(/\s+/g, " ").trim();
+    if (cleanValue) out[cleanKey] = cleanValue;
+  }
+
+  return out;
 }
 
 function isDimensionOneThemeAllowed(theme: string): boolean {
@@ -704,6 +726,20 @@ function buildGenericQuestionText(params: {
   iteration: number;
 }): string {
   const { fact, angle } = params;
+  const suggestedQuestions = getSuggestedQuestionsFromFact(fact);
+
+  if (suggestedQuestions.length > 0) {
+    const candidate = suggestedQuestions.find((q) => {
+      const normalized = normalizeText(q);
+      return (
+        normalized.length >= 25 &&
+        !normalized.includes("point le moins maitrise")
+      );
+    });
+
+    if (candidate) return candidate;
+  }
+
   const raw = getRawSignalFromFact(fact);
 
   switch (angle) {
@@ -791,7 +827,8 @@ function pickBestAngleForFact(
   const preferred = getPreferredEntryAngleFromFact(fact);
 
   const avoidExample = shouldAvoidExampleAngle(fact, iteration, mode);
-  const avoidMagnitude = shouldAvoidMagnitudeAngle(fact, iteration);
+  const avoidMagnitude =
+    !hasNumericValues(fact) && shouldAvoidMagnitudeAngle(fact, iteration);
   const avoidCausality = shouldAvoidCausalityAngle(fact, iteration);
 
   function allowed(angle: SignalAngle) {
@@ -919,6 +956,179 @@ function inferInstructionGoalFromAngle(angle: SignalAngle): InstructionGoal {
   return "verify";
 }
 
+function factTypeForDimensionLocal(
+  dimension: number
+): "organisational_fact" | "commercial_fact" | "economic_fact" | "operational_fact" {
+  if (dimension === 1) return "organisational_fact";
+  if (dimension === 2) return "commercial_fact";
+  if (dimension === 3) return "economic_fact";
+  return "operational_fact";
+}
+
+function allowedStatementModeFromProofLevel(
+  proofLevel: number
+): "fact_only" | "prudent_hypothesis" | "validated_finding" {
+  if (proofLevel >= 4) return "validated_finding";
+  if (proofLevel === 3) return "prudent_hypothesis";
+  return "fact_only";
+}
+
+function normalizeInstructionGoal(value: string, angle: SignalAngle): InstructionGoal {
+  if (
+    value === "quantify" ||
+    value === "verify" ||
+    value === "explain_cause" ||
+    value === "test_arbitration" ||
+    value === "measure_impact"
+  ) {
+    return value as InstructionGoal;
+  }
+
+  return inferInstructionGoalFromAngle(angle);
+}
+
+function buildTagsFromExtractedFact(fact: ExtractedFact, angle: SignalAngle) {
+  return limitUniqueStrings(
+    [
+      normalizeTheme(fact.theme),
+      fact.raw_signal ? `raw_signal:${fact.raw_signal.slice(0, 700)}` : "",
+      fact.diagnostic_statement
+        ? `diagnostic_statement:${fact.diagnostic_statement.slice(0, 700)}`
+        : "",
+      fact.signal_kind ? `signal_kind:${fact.signal_kind}` : "",
+      angle ? `entry_angle:${angle}` : "",
+    ],
+    20
+  );
+}
+
+function convertExtractedFactToDiagnosticFact(params: {
+  extracted: ExtractedFact;
+  dimension: number;
+  index: number;
+}): DiagnosticFact | null {
+  const { extracted, dimension, index } = params;
+  const d = clampDimension(dimension);
+
+  const recommendedEntryAngle =
+    normalizeSignalAngle(String(extracted.recommended_entry_angle ?? "").trim()) ??
+    "mechanism";
+
+  const proofLevel = Math.min(
+    5,
+    Math.max(1, Number(extracted.proof_level ?? 3))
+  ) as 1 | 2 | 3 | 4 | 5;
+
+  const rawSignal = String(extracted.raw_signal ?? "").replace(/\s+/g, " ").trim();
+  const diagnosticStatement = String(
+    extracted.diagnostic_statement || extracted.raw_signal || ""
+  )
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const sourceExcerpt = String(extracted.source_excerpt || rawSignal)
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const suggestedQuestions = Array.isArray(extracted.suggested_questions)
+    ? extracted.suggested_questions.map(String).filter(Boolean).slice(0, 5)
+    : [];
+
+  const missingAngles = Array.isArray(extracted.missing_angles)
+    ? (extracted.missing_angles
+        .map((a) => normalizeSignalAngle(String(a)))
+        .filter(Boolean) as SignalAngle[])
+    : [];
+
+  const fact: DiagnosticFact = {
+    id: `seed-d${d}-${index + 1}`,
+    dimension_primary: d as FactDimension,
+    dimension_secondary: [],
+    fact_type: factTypeForDimensionLocal(d),
+    theme: String(extracted.theme || "").trim(),
+    observed_element: diagnosticStatement || rawSignal,
+    source: "trame",
+    source_excerpt: sourceExcerpt,
+    numeric_values: normalizeNumericValues(extracted.numeric_values),
+    tags: buildTagsFromExtractedFact(extracted, recommendedEntryAngle),
+    evidence_kind: sourceExcerpt || hasNumericValuesLike(extracted.numeric_values)
+      ? "explicit_fact"
+      : "weak_signal",
+    proof_level: proofLevel,
+    reasoning_status: "to_instruct",
+    prudent_hypothesis:
+      proofLevel <= 2
+        ? `Le point "${String(extracted.theme || "").trim()}" nécessite encore une validation plus concrète.`
+        : undefined,
+    managerial_risk: String(extracted.managerial_risk || "").trim() || undefined,
+    instruction_goal: normalizeInstructionGoal(
+      String(extracted.instruction_goal || ""),
+      recommendedEntryAngle
+    ),
+    allowed_statement_mode: allowedStatementModeFromProofLevel(proofLevel),
+    confidence_score: Math.max(
+      0,
+      Math.min(100, Number(extracted.confidence_score ?? 55))
+    ),
+    criticality_score: Math.max(
+      0,
+      Math.min(100, Number(extracted.criticality_score ?? 65))
+    ),
+    asked_count: 0,
+    last_question_at: undefined,
+    evidence_refs: [],
+    contradiction_notes: [],
+    progress: "identified",
+    asked_angles: [],
+    
+    missing_angles:
+      missingAngles.length > 0
+    ? limitUniqueSignals(missingAngles, 6)
+    : limitUniqueSignals(
+        [
+          recommendedEntryAngle,
+          "mechanism",
+          "causality",
+          "economics",
+        ] as SignalAngle[],
+        6
+      ),
+    last_planned_angle: undefined,
+    first_seen_iteration: 1,
+    last_completed_iteration: undefined,
+    linked_fact_ids: [],
+    previous_questions: [],
+    previous_answers: [],
+    answer_summaries: [],
+    validated_findings: [],
+    open_hypotheses: [],
+    next_question_hints: [],
+  };
+
+  (fact as any).diagnostic_statement = diagnosticStatement;
+  (fact as any).raw_signal = rawSignal;
+  (fact as any).suggested_questions = suggestedQuestions;
+
+  if (!fact.id || !fact.theme || !fact.observed_element) return null;
+
+  return fact;
+}
+
+function hasNumericValuesLike(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  return Object.keys(value as Record<string, unknown>).length > 0;
+}
+
+function limitUniqueSignals(values: SignalAngle[], max = 6): SignalAngle[] {
+  const out: SignalAngle[] = [];
+  for (const value of values) {
+    if (!out.includes(value)) out.push(value);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+
 async function extractInitialFactsForDimension(
   extractedText: string,
   dimension: number
@@ -926,171 +1136,54 @@ async function extractInitialFactsForDimension(
   const d = clampDimension(dimension);
   const guard = DIMENSION_GUARDRAILS[d];
 
-  const prompt = `
-Tu es un consultant senior en diagnostic stratégique de PME.
-
-Tu lis une trame initiale et tu dois extraire des signaux réellement exploitables
-pour ouvrir la dimension ${d} — ${guard.name}.
-
-Tu ne dois PAS produire de reformulation d'entretien.
-Tu dois produire des signaux bruts, concrets, questionnables.
-
-Réponds STRICTEMENT en JSON :
-
-{
-  "facts": [
-    {
-      "theme": "string",
-      "raw_signal": "string",
-      "managerial_risk": "string",
-      "recommended_entry_angle": "example|magnitude|mechanism|causality|dependency|arbitration|formalization|transition|economics|frequency|feedback",
-      "signal_kind": "string",
-      "instruction_goal": "verify|quantify|explain_cause|test_arbitration|measure_impact",
-      "proof_level": 1,
-      "confidence_score": 0,
-      "criticality_score": 0
-    }
-  ]
-}
-
-Règles impératives :
-- uniquement des signaux reliés à la dimension demandée
-- theme doit rester dans les thèmes autorisés
-- raw_signal = formulation la plus proche possible de ce qui est présent dans la trame
-- raw_signal doit être concret, pas un thème abstrait
-- raw_signal ne doit pas être une consigne d'analyste
-- managerial_risk doit être concret et spécifique
-- recommended_entry_angle doit être pertinent pour une première exploration
-- signal_kind doit être un label métier court
-- confidence_score et criticality_score entre 0 et 100
-- proof_level entre 1 et 4
-- 0 texte hors JSON
-
-OBJECTIFS D'ENQUÊTE
-${guard.investigationGoals.map((x) => `- ${x}`).join("\n")}
-
-THEMES AUTORISÉS
-${guard.allowedThemes.map((x) => `- ${x}`).join("\n")}
-
-THEMES INTERDITS
-${guard.forbiddenThemes.map((x) => `- ${x}`).join("\n")}
-
-RISQUES DE CONFUSION À ÉVITER
-${guard.confusionRisks.map((x) => `- ${x}`).join("\n")}
-
-TRAME :
-${extractedText.slice(0, 15000)}
-`.trim();
-
   try {
-    const resp = await client.chat.completions.create({
-      model: process.env.OPENAI_MODEL_CHAT || "gpt-4o-mini",
-      temperature: 0.05,
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content:
-            "Consultant senior en retournement de PME. Tu extrais des signaux concrets et questionnables, strictement dans la dimension demandée. JSON uniquement.",
-        },
-        { role: "user", content: prompt },
-      ],
+    const extractedFacts = await extractFactsFromText({
+      document: extractedText,
+      dimension: {
+        id: d,
+        name: guard.name,
+        investigationGoals: guard.investigationGoals,
+        allowedThemes: guard.allowedThemes,
+        forbiddenThemes: guard.forbiddenThemes,
+        confusionRisks: guard.confusionRisks,
+      },
     });
 
-    const raw = resp.choices[0]?.message?.content ?? "{}";
-    const parsed = JSON.parse(raw);
-    const facts = Array.isArray(parsed?.facts) ? parsed.facts : [];
+    const normalizedFacts = extractedFacts
+      .map((fact, index) =>
+        convertExtractedFactToDiagnosticFact({
+          extracted: fact,
+          dimension: d,
+          index,
+        })
+      )
+      .filter(Boolean) as DiagnosticFact[];
 
-    const normalizedFacts = facts
-      .map((f: InitialFactExtractionItem, idx: number) => {
-        const proofLevel = Math.min(
-          4,
-          Math.max(1, Number(f?.proof_level ?? 2))
-        ) as 1 | 2 | 3 | 4;
+    const usableFacts = normalizedFacts.filter(factUsableForQuestion);
+    const dimensionFacts = filterFactsForDimension(usableFacts, d);
 
-        const recommendedEntryAngle =
-          normalizeSignalAngle(String(f?.recommended_entry_angle ?? "").trim()) ??
-          "mechanism";
+    debugLog("extractInitialFactsForDimension", {
+      dimension: d,
+      extracted: extractedFacts.length,
+      normalized: normalizedFacts.length,
+      usable: usableFacts.length,
+      dimensionFacts: dimensionFacts.length,
+      sample: dimensionFacts.slice(0, 5).map((fact) => ({
+        id: fact.id,
+        theme: fact.theme,
+        observed_element: fact.observed_element,
+        source_excerpt: fact.source_excerpt,
+        numeric_values: fact.numeric_values,
+        criticality_score: fact.criticality_score,
+      })),
+    });
 
-        const rawSignal = String(f?.raw_signal ?? "").trim();
-
-        const normalizedInstructionGoal: InstructionGoal =
-          f?.instruction_goal === "quantify" ||
-          f?.instruction_goal === "verify" ||
-          f?.instruction_goal === "explain_cause" ||
-          f?.instruction_goal === "test_arbitration" ||
-          f?.instruction_goal === "measure_impact"
-            ? (f.instruction_goal as InstructionGoal)
-            : inferInstructionGoalFromAngle(recommendedEntryAngle);
-
-        const fact: DiagnosticFact = {
-          id: `seed-d${d}-${idx + 1}`,
-          dimension_primary: d as FactDimension,
-          dimension_secondary: [],
-          fact_type:
-            d === 1
-              ? "organisational_fact"
-              : d === 2
-              ? "commercial_fact"
-              : d === 3
-              ? "economic_fact"
-              : "operational_fact",
-          theme: String(f?.theme ?? "").trim(),
-          observed_element: rawSignal,
-          source: "trame",
-          source_excerpt: extractedText.slice(0, 800),
-          numeric_values: {},
-          tags: limitUniqueStrings(
-            [
-              normalizeTheme(String(f?.theme ?? "").trim()),
-              rawSignal ? `raw_signal:${rawSignal}` : "",
-              f?.signal_kind ? `signal_kind:${String(f.signal_kind).trim()}` : "",
-              recommendedEntryAngle ? `entry_angle:${recommendedEntryAngle}` : "",
-            ],
-            10
-          ),
-          evidence_kind: "weak_signal",
-          proof_level: proofLevel,
-          reasoning_status: "to_instruct",
-          prudent_hypothesis:
-            proofLevel <= 2
-              ? `Le point "${String(f?.theme ?? "").trim()}" nécessite encore une validation plus concrète.`
-              : undefined,
-          managerial_risk: String(f?.managerial_risk ?? "").trim() || undefined,
-          instruction_goal: normalizedInstructionGoal,
-          allowed_statement_mode:
-            proofLevel >= 4
-              ? "validated_finding"
-              : proofLevel === 3
-              ? "prudent_hypothesis"
-              : "fact_only",
-          confidence_score: Math.max(
-            0,
-            Math.min(100, Number(f?.confidence_score ?? 40))
-          ),
-          criticality_score: Math.max(
-            0,
-            Math.min(100, Number(f?.criticality_score ?? 60))
-          ),
-          asked_count: 0,
-          last_question_at: undefined,
-          evidence_refs: [],
-          contradiction_notes: [],
-          progress: "identified",
-          asked_angles: [],
-          missing_angles: [],
-          last_planned_angle: undefined,
-          first_seen_iteration: 1,
-          last_completed_iteration: undefined,
-          linked_fact_ids: [],
-        };
-
-        return fact;
-      })
-      .filter(factUsableForQuestion);
-
-    return filterFactsForDimension(normalizedFacts, d);
-  } catch {
+    return dimensionFacts;
+  } catch (error: any) {
+    debugLog("extractInitialFactsForDimension_error", {
+      dimension: d,
+      error: error?.message ?? String(error),
+    });
     return [];
   }
 }
@@ -1107,12 +1200,29 @@ export async function ensureFactInventory(
 
   for (const dimension of [1, 2, 3, 4] as const) {
     const extracted = await extractInitialFactsForDimension(extractedText, dimension);
+
     if (extracted.length > 0) {
       allFacts.push(...extracted);
     } else {
       allFacts.push(...fallbackFactsFromThemes(dimension, extractedText));
     }
   }
+
+  debugLog("ensureFactInventory", {
+    totalFacts: allFacts.length,
+    byDimension: [1, 2, 3, 4].map((dimension) => ({
+      dimension,
+      count: allFacts.filter((fact) => fact.dimension_primary === dimension).length,
+    })),
+    sample: allFacts.slice(0, 8).map((fact) => ({
+      id: fact.id,
+      dimension: fact.dimension_primary,
+      theme: fact.theme,
+      observed_element: fact.observed_element,
+      numeric_values: fact.numeric_values,
+      criticality_score: fact.criticality_score,
+    })),
+  });
 
   return {
     ...coverage,
