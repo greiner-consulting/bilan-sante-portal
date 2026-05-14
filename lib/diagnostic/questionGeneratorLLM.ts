@@ -3,46 +3,29 @@ import OpenAI from "openai";
 /*
  * questionGeneratorLLM.ts
  *
- * This module provides an interface to generate interview questions using a
- * large language model.  Given a list of facts extracted from a diagnostic
- * document, a target dimension and iteration number, it prompts the LLM to
- * produce concise, specific and actionable questions tailored to each fact.
- * The structure of the prompt encourages the model to use a direct and
- * benevolent tone while varying the angles of exploration (example,
- * magnitude, mechanism, causality, dependency, arbitration, formalization,
- * transition, economics, frequency, feedback).  The output is parsed back
- * into a list of question objects associated with their originating fact.
+ * Génère des questions d’entretien à partir de signaux diagnostiques enrichis.
+ * Le LLM reçoit la mémoire des questions/réponses déjà posées sur chaque fait,
+ * afin que les itérations 2 et 3 soient de vraies questions de rebond.
  */
 
-/**
- * A summary of a diagnostic fact used to guide question generation.  In addition
- * to the core fields describing the theme, raw signal and managerial risk, the
- * structure may carry the current progress of the fact (identified, questioned,
- * illustrated, etc.) and the list of remaining angles to explore.  Providing
- * these hints helps the language model propose questions that target the
- * unexplored angles instead of repeating what has already been asked.
- */
 export interface FactSummary {
   id: string;
   theme: string;
   raw_signal: string;
   managerial_risk: string;
   recommended_entry_angle: string;
-  /**
-   * Current progress of this fact in the diagnostic process.  Typical values
-   * include: identified, questioned, illustrated, quantified, causalized,
-   * arbitrated, stabilised, consolidated.  When undefined, the progress is
-   * unknown.
-   */
+
   progress?: string;
-  /**
-   * Remaining angles that still need to be explored for this fact.  Each
-   * element should be one of the allowed angles (example, magnitude, mechanism,
-   * causality, dependency, arbitration, formalization, transition, economics,
-   * frequency, feedback).  If undefined, the model will select angles
-   * autonomously.
-   */
   missing_angles?: string[];
+  asked_angles?: string[];
+
+  previous_questions?: string[];
+  previous_answers?: string[];
+  answer_summaries?: string[];
+  validated_findings?: string[];
+  open_hypotheses?: string[];
+  contradictions?: string[];
+  next_question_hints?: string[];
 }
 
 export interface GeneratedQuestion {
@@ -54,12 +37,50 @@ export interface GeneratedQuestion {
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 
-/**
- * Generate a batch of questions for a given dimension and iteration using a
- * large language model.  The function collates facts into a summary list and
- * instructs the model to propose one or two questions per fact, focusing on
- * the recommended entry angle and exploring other angles if beneficial.
- */
+function normalizeQuestion(value: string) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function normalizeAngle(value: string) {
+  const x = String(value || "").trim().toLowerCase();
+  const allowed = [
+    "example",
+    "magnitude",
+    "mechanism",
+    "causality",
+    "dependency",
+    "arbitration",
+    "formalization",
+    "transition",
+    "economics",
+    "frequency",
+    "feedback",
+  ];
+  if (allowed.includes(x)) return x;
+  if (x.includes("exemple") || x.includes("cas")) return "example";
+  if (x.includes("ordre") || x.includes("quant") || x.includes("combien")) return "magnitude";
+  if (x.includes("mécan") || x.includes("mecan") || x.includes("fonction")) return "mechanism";
+  if (x.includes("cause") || x.includes("pourquoi")) return "causality";
+  if (x.includes("dépend") || x.includes("depend")) return "dependency";
+  if (x.includes("arbitr")) return "arbitration";
+  if (x.includes("formal")) return "formalization";
+  if (x.includes("transition")) return "transition";
+  if (x.includes("économ") || x.includes("econom") || x.includes("marge")) return "economics";
+  if (x.includes("fréquence") || x.includes("frequence")) return "frequency";
+  if (x.includes("rex") || x.includes("retour")) return "feedback";
+  return "mechanism";
+}
+
+function buildIterationInstruction(iteration: number) {
+  if (iteration <= 1) {
+    return `Itération 1 : partir de la trame, clarifier les signaux initiaux et éviter les questions déjà traitées.`;
+  }
+  if (iteration === 2) {
+    return `Itération 2 : utiliser prioritairement les réponses déjà données ; chercher la cause, le mécanisme, l'arbitrage ou l'ordre de grandeur qui manque ; formuler une question de rebond reliée à ce que le dirigeant a déjà dit.`;
+  }
+  return `Itération 3 : consolider et tester la robustesse du diagnostic ; ne pas poser une question de découverte générale ; rebondir sur les réponses précédentes ; rechercher la conséquence économique, la condition de maîtrise, la fréquence, la dépendance ou l'arbitrage final manquant.`;
+}
+
 export async function generateQuestionBatch(params: {
   facts: FactSummary[];
   dimension: number;
@@ -67,83 +88,76 @@ export async function generateQuestionBatch(params: {
 }): Promise<GeneratedQuestion[]> {
   const { facts, dimension, iteration } = params;
   if (facts.length === 0) return [];
-  // Construct a JSON summary of the facts for the prompt.  Only include
-  // fields that are essential for the model to craft relevant questions.
-  // Assemble a list of fact summaries for the prompt.  In addition to the
-  // minimal fields (id, theme, raw_signal, managerial_risk and
-  // recommended_entry_angle), we include optional progress and missing_angles
-  // hints when available.  These hints will help the model tailor the angle
-  // selection to the remaining gaps in the coverage.
-  const factSummaries = facts.map((f) => {
-    const summary: any = {
-      fact_id: f.id,
-      theme: f.theme,
-      raw_signal: f.raw_signal,
-      managerial_risk: f.managerial_risk,
-      recommended_entry_angle: f.recommended_entry_angle,
-    };
-    if (f.progress) summary.progress = f.progress;
-    if (Array.isArray(f.missing_angles) && f.missing_angles.length > 0) {
-      summary.missing_angles = f.missing_angles;
-    }
-    return summary;
-  });
+
+  const factSummaries = facts.map((f) => ({
+    fact_id: f.id,
+    theme: f.theme,
+    raw_signal: f.raw_signal,
+    managerial_risk: f.managerial_risk,
+    recommended_entry_angle: f.recommended_entry_angle,
+    progress: f.progress ?? null,
+    missing_angles: Array.isArray(f.missing_angles) ? f.missing_angles : [],
+    asked_angles: Array.isArray(f.asked_angles) ? f.asked_angles : [],
+    previous_questions: Array.isArray(f.previous_questions) ? f.previous_questions.slice(-5) : [],
+    previous_answers: Array.isArray(f.previous_answers) ? f.previous_answers.slice(-5) : [],
+    answer_summaries: Array.isArray(f.answer_summaries) ? f.answer_summaries.slice(-5) : [],
+    validated_findings: Array.isArray(f.validated_findings) ? f.validated_findings.slice(-5) : [],
+    open_hypotheses: Array.isArray(f.open_hypotheses) ? f.open_hypotheses.slice(-5) : [],
+    contradictions: Array.isArray(f.contradictions) ? f.contradictions.slice(-5) : [],
+    next_question_hints: Array.isArray(f.next_question_hints) ? f.next_question_hints.slice(-5) : [],
+  }));
+
   const prompt = `
-Tu es un consultant senior en diagnostic des PME et tu prépares une série de questions pour un entretien avec le dirigeant.
+Tu es un consultant senior en diagnostic d'entreprise.
 
-On te fournit une liste de signaux (constats) extraits d'une trame initiale.  Pour chaque signal, propose au maximum deux questions
-qui permettent de creuser le point de manière concrète et bienveillante.  Chaque question doit être concise (une seule phrase)
-et se concentrer sur un angle précis (exemple, ordre de grandeur, fonctionnement concret, cause principale, dépendance,
-arbitrage, formalisation, transition, impact économique, fréquence, retour d'expérience).
+OBJECTIF MAJEUR : les itérations 2 et 3 doivent exploiter les réponses précédentes. Tu ne dois jamais te contenter de reformuler le signal initial si des réponses dirigeant existent.
 
-La progression (`progress`) et les angles restants (`missing_angles`) sont fournis pour certains signaux : utilise-les pour approfondir
-les informations déjà recueillies. Si un signal comporte un niveau d'avancement, veille à ne pas répéter des angles déjà
-explorés et cherche plutôt à obtenir des exemples, des mesures concrètes ou des clarifications. Lorsque des angles restants
-sont listés, choisis-en un en priorité.
+${buildIterationInstruction(iteration)}
 
-Les résumés des signaux peuvent inclure :
-- le niveau d'avancement actuel (progress) si le signal a déjà été partiellement exploré,
-- la liste des angles restants (missing_angles) lorsqu'ils sont connus.  Dans ce cas, privilégie l'exploration de ces angles
-  plutôt que de répéter un angle déjà couvert.
+Pour chaque fait, tu reçois le signal initial, le risque, les questions déjà posées, les réponses déjà obtenues, les résumés, les constats validés, les hypothèses ouvertes, les angles déjà demandés et les angles manquants.
 
-Règles impératives :
-• Utilise un ton direct mais toujours bienveillant.
-• Évite les formulations vagues ou génériques.
-• Ne répète pas le texte du signal mot à mot, reformule pour guider le dirigeant.
-• Si des angles restants sont indiqués, choisis l'un d'entre eux en priorité ; sinon sélectionne l'angle que tu juges le plus pertinent.
-• Retourne STRICTEMENT un objet JSON de la forme : { "questions": [ { "fact_id": "string", "question": "string", "intended_angle": "string" } ] }.
-• Ne produis aucun autre texte ni commentaire hors de cet objet JSON.
+RÈGLES ABSOLUES :
+1. Ne repose jamais une question déjà posée, même reformulée.
+2. Si previous_answers ou answer_summaries existent, la nouvelle question doit s'y référer implicitement ou explicitement.
+3. En itération 2, approfondis la cause, le mécanisme ou l'arbitrage.
+4. En itération 3, teste la conséquence, la condition de maîtrise, l'ordre de grandeur, ou la robustesse du constat final.
+5. N'utilise jamais de fragments numériques incompréhensibles issus de la trame.
+6. Ne demande pas "quel est le point le moins maîtrisé ?".
+7. Une question = une seule phrase.
+8. Le champ intended_angle doit être : example, magnitude, mechanism, causality, dependency, arbitration, formalization, transition, economics, frequency ou feedback.
+
+Retourne STRICTEMENT ce JSON :
+{"questions":[{"fact_id":"string","question":"string","intended_angle":"string"}]}
 
 FACTS:
 ${JSON.stringify(factSummaries, null, 2)}
 
-Dimension: ${dimension}, Iteration: ${iteration}
+Dimension: ${dimension}
+Iteration: ${iteration}
 `.trim();
+
   try {
     const resp = await openai.chat.completions.create({
       model: process.env.OPENAI_MODEL_CHAT || "gpt-4o-mini",
-      temperature: 0.1,
+      temperature: 0.05,
       response_format: { type: "json_object" },
       messages: [
-        {
-          role: "system",
-          content: "Consultant senior en retournement de PME. Génération de questions structurées uniquement en JSON.",
-        },
+        { role: "system", content: "Consultant senior en retournement de PME. Génération de questions de rebond, uniquement en JSON." },
         { role: "user", content: prompt },
       ],
     });
     const raw = resp.choices[0]?.message?.content ?? "{}";
     const parsed = JSON.parse(raw);
     const questions = Array.isArray(parsed?.questions) ? parsed.questions : [];
-    // Validate and normalise the returned questions.  We only keep non-empty
-    // questions and angles.
     return questions
       .map((q: any) => {
+        const factId = String(q?.fact_id ?? "").trim();
+        const fact = facts.find((f) => f.id === factId);
         return {
-          fact_id: String(q?.fact_id ?? "").trim(),
-          theme: facts.find((f) => f.id === q?.fact_id)?.theme ?? "",
-          question: String(q?.question ?? "").trim(),
-          intended_angle: String(q?.intended_angle ?? "").trim(),
+          fact_id: factId,
+          theme: fact?.theme ?? "",
+          question: normalizeQuestion(String(q?.question ?? "")),
+          intended_angle: normalizeAngle(String(q?.intended_angle ?? "")),
         } as GeneratedQuestion;
       })
       .filter((q) => q.fact_id && q.question);

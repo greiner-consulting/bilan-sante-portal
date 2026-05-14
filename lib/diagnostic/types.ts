@@ -133,7 +133,8 @@ export type GlobalTrameAnalysis = {
  * mais il porte maintenant les briques nécessaires pour :
  * - suivre un signal dans le temps,
  * - savoir quels angles ont déjà été explorés,
- * - distinguer itération 1 / 2 / 3 de manière utile.
+ * - distinguer itération 1 / 2 / 3 de manière utile,
+ * - mémoriser les questions/réponses dirigeant par fait.
  */
 export type DiagnosticFact = {
   id: string;
@@ -175,6 +176,18 @@ export type DiagnosticFact = {
   first_seen_iteration?: 1 | 2 | 3;
   last_completed_iteration?: 1 | 2 | 3;
   linked_fact_ids?: string[];
+
+  /**
+   * Mémoire dirigeant par fait.
+   * Ces champs permettent aux itérations 2 et 3 de rebondir sur les réponses
+   * déjà données au lieu de repartir uniquement de la trame initiale.
+   */
+  previous_questions?: string[];
+  previous_answers?: string[];
+  answer_summaries?: string[];
+  validated_findings?: string[];
+  open_hypotheses?: string[];
+  next_question_hints?: string[];
 };
 
 export type QuestionCandidate = {
@@ -349,7 +362,8 @@ export function normalizeAngle(value: string): SignalAngle | null {
   if (x === "magnitude" || x === "ordre de grandeur" || x === "quantification")
     return "magnitude";
   if (x === "mechanism" || x === "mecanisme") return "mechanism";
-  if (x === "causality" || x === "cause" || x === "causalite") return "causality";
+  if (x === "causality" || x === "cause" || x === "causalite")
+    return "causality";
   if (x === "dependency" || x === "dependance") return "dependency";
   if (x === "arbitration" || x === "arbitrage") return "arbitration";
   if (x === "formalization" || x === "formalisme") return "formalization";
@@ -381,10 +395,16 @@ export function clampScore0to100(value: unknown): number {
 export function inferDisplayModeFromFact(
   fact: Pick<DiagnosticFact, "proof_level" | "allowed_statement_mode">
 ): QuestionDisplayMode {
-  if (fact.allowed_statement_mode === "validated_finding" || fact.proof_level >= 4) {
+  if (
+    fact.allowed_statement_mode === "validated_finding" ||
+    fact.proof_level >= 4
+  ) {
     return "validated_finding";
   }
-  if (fact.allowed_statement_mode === "prudent_hypothesis" || fact.proof_level === 3) {
+  if (
+    fact.allowed_statement_mode === "prudent_hypothesis" ||
+    fact.proof_level === 3
+  ) {
     return "prudent_observation";
   }
   return "point_to_clarify";

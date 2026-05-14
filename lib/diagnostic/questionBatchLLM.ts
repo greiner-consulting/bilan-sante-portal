@@ -9,35 +9,138 @@ import {
 import { expectedQuestionCount, toDimensionKey } from "@/lib/diagnostic/diagnosticContracts";
 import { generateQuestionBatch, type FactSummary } from "./questionGeneratorLLM";
 
-/*
- * questionBatchLLM.ts
- *
- * This module provides an alternative implementation of the question batch
- * builder that relies on a large language model to craft questions.  It
- * mirrors the API of the original buildQuestionBatch function from
- * diagnosticQuestionPlanner.ts so that the diagnostic engine can switch to
- * LLM‑generated questions without any changes in its control flow.  The
- * function selects the next facts to be explored via selectFactsForIteration,
- * summarises those facts for the LLM, calls generateQuestionBatch to
- * obtain up to two questions per fact, and then maps the result back to
- * the FactBackedQuestion shape expected by the rest of the system.  It
- * finally updates the coverage to reflect that the facts have been asked.
- */
+function normalizeText(value: string) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
-/**
- * Builds a batch of questions for a given dimension and iteration using
- * a language model.  It retrieves the next facts to discuss, constructs
- * summaries for the LLM, delegates question generation to generateQuestionBatch
- * and returns an array of fact‑backed questions.  The coverage object is
- * updated in place via updateFactAskedCounter.
- *
- * @param params.extractedText Entire extracted trame (unused but kept for signature parity)
- * @param params.coverage Current coverage state
- * @param params.dimension Current diagnostic dimension (1–4)
- * @param params.iteration Current iteration number within the dimension
- * @param params.history Conversation history (unused for now)
- * @param params.mode Selection mode (e.g. "normal", "reopen_after_no")
- */
+function isWeakRawSignal(value: string) {
+  const text = String(value || "").trim();
+  if (!text) return true;
+  const digits = (text.match(/\d/g) || []).length;
+  const letters = (text.match(/[a-zA-ZÀ-ÿ]/g) || []).length;
+  if (digits >= 5 && letters < 20) return true;
+  if (/^(\d+\s*){3,}/.test(text)) return true;
+  if (text.length < 8) return true;
+  return false;
+}
+
+function cleanSentence(value: string, maxLength = 260) {
+  const text = String(value || "").replace(/\s+/g, " ").replace(/\s+([,.;:!?])/g, "$1").trim();
+  if (text.length <= maxLength) return text;
+  const cut = text.slice(0, maxLength);
+  const lastStop = Math.max(cut.lastIndexOf("."), cut.lastIndexOf(";"), cut.lastIndexOf(","));
+  if (lastStop > 80) return cut.slice(0, lastStop).trim();
+  return cut.trim();
+}
+
+function uniqueStrings(values: unknown[], max = 8): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    const text = cleanSentence(String(value || ""));
+    if (!text) continue;
+    const key = normalizeText(text);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(text);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+function getFactMemory(fact: any) {
+  return {
+    previous_questions: uniqueStrings(fact.previous_questions || [], 6),
+    previous_answers: uniqueStrings(fact.previous_answers || [], 6),
+    answer_summaries: uniqueStrings(fact.answer_summaries || [], 6),
+    validated_findings: uniqueStrings([...(fact.validated_findings || []), ...(fact.evidence_refs || [])], 6),
+    open_hypotheses: uniqueStrings(fact.open_hypotheses || [], 6),
+    contradictions: uniqueStrings(fact.contradiction_notes || [], 6),
+    next_question_hints: uniqueStrings(fact.next_question_hints || [], 6),
+  };
+}
+
+function buildBetterRawSignal(fact: any, dimension: number) {
+  const preferred = fact.raw_signal || fact.finding || fact.prudent_hypothesis || fact.source_excerpt || "";
+  if (!isWeakRawSignal(preferred)) return cleanSentence(preferred);
+  const fallback = buildConstatFromFact(fact);
+  if (!isWeakRawSignal(fallback)) return cleanSentence(fallback);
+  const risk = fact.managerial_risk || buildRiskFromFact(fact, dimension);
+  if (!isWeakRawSignal(risk)) return cleanSentence(risk);
+  return cleanSentence(String(fact.theme || "Signal à clarifier"));
+}
+
+function questionSimilarity(a: string, b: string) {
+  const aa = normalizeText(a).split(" ").filter((x) => x.length > 2);
+  const bb = normalizeText(b).split(" ").filter((x) => x.length > 2);
+  if (aa.length === 0 || bb.length === 0) return 0;
+  const setA = new Set(aa);
+  const setB = new Set(bb);
+  let common = 0;
+  for (const token of setA) if (setB.has(token)) common += 1;
+  return common / Math.max(setA.size, setB.size);
+}
+
+function isGenericQuestion(question: string) {
+  const q = normalizeText(question);
+  if (!q) return true;
+  const forbidden = [
+    "quel est aujourd hui le point le moins maitrise",
+    "quel est le point le moins maitrise",
+    "pouvez vous preciser ce point",
+    "comment expliquez vous ce sujet",
+    "que pouvez vous dire sur",
+  ];
+  return forbidden.some((f) => q.includes(f));
+}
+
+function rememberPlannedQuestion(coverage: CoverageState, q: FactBackedQuestion) {
+  const factRef: any = coverage.fact_inventory.find((f) => String(f.id) === q.fact_id);
+  if (!factRef) return;
+  const angle = String(q.intended_angle || "").trim() as any;
+  if (!Array.isArray(factRef.asked_angles)) factRef.asked_angles = [];
+  if (!Array.isArray(factRef.missing_angles)) factRef.missing_angles = [];
+  if (angle) {
+    const lowerAngle = String(angle).toLowerCase();
+    if (!factRef.asked_angles.some((a: any) => String(a || "").trim().toLowerCase() === lowerAngle)) {
+      factRef.asked_angles.push(angle);
+    }
+    factRef.missing_angles = factRef.missing_angles.filter((a: any) => String(a || "").trim().toLowerCase() !== lowerAngle);
+    factRef.last_planned_angle = angle;
+  }
+  if (!Array.isArray(factRef.previous_questions)) factRef.previous_questions = [];
+  const existing = factRef.previous_questions.some((x: string) => normalizeText(x) === normalizeText(q.question));
+  if (!existing) {
+    factRef.previous_questions.push(q.question);
+    factRef.previous_questions = factRef.previous_questions.slice(-10);
+  }
+  factRef.progress = factRef.progress ?? "questioned";
+}
+
+function hasUsefulMemory(fact: any) {
+  return (Array.isArray(fact.previous_answers) && fact.previous_answers.length > 0) ||
+    (Array.isArray(fact.answer_summaries) && fact.answer_summaries.length > 0) ||
+    (Array.isArray(fact.validated_findings) && fact.validated_findings.length > 0) ||
+    (Array.isArray(fact.evidence_refs) && fact.evidence_refs.length > 0);
+}
+
+function scoreCandidateFact(fact: any, iteration: number) {
+  let score = 0;
+  score += Number(fact.criticality_score || 0);
+  score += Number(fact.confidence_score || 0) / 5;
+  if (Array.isArray(fact.missing_angles)) score += fact.missing_angles.length * 8;
+  if (iteration >= 2 && hasUsefulMemory(fact)) score += 25;
+  if (iteration >= 3 && hasUsefulMemory(fact)) score += 20;
+  score -= Number(fact.asked_count || 0) * 8;
+  return score;
+}
+
 export async function buildQuestionBatchLLM(params: {
   extractedText: string;
   coverage: CoverageState;
@@ -47,154 +150,68 @@ export async function buildQuestionBatchLLM(params: {
   mode: string;
 }): Promise<FactBackedQuestion[]> {
   const { coverage, dimension, iteration, mode } = params;
-  // Select the next facts to question.  Different versions of selectFactsForIteration
-  // return either an array directly or an object with a facts/selectedFacts property.
   const selection: any = selectFactsForIteration(coverage, dimension, iteration, mode);
-  let facts: any[] =
-    Array.isArray(selection)
-      ? selection
-      : Array.isArray(selection?.facts)
-      ? selection.facts
-      : Array.isArray(selection?.selectedFacts)
-      ? selection.selectedFacts
-      : [];
-  if (!facts || facts.length === 0) {
-    return [];
-  }
-  // Build fact summaries for the LLM.  The summary includes an ID, theme,
-  // a raw signal (constat), the associated managerial risk and the recommended
-  // entry angle.  We rely on buildConstatFromFact and buildRiskFromFact for
-  // consistency with the rest of the system.
-  // Build fact summaries for the LLM.  The summary includes an ID, theme,
-  // a raw signal (constat), the associated managerial risk, the recommended
-  // entry angle and the current progress on the fact.  When available on
-  // the fact object, we prefer the raw_signal and managerial_risk values
-  // captured during initial extraction (to preserve phrasing), otherwise
-  // fall back to heuristics via buildConstatFromFact and buildRiskFromFact.
-  // Filter out facts that have no remaining angles to explore.  If missing_angles is
-  // defined and empty, it means all angles have been covered; skip these facts.
-  const candidateFacts = facts.filter((f: any) => {
-    if (Array.isArray(f.missing_angles)) {
-      return f.missing_angles.length > 0;
-    }
-    return true;
-  });
-  // Override facts with the filtered list for the rest of the function.  This ensures
-  // that mapping and deduplication operate only on facts that still have missing angles.
-  facts = candidateFacts;
-  // Rebuild summaries for the remaining facts.  Prefer raw_signal or finding when
-  // available to avoid injecting numeric codes from observed_element.  Carry over
-  // progress and missing_angles hints for the question generator.
-  const summaries: FactSummary[] = candidateFacts.map((fact: any) => {
-    const rawSignal = fact.raw_signal || fact.finding || buildConstatFromFact(fact);
-    const managerialRisk = fact.managerial_risk || buildRiskFromFact(fact, dimension);
-    const summary: FactSummary = {
-      id: String(fact.id),
-      theme: String(fact.theme || ""),
-      raw_signal: String(rawSignal),
-      managerial_risk: String(managerialRisk),
-      recommended_entry_angle: fact.recommended_entry_angle || "mechanism",
-    };
-    if (fact.progress) {
-      summary.progress = String(fact.progress);
-    }
-    if (Array.isArray(fact.missing_angles)) {
-      summary.missing_angles = fact.missing_angles.map((a: any) => String(a));
-    }
-    return summary;
-  });
-  // Generate questions via the LLM.  The generator returns up to two
-  // questions per fact in a strict JSON format.
-  const generated = await generateQuestionBatch({
-    facts: summaries,
-    dimension,
-    iteration,
-  });
-  // Map generated questions back into the FactBackedQuestion structure.  We
-  // lookup the original fact to reconstruct the constat and risk fields and
-  // ensure the theme is preserved.
+  let facts: any[] = Array.isArray(selection) ? selection : Array.isArray(selection?.facts) ? selection.facts : Array.isArray(selection?.selectedFacts) ? selection.selectedFacts : [];
+  if (!facts || facts.length === 0) return [];
+
+  facts = facts
+    .filter((f: any) => Array.isArray(f.missing_angles) ? f.missing_angles.length > 0 : true)
+    .sort((a: any, b: any) => scoreCandidateFact(b, iteration) - scoreCandidateFact(a, iteration));
+
+  if (facts.length === 0) return [];
+
+  const summaries: FactSummary[] = facts.map((fact: any) => ({
+    id: String(fact.id),
+    theme: String(fact.theme || ""),
+    raw_signal: buildBetterRawSignal(fact, dimension),
+    managerial_risk: cleanSentence(fact.managerial_risk || buildRiskFromFact(fact, dimension)),
+    recommended_entry_angle: String(fact.recommended_entry_angle || fact.last_planned_angle || fact.missing_angles?.[0] || "mechanism"),
+    progress: fact.progress ? String(fact.progress) : undefined,
+    missing_angles: Array.isArray(fact.missing_angles) ? fact.missing_angles.map((a: any) => String(a)) : undefined,
+    asked_angles: Array.isArray(fact.asked_angles) ? fact.asked_angles.map((a: any) => String(a)) : undefined,
+    ...getFactMemory(fact),
+  }));
+
+  const generated = await generateQuestionBatch({ facts: summaries, dimension, iteration });
+
   const batch: FactBackedQuestion[] = generated.map((q) => {
-    const fact: any = facts.find((f) => String(f.id) === q.fact_id) || {
-      id: q.fact_id,
-      theme: q.theme,
-    };
+    const fact: any = facts.find((f) => String(f.id) === q.fact_id) || { id: q.fact_id, theme: q.theme };
     return {
       fact_id: q.fact_id,
-      theme: q.theme,
-      question: q.question,
-      intended_angle: q.intended_angle,
-      constat: buildConstatFromFact(fact),
-      risque_managerial: buildRiskFromFact(fact, dimension),
+      theme: q.theme || String(fact.theme || ""),
+      question: cleanSentence(q.question, 280),
+      intended_angle: q.intended_angle as any,
+      constat: buildBetterRawSignal(fact, dimension),
+      risque_managerial: cleanSentence(fact.managerial_risk || buildRiskFromFact(fact, dimension)),
     } as FactBackedQuestion;
   });
-  // Deduplicate questions both within this batch and against the questions
-  // already asked in the current coverage bucket.  We normalise the question
-  // strings to lowercase to avoid duplicates due to casing or whitespace.
+
   const dimKey = toDimensionKey(dimension);
   const bucket = coverage.dimensions[dimKey];
-  const previouslyAsked: string[] = Array.isArray(bucket?.asked)
-    ? bucket.asked
-    : [];
+  const previouslyAsked: string[] = [
+    ...(Array.isArray(bucket?.asked) ? bucket.asked : []),
+    ...coverage.fact_inventory.flatMap((f: any) => Array.isArray(f.previous_questions) ? f.previous_questions : []),
+  ];
+
   const seen = new Set<string>();
   const deduped: FactBackedQuestion[] = [];
   for (const q of batch) {
-    const normalized = String(q.question || "").trim().toLowerCase();
+    const normalized = normalizeText(q.question);
     if (!normalized) continue;
-    // Build a unique key combining fact_id and intended_angle to avoid asking the
-    // same angle on the same fact again.  Normalise the angle to lower case.
-    const angleKey = `${q.fact_id || ""}::${(q.intended_angle || "").trim().toLowerCase()}`;
-    // Skip if we've already added a question with the same text in this batch.
+    if (isGenericQuestion(q.question)) continue;
     if (seen.has(normalized)) continue;
-    // Skip if we've already asked the same question text in a previous iteration.
-    if (
-      previouslyAsked.some(
-        (x) => String(x || "").trim().toLowerCase() === normalized
-      )
-    ) {
-      continue;
-    }
-    // Skip if the same fact and angle have been targeted previously (fact.asked_angles contains intended angle).
-    const factRef = coverage.fact_inventory.find((f) => String(f.id) === q.fact_id);
-    const lowerAngle = (q.intended_angle || "").trim().toLowerCase();
-    if (
-      factRef &&
-      Array.isArray(factRef.asked_angles) &&
-      factRef.asked_angles.some((a: any) => String(a || "").trim().toLowerCase() === lowerAngle)
-    ) {
-      continue;
-    }
+    const factRef: any = coverage.fact_inventory.find((f) => String(f.id) === q.fact_id);
+    const lowerAngle = String(q.intended_angle || "").trim().toLowerCase();
+    if (factRef && lowerAngle && Array.isArray(factRef.asked_angles) && factRef.asked_angles.some((a: any) => String(a || "").trim().toLowerCase() === lowerAngle)) continue;
+    const tooSimilar = previouslyAsked.some((old) => normalizeText(old) === normalized || questionSimilarity(old, q.question) >= 0.72);
+    if (tooSimilar) continue;
     seen.add(normalized);
     deduped.push(q);
   }
-  // Limit the number of questions to the expected count for this iteration and mode.
+
   const expectedCount = expectedQuestionCount(iteration, mode as any);
   const finalBatch = deduped.slice(0, expectedCount);
-  // Immediately update the asked_angles and missing_angles on each targeted fact.  Without
-  // this, a fact may be selected again in the next iteration for the same angle when
-  // the analysis step fails to mark the angle as covered.  We normalise angles
-  // to lowercase for comparison and ensure asked_angles is initialised.
-  for (const q of finalBatch) {
-    const factRef = coverage.fact_inventory.find((f) => String(f.id) === q.fact_id);
-    if (!factRef) continue;
-    const angle = String(q.intended_angle || "").trim();
-    if (!angle) continue;
-    const lowerAngle = angle.toLowerCase();
-    // Initialise asked_angles and missing_angles arrays if needed.
-    if (!Array.isArray(factRef.asked_angles)) factRef.asked_angles = [];
-    if (!Array.isArray(factRef.missing_angles)) factRef.missing_angles = [];
-    // Append the angle to asked_angles if it hasn't been recorded yet.
-    if (!factRef.asked_angles.some((a: any) => String(a || "").trim().toLowerCase() === lowerAngle)) {
-      factRef.asked_angles.push(angle);
-    }
-    // Remove the angle from missing_angles to avoid reselection in subsequent iterations.
-    factRef.missing_angles = factRef.missing_angles.filter((a: any) => {
-      return String(a || "").trim().toLowerCase() !== lowerAngle;
-    });
-  }
-
-  // Update coverage after the batch.  This records the questions, themes,
-  // targeted fact ids and recent angles in the coverage bucket.  It also
-  // increments asked_count for the underlying facts.
+  for (const q of finalBatch) rememberPlannedQuestion(coverage, q);
   updateCoverageAfterBatch(coverage, dimension, iteration, finalBatch);
   updateFactAskedCounter(coverage, finalBatch);
   return finalBatch;

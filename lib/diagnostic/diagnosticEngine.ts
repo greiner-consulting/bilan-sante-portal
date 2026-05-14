@@ -1,17 +1,3 @@
-// Modified diagnosticEngine.ts to use LLM-based question generation
-
-/*
- * This file is a copy of the original diagnosticEngine.ts from the
- * bilan‑sante‑portal repository. It has been modified to replace the
- * deterministic question generation with an LLM‑powered pipeline.
- *
- * All references to buildQuestionBatch now point to the function defined
- * in questionBatchLLM.ts. This module selects facts via selectFactsForIteration
- * and uses OpenAI to generate tailored questions. The API surface is
- * preserved so that consumers of runDiagnosticEngine do not need to
- * change their usage. See questionBatchLLM.ts for details.
- */
-
 import { adminSupabase } from "@/lib/supabaseServer";
 import OpenAI from "openai";
 
@@ -60,7 +46,7 @@ import {
   updateFactAskedCounter,
 } from "@/lib/diagnostic/diagnosticState";
 
-// Import ensureFactInventory from the original planner but use our LLM based question builder
+
 import { ensureFactInventory } from "@/lib/diagnostic/diagnosticQuestionPlanner";
 import { buildQuestionBatchLLM as buildQuestionBatch } from "@/lib/diagnostic/questionBatchLLM";
 
@@ -131,12 +117,9 @@ function normalizeAngle(value: string): SignalAngle | null {
   if (["economics", "economic", "economique"].includes(x)) return "economics";
   if (["frequency", "frequence"].includes(x)) return "frequency";
   if (
-    [
-      "feedback",
-      "rex",
-      "retour d'experience",
-      "retour d experience",
-    ].includes(x)
+    ["feedback", "rex", "retour d'experience", "retour d experience"].includes(
+      x
+    )
   ) {
     return "feedback";
   }
@@ -182,6 +165,10 @@ function convertBatchToStructuredQuestions(
     fact_id: q.fact_id,
     theme: q.theme,
   }));
+}
+
+function extractThemes(batch: FactBackedQuestion[]): string[] {
+  return batch.map((q: FactBackedQuestion) => q.theme);
 }
 
 function buildHistory(events: Array<{ kind?: string; payload?: any }>): string {
@@ -697,6 +684,123 @@ async function resolveFactsFromAnswer(params: {
     const fact = next.fact_inventory.find((f) => f.id === activeQuestion.fact_id);
 
     if (fact) {
+      const mutableFact = fact as any;
+
+      if (!Array.isArray(mutableFact.previous_questions)) {
+        mutableFact.previous_questions = [];
+      }
+
+      if (!Array.isArray(mutableFact.previous_answers)) {
+        mutableFact.previous_answers = [];
+      }
+
+      if (!Array.isArray(mutableFact.answer_summaries)) {
+        mutableFact.answer_summaries = [];
+      }
+
+      if (!Array.isArray(mutableFact.validated_findings)) {
+        mutableFact.validated_findings = [];
+      }
+
+      if (!Array.isArray(mutableFact.open_hypotheses)) {
+        mutableFact.open_hypotheses = [];
+      }
+
+      if (!Array.isArray(mutableFact.next_question_hints)) {
+        mutableFact.next_question_hints = [];
+      }
+
+      const activeQuestionText = String(activeQuestion.question || "").trim();
+      const userAnswerText = String(userMessage || "").trim();
+
+      if (
+        activeQuestionText &&
+        !mutableFact.previous_questions.some(
+          (q: string) =>
+            String(q || "").trim().toLowerCase() ===
+            activeQuestionText.toLowerCase()
+        )
+      ) {
+        mutableFact.previous_questions.push(activeQuestionText);
+      }
+
+      if (
+        userAnswerText &&
+        !mutableFact.previous_answers.some(
+          (a: string) =>
+            String(a || "").trim().toLowerCase() ===
+            userAnswerText.toLowerCase()
+        )
+      ) {
+        mutableFact.previous_answers.push(userAnswerText);
+      }
+
+      const summaryParts: string[] = [];
+
+      if (analysis.validated_findings.length > 0) {
+        summaryParts.push(...analysis.validated_findings);
+      }
+
+      if (analysis.new_evidences.length > 0) {
+        summaryParts.push(...analysis.new_evidences);
+      }
+
+      if (analysis.open_hypotheses.length > 0) {
+        summaryParts.push(
+          ...analysis.open_hypotheses.map((h) => `Hypothèse ouverte : ${h}`)
+        );
+      }
+
+      const answerSummary =
+        summaryParts.length > 0
+          ? summaryParts.slice(0, 3).join(" / ")
+          : userAnswerText.slice(0, 280);
+
+      if (
+        answerSummary &&
+        !mutableFact.answer_summaries.some(
+          (s: string) =>
+            String(s || "").trim().toLowerCase() ===
+            answerSummary.toLowerCase()
+        )
+      ) {
+        mutableFact.answer_summaries.push(answerSummary);
+      }
+
+      if (analysis.validated_findings.length > 0) {
+        mutableFact.validated_findings = Array.from(
+          new Set([
+            ...mutableFact.validated_findings,
+            ...analysis.validated_findings,
+          ])
+        ).slice(-10);
+      }
+
+      if (analysis.open_hypotheses.length > 0) {
+        mutableFact.open_hypotheses = Array.from(
+          new Set([...mutableFact.open_hypotheses, ...analysis.open_hypotheses])
+        ).slice(-10);
+      }
+
+      if (analysis.next_best_angle) {
+        mutableFact.next_question_hints.push(
+          `Approfondir l’angle suivant : ${analysis.next_best_angle}`
+        );
+      }
+
+      if (analysis.covered_angles && analysis.covered_angles.length > 0) {
+        mutableFact.next_question_hints.push(
+          `Angles déjà couverts : ${analysis.covered_angles.join(", ")}`
+        );
+      }
+
+      mutableFact.previous_questions = mutableFact.previous_questions.slice(-10);
+      mutableFact.previous_answers = mutableFact.previous_answers.slice(-10);
+      mutableFact.answer_summaries = mutableFact.answer_summaries.slice(-10);
+      mutableFact.validated_findings = mutableFact.validated_findings.slice(-10);
+      mutableFact.open_hypotheses = mutableFact.open_hypotheses.slice(-10);
+      mutableFact.next_question_hints = mutableFact.next_question_hints.slice(-10);
+
       if (analysis.validated_findings.length > 0) {
         fact.reasoning_status = "supported";
         fact.confidence_score = Math.min(
@@ -850,7 +954,7 @@ export async function runDiagnosticEngine(
     coverage.global_analysis
   );
 
-  const batch = normalizeQuestionBatch(s.question_batch_json);
+  const batch: FactBackedQuestion[] = normalizeQuestionBatch(s.question_batch_json);
   const questionIndex = Math.max(Number(s.question_index ?? 0), 0);
 
   await admin
@@ -937,7 +1041,7 @@ export async function runDiagnosticEngine(
 
         coverage = refreshDimensionMemory(coverage, nextDimension);
 
-        const nextBatch = await buildQuestionBatch({
+        const nextBatch: FactBackedQuestion[] = await buildQuestionBatch({
           extractedText,
           coverage,
           dimension: nextDimension,
@@ -968,7 +1072,7 @@ ${buildIterationMessage(
   nextDimension,
   nextIteration,
   "normal",
-  nextBatch.map((q) => q.theme)
+  extractThemes(nextBatch)
 )}`,
           nextBatch,
           false
@@ -977,7 +1081,7 @@ ${buildIterationMessage(
 
       const nextIteration = clampIteration(iteration + 1);
 
-      const nextBatch = await buildQuestionBatch({
+      const nextBatch: FactBackedQuestion[] = await buildQuestionBatch({
         extractedText,
         coverage,
         dimension,
@@ -1004,7 +1108,7 @@ ${buildIterationMessage(
           dimension,
           nextIteration,
           "normal",
-          nextBatch.map((q) => q.theme)
+          extractThemes(nextBatch)
         ),
         nextBatch,
         false
@@ -1012,7 +1116,7 @@ ${buildIterationMessage(
     }
 
     if (isNo(normalizedMessage)) {
-      const relaunchBatch = await buildQuestionBatch({
+      const relaunchBatch: FactBackedQuestion[] = await buildQuestionBatch({
         extractedText,
         coverage,
         dimension,
@@ -1038,7 +1142,7 @@ ${buildIterationMessage(
           dimension,
           iteration,
           "reopen_after_no",
-          relaunchBatch.map((q) => q.theme)
+          extractThemes(relaunchBatch)
         ),
         relaunchBatch,
         false
@@ -1054,10 +1158,10 @@ ${buildIterationMessage(
   }
 
   if (phase === "dimension_questions") {
-    let safeBatch = batch;
+    let safeBatch: FactBackedQuestion[] = batch;
 
     if (!hasExpectedBatchSize(batch, iteration, "normal")) {
-      const rebuiltBatch = await buildQuestionBatch({
+      const rebuiltBatch: FactBackedQuestion[] = await buildQuestionBatch({
         extractedText,
         coverage,
         dimension,
@@ -1083,7 +1187,7 @@ ${buildIterationMessage(
           dimension,
           iteration,
           "normal",
-          rebuiltBatch.map((q) => q.theme)
+          extractThemes(rebuiltBatch)
         ),
         rebuiltBatch,
         false
@@ -1186,14 +1290,14 @@ ${buildIterationMessage(
           dimension,
           iteration,
           "normal",
-          safeBatch.map((q) => q.theme)
+          extractThemes(safeBatch)
         ),
         safeBatch,
         false
       );
     }
 
-    const regeneratedBatch = await buildQuestionBatch({
+    const regeneratedBatch: FactBackedQuestion[] = await buildQuestionBatch({
       extractedText,
       coverage,
       dimension,
@@ -1219,7 +1323,7 @@ ${buildIterationMessage(
         dimension,
         iteration,
         "normal",
-        regeneratedBatch.map((q) => q.theme)
+        extractThemes(regeneratedBatch)
       ),
       regeneratedBatch,
       false
