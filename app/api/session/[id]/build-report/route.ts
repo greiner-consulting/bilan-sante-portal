@@ -89,10 +89,7 @@ function normalizeFinalObjectives(raw: unknown) {
     .filter((o: any) => o.objectiveLabel || o.keyIndicator || o.potentialGain);
 }
 
-function buildPreview(params: {
-  row: SessionRow;
-  generatedAt: string;
-}) {
+function buildPreview(params: { row: SessionRow; generatedAt: string }) {
   const { row, generatedAt } = params;
   const diagnostic = normalizeDiagnosticResult(row.diagnostic_result_json);
   const objectives = normalizeFinalObjectives(row.final_objectives_json);
@@ -253,6 +250,191 @@ function buildHtml(preview: ReturnType<typeof buildPreview>) {
 </html>`;
 }
 
+function safeFileName(value: string) {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9._-]+/g, "_")
+    .replace(/_+/g, "_")
+    .slice(0, 80);
+}
+
+function textToUtf16BeHex(text: string) {
+  const input = `\uFEFF${String(text ?? "")}`;
+  const bytes: number[] = [];
+
+  for (let i = 0; i < input.length; i += 1) {
+    const code = input.charCodeAt(i);
+    bytes.push((code >> 8) & 0xff, code & 0xff);
+  }
+
+  return bytes.map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function stripForWrap(value: unknown) {
+  return String(value ?? "")
+    .replace(/\s+/g, " ")
+    .replace(/[^\S\r\n]+/g, " ")
+    .trim();
+}
+
+function wrapText(text: string, maxChars: number) {
+  const words = stripForWrap(text).split(" ").filter(Boolean);
+  const lines: string[] = [];
+  let line = "";
+
+  for (const word of words) {
+    const candidate = line ? `${line} ${word}` : word;
+    if (candidate.length > maxChars && line) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = candidate;
+    }
+  }
+
+  if (line) lines.push(line);
+  return lines;
+}
+
+function buildPdfBase64(preview: ReturnType<typeof buildPreview>) {
+  const pageWidth = 595;
+  const pageHeight = 842;
+  const marginX = 46;
+  const topY = 790;
+  const bottomY = 60;
+  const lineHeight = 14;
+
+  type PdfLine = {
+    text: string;
+    size: number;
+    bold?: boolean;
+    gapBefore?: number;
+  };
+
+  const logicalLines: PdfLine[] = [];
+
+  function addText(text: string, size = 10, bold = false, gapBefore = 0) {
+    const maxChars = size >= 18 ? 45 : size >= 14 ? 60 : 92;
+    const lines = wrapText(text, maxChars);
+
+    if (lines.length === 0) {
+      logicalLines.push({ text: "", size, bold, gapBefore });
+      return;
+    }
+
+    lines.forEach((line, index) => {
+      logicalLines.push({
+        text: line,
+        size,
+        bold,
+        gapBefore: index === 0 ? gapBefore : 0,
+      });
+    });
+  }
+
+  addText(preview.title, 18, true, 0);
+  addText(`Généré le ${preview.generatedAt}`, 9, false, 4);
+
+  for (const section of preview.sections as any[]) {
+    addText(section.title, 14, true, 18);
+
+    for (const paragraph of section.paragraphs ?? []) {
+      addText(paragraph, 10, false, 6);
+    }
+
+    for (const bullet of section.bullets ?? []) {
+      addText(`• ${bullet}`, 10, false, 4);
+    }
+
+    for (const table of section.tables ?? []) {
+      addText(table.title ?? "Tableau", 11, true, 10);
+      addText(table.headers.join(" | "), 9, true, 4);
+
+      for (const row of table.rows ?? []) {
+        addText(row.join(" | "), 9, false, 3);
+      }
+    }
+  }
+
+  const pages: string[] = [];
+  let current = "";
+  let y = topY;
+
+  function newPage() {
+    if (current.trim()) pages.push(current);
+    current = "";
+    y = topY;
+  }
+
+  for (const line of logicalLines) {
+    y -= line.gapBefore ?? 0;
+
+    if (y < bottomY) {
+      newPage();
+    }
+
+    const font = line.bold ? "F2" : "F1";
+    const hex = textToUtf16BeHex(line.text);
+    current += `BT /${font} ${line.size} Tf ${marginX} ${y} Td <${hex}> Tj ET\n`;
+    y -= lineHeight;
+  }
+
+  if (current.trim()) pages.push(current);
+
+  const objects: string[] = [];
+
+  function addObject(content: string) {
+    objects.push(content);
+    return objects.length;
+  }
+
+  const catalogId = addObject("<< /Type /Catalog /Pages 2 0 R >>");
+  const pagesId = addObject("PAGES_PLACEHOLDER");
+  const fontRegularId = addObject("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
+  const fontBoldId = addObject("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>");
+
+  const pageIds: number[] = [];
+
+  for (const pageContent of pages) {
+    const contentId = addObject(
+      `<< /Length ${Buffer.byteLength(pageContent, "utf8")} >>\nstream\n${pageContent}endstream`
+    );
+
+    const pageId = addObject(
+      `<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] /Resources << /Font << /F1 ${fontRegularId} 0 R /F2 ${fontBoldId} 0 R >> >> /Contents ${contentId} 0 R >>`
+    );
+
+    pageIds.push(pageId);
+  }
+
+  objects[pagesId - 1] = `<< /Type /Pages /Kids [${pageIds
+    .map((id) => `${id} 0 R`)
+    .join(" ")}] /Count ${pageIds.length} >>`;
+
+  let pdf = "%PDF-1.4\n";
+  const offsets: number[] = [0];
+
+  objects.forEach((object, index) => {
+    offsets.push(Buffer.byteLength(pdf, "utf8"));
+    pdf += `${index + 1} 0 obj\n${object}\nendobj\n`;
+  });
+
+  const xrefOffset = Buffer.byteLength(pdf, "utf8");
+
+  pdf += `xref\n0 ${objects.length + 1}\n`;
+  pdf += "0000000000 65535 f \n";
+
+  for (let i = 1; i < offsets.length; i += 1) {
+    pdf += `${String(offsets[i]).padStart(10, "0")} 00000 n \n`;
+  }
+
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root ${catalogId} 0 R >>\n`;
+  pdf += `startxref\n${xrefOffset}\n%%EOF`;
+
+  return Buffer.from(pdf, "utf8").toString("base64");
+}
+
 export async function POST(
   _req: Request,
   context: { params: Promise<{ id: string }> }
@@ -280,16 +462,14 @@ export async function POST(
 
     const session = row as SessionRow;
 
-    if (
-      !isBypass() &&
-      String(session.user_id ?? "") !== effectiveUserId
-    ) {
+    if (!isBypass() && String(session.user_id ?? "") !== effectiveUserId) {
       return json({ ok: false, error: "Forbidden" }, 403);
     }
 
     if (
       session.phase !== "report_ready" &&
       session.phase !== "diagnostic_complete" &&
+      session.phase !== "completed" &&
       session.status !== "report_ready" &&
       session.status !== "completed"
     ) {
@@ -319,6 +499,11 @@ export async function POST(
     const generatedAt = new Date().toISOString();
     const preview = buildPreview({ row: session, generatedAt });
     const html = buildHtml(preview);
+    const pdfBase64 = buildPdfBase64(preview);
+
+    const pdfFileName = `${safeFileName(
+      session.source_filename || "rapport-diagnostic"
+    ).replace(/\.docx$/i, "")}_rapport_diagnostic.pdf`;
 
     await admin
       .from("diagnostic_sessions")
@@ -333,12 +518,14 @@ export async function POST(
       ok: true,
       preview,
       html,
+      pdfBase64,
+      pdfFileName,
       compliance: {
         ok: true,
         warnings: [],
         summary: [
           "Rapport construit depuis le moteur lib/diagnostic.",
-          "Aucun appel au moteur lib/bilan-sante.",
+          "PDF généré sans appel au moteur lib/bilan-sante.",
         ],
       },
     });
