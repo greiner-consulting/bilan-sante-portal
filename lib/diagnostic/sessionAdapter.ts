@@ -51,6 +51,25 @@ type PersistedTurn = {
   total?: number | null;
 };
 
+type FinalObjective = {
+  id: string;
+  dimensionId: string | number;
+  objectiveLabel: string;
+  owner: string;
+  keyIndicator: string;
+  dueDate: string;
+  potentialGain: string;
+  gainHypotheses: string[];
+  validationStatus: "proposed" | "validated" | "adjusted" | "refused";
+  quickWin: string;
+};
+
+type FinalObjectiveSet = {
+  header: string;
+  objectives: FinalObjective[];
+  decisionsCapturedAt?: string;
+};
+
 type AssistantPayload = {
   assistant_message: string;
   questions: StructuredQuestion[];
@@ -62,11 +81,17 @@ function normalizeText(value: unknown): string {
   return String(value ?? "").replace(/\s+/g, " ").trim();
 }
 
-function normalizeForMatch(value: unknown): string {
+function normalizeForSearch(value: unknown): string {
   return normalizeText(value)
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase();
+}
+
+function textIncludesAny(text: string, words: string[]) {
+  const normalized = normalizeForSearch(text);
+
+  return words.some((word) => normalized.includes(normalizeForSearch(word)));
 }
 
 function mapDiagnosticPhaseToUiPhase(
@@ -78,6 +103,10 @@ function mapDiagnosticPhaseToUiPhase(
 
   if (phase === "dimension_questions") return "dimension_iteration";
   if (phase === "iteration_validation") return "iteration_validation";
+  if (phase === "final_objectives_validation") {
+    return "final_objectives_validation";
+  }
+  if (phase === "report_ready") return "report_ready";
   if (phase === "diagnostic_complete") return "report_ready";
   if (phase === "completed") return "completed";
 
@@ -104,34 +133,78 @@ function normalizeQuestions(value: unknown): StructuredQuestion[] {
   }));
 }
 
-function isLegacyBilanSanteQuestion(question: StructuredQuestion): boolean {
-  const text = normalizeForMatch(
-    `${question.theme ?? ""} ${question.constat ?? ""} ${
-      question.risque_managerial ?? ""
-    } ${question.question ?? ""}`
-  );
+function normalizeFinalObjectives(raw: unknown): FinalObjectiveSet | null {
+  if (!raw || typeof raw !== "object") return null;
 
-  const legacyMarkers = [
-    "les equipes paraissent adaptees au niveau d activite actuel",
-    "la repartition des roles semble fonctionner au quotidien",
-    "la stabilite de fonctionnement peut etre fragilisee",
-    "le fonctionnement autour de qualite et adequation des equipes tient aujourd hui",
-    "le fonctionnement autour de ressources vs charge tient aujourd hui",
-    "le fonctionnement autour de turnover absenteeisme stabilite tient aujourd hui",
-    "le fonctionnement autour de clarte des roles tient aujourd hui",
-    "quel est aujourd hui le point le moins maitrise",
-    "comment cela se passe t il concretement aujourd hui",
-    "sur qualite et adequation des equipes",
-    "sur ressources vs charge",
-    "sur turnover absenteeisme stabilite",
-  ];
+  const source = raw as any;
+  const values = Array.isArray(source.objectives)
+    ? source.objectives
+    : Array.isArray(raw)
+    ? raw
+    : [];
 
-  return legacyMarkers.some((marker) => text.includes(marker));
-}
+  const objectives: FinalObjective[] = values
+    .map((o: any, index: number): FinalObjective => {
+      const dimensionId = o?.dimensionId ?? o?.dimension ?? "";
 
-function questionBatchLooksLegacy(questions: StructuredQuestion[]): boolean {
-  if (questions.length === 0) return false;
-  return questions.some(isLegacyBilanSanteQuestion);
+      const validationStatus =
+        o?.validationStatus === "validated" ||
+        o?.validationStatus === "adjusted" ||
+        o?.validationStatus === "refused" ||
+        o?.validationStatus === "proposed"
+          ? o.validationStatus
+          : "proposed";
+
+      return {
+        id: String(o?.id ?? `obj-${index + 1}`),
+        dimensionId,
+        objectiveLabel: String(
+          o?.objectiveLabel ?? o?.objectif ?? o?.label ?? ""
+        ).trim(),
+        owner: String(o?.owner ?? o?.responsable ?? "").trim(),
+        keyIndicator: String(o?.keyIndicator ?? o?.indicateur ?? "").trim(),
+        dueDate: String(o?.dueDate ?? o?.echeance ?? "").trim(),
+        potentialGain: String(
+          o?.potentialGain ?? o?.gain_potentiel ?? ""
+        ).trim(),
+        gainHypotheses: Array.isArray(o?.gainHypotheses)
+          ? o.gainHypotheses.map(String).filter(Boolean)
+          : Array.isArray(o?.hypotheses)
+          ? o.hypotheses.map(String).filter(Boolean)
+          : String(o?.hypotheses ?? "").trim()
+          ? [String(o.hypotheses).trim()]
+          : [],
+        validationStatus,
+        quickWin: String(o?.quickWin ?? o?.quick_win ?? "").trim(),
+      };
+    })
+    .filter((o: FinalObjective) =>
+      Boolean(o.objectiveLabel || o.keyIndicator || o.potentialGain)
+    );
+
+  if (objectives.length === 0) {
+    return {
+      header:
+        String(source.header ?? "").trim() ||
+        "Objectifs finaux non encore renseignés.",
+      objectives: [],
+      decisionsCapturedAt:
+        typeof source.decisionsCapturedAt === "string"
+          ? source.decisionsCapturedAt
+          : undefined,
+    };
+  }
+
+  return {
+    header:
+      String(source.header ?? "").trim() ||
+      "Objectifs finaux proposés à partir des dimensions consolidées.",
+    objectives,
+    decisionsCapturedAt:
+      typeof source.decisionsCapturedAt === "string"
+        ? source.decisionsCapturedAt
+        : undefined,
+  };
 }
 
 function mapSessionForUi(row: SessionRow) {
@@ -173,6 +246,10 @@ function buildAssistantMessageFromSession(row: SessionRow): string {
     return "L’itération en cours est terminée. Merci de répondre par oui ou non pour valider la suite.";
   }
 
+  if (uiPhase === "final_objectives_validation") {
+    return "Les objectifs finaux sont proposés. Merci de les valider ou d’indiquer les ajustements souhaités.";
+  }
+
   if (uiPhase === "report_ready") {
     return "Le diagnostic conversationnel est terminé. Vous pouvez maintenant construire le rapport.";
   }
@@ -184,12 +261,249 @@ function buildAssistantMessageFromSession(row: SessionRow): string {
   return "Le contexte de diagnostic est chargé.";
 }
 
+function buildZoneContext(params: {
+  zone: string;
+  dimension: {
+    cause_racine?: string;
+    constats_cles?: string[];
+    validated_findings?: string[];
+    evidences?: string[];
+    signals?: string[];
+  };
+}) {
+  const { zone, dimension } = params;
+
+  return [
+    zone,
+    dimension.cause_racine,
+    ...(dimension.constats_cles || []),
+    ...(dimension.validated_findings || []),
+    ...(dimension.evidences || []),
+    ...(dimension.signals || []),
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function inferZoneManagerialRisk(params: {
+  zone: string;
+  dimension: any;
+}) {
+  const { zone, dimension } = params;
+  const context = buildZoneContext({ zone, dimension });
+
+  if (
+    textIncludesAny(context, [
+      "florian",
+      "dominique",
+      "encadrement",
+      "responsable",
+      "chef d agence",
+      "supervision",
+      "delegation",
+      "responsabilite",
+      "rattachement",
+      "manager",
+      "roles",
+      "role",
+      "hiérarchique",
+      "hierarchique",
+    ])
+  ) {
+    return "Le risque managérial porte sur une responsabilité insuffisamment sécurisée : les arbitrages, la supervision et le suivi opérationnel peuvent dépendre de personnes clés sans cadre de délégation suffisamment explicite.";
+  }
+
+  if (
+    textIncludesAny(context, [
+      "qhse",
+      "qualite",
+      "qualité",
+      "hygiene",
+      "hygiène",
+      "securite",
+      "sécurité",
+      "environnement",
+      "hors site",
+      "distance",
+      "regional",
+      "régional",
+    ])
+  ) {
+    return "Le risque managérial porte sur une maîtrise locale incomplète : une fonction support trop distante peut réduire la réactivité, affaiblir le contrôle terrain et créer des angles morts dans le suivi quotidien.";
+  }
+
+  if (
+    textIncludesAny(context, [
+      "marge",
+      "rentabilite",
+      "rentabilité",
+      "ebitda",
+      "cout",
+      "coût",
+      "taux horaire",
+      "main d oeuvre",
+      "main-d oeuvre",
+      "imputation",
+      "affaire",
+      "affaires",
+    ])
+  ) {
+    return "Le risque managérial porte sur une lecture économique insuffisamment fiable : les décisions peuvent être prises sur des marges, coûts ou imputations incomplets, avec un risque d’arbitrage commercial ou opérationnel mal fondé.";
+  }
+
+  if (
+    textIncludesAny(context, [
+      "planning",
+      "charge",
+      "capacite",
+      "capacité",
+      "ressources",
+      "heures",
+      "productivite",
+      "productivité",
+      "chantier",
+      "chantiers",
+    ])
+  ) {
+    return "Le risque managérial porte sur un pilotage charge-capacité insuffisamment maîtrisé : les ajustements de ressources peuvent rester réactifs, dépendants des personnes, et déconnectés d’une vision consolidée des besoins.";
+  }
+
+  if (
+    textIncludesAny(context, [
+      "commercial",
+      "pipeline",
+      "client",
+      "clients",
+      "devis",
+      "go no go",
+      "offre",
+      "offres",
+      "conversion",
+      "prix",
+      "marché",
+      "marche",
+    ])
+  ) {
+    return "Le risque managérial porte sur une discipline commerciale incomplète : les priorités, arbitrages de prix et décisions de poursuite peuvent manquer de formalisation ou de traçabilité économique.";
+  }
+
+  return "Le risque managérial porte sur une zone de pilotage encore insuffisamment sécurisée : les responsabilités, les indicateurs et les arbitrages doivent être clarifiés pour réduire la dépendance aux pratiques individuelles.";
+}
+
+function inferZoneConsequence(params: {
+  zone: string;
+  dimension: any;
+}) {
+  const { zone, dimension } = params;
+  const context = buildZoneContext({ zone, dimension });
+
+  if (
+    textIncludesAny(context, [
+      "florian",
+      "dominique",
+      "encadrement",
+      "responsable",
+      "chef d agence",
+      "supervision",
+      "delegation",
+      "responsabilite",
+      "rattachement",
+      "manager",
+      "roles",
+      "role",
+      "hiérarchique",
+      "hierarchique",
+    ])
+  ) {
+    return "La conséquence possible est une fragilité d’exécution : décisions ralenties, arbitrages implicites, surcharge du chef d’agence ou perte de continuité en cas d’absence ou de montée en charge.";
+  }
+
+  if (
+    textIncludesAny(context, [
+      "qhse",
+      "qualite",
+      "qualité",
+      "hygiene",
+      "hygiène",
+      "securite",
+      "sécurité",
+      "environnement",
+      "hors site",
+      "distance",
+      "regional",
+      "régional",
+    ])
+  ) {
+    return "La conséquence possible est une moindre maîtrise terrain : délais de traitement, défaut de prévention, non-conformités détectées tardivement ou difficulté à intégrer les exigences QHSE dans les routines locales.";
+  }
+
+  if (
+    textIncludesAny(context, [
+      "marge",
+      "rentabilite",
+      "rentabilité",
+      "ebitda",
+      "cout",
+      "coût",
+      "taux horaire",
+      "main d oeuvre",
+      "main-d oeuvre",
+      "imputation",
+      "affaire",
+      "affaires",
+    ])
+  ) {
+    return "La conséquence possible est une dégradation de la performance économique : marge réelle mal anticipée, écarts détectés trop tard, plans d’action retardés et risque de perte non objectivée affaire par affaire.";
+  }
+
+  if (
+    textIncludesAny(context, [
+      "planning",
+      "charge",
+      "capacite",
+      "capacité",
+      "ressources",
+      "heures",
+      "productivite",
+      "productivité",
+      "chantier",
+      "chantiers",
+    ])
+  ) {
+    return "La conséquence possible est une perte de productivité : sous-charge ou surcharge non anticipée, arbitrages tardifs, dérive des heures et difficulté à sécuriser les engagements de production.";
+  }
+
+  if (
+    textIncludesAny(context, [
+      "commercial",
+      "pipeline",
+      "client",
+      "clients",
+      "devis",
+      "go no go",
+      "offre",
+      "offres",
+      "conversion",
+      "prix",
+      "marché",
+      "marche",
+    ])
+  ) {
+    return "La conséquence possible est une fragilisation du développement commercial : priorités dispersées, opportunités mal qualifiées, décisions de prix insuffisamment sécurisées et prévision de chiffre d’affaires moins fiable.";
+  }
+
+  return "La conséquence possible est le maintien d’un angle mort dans le pilotage : les écarts peuvent être détectés trop tard et les actions correctives manquer de responsable, de calendrier ou d’indicateur.";
+}
+
 function mapDiagnosticResultToFrozenDimensions(row: SessionRow) {
   const result = normalizeDiagnosticResult(row.diagnostic_result_json);
 
   return result.dimensions.map((dimension) => ({
     dimensionId: dimension.dimension,
-    score: Math.round((dimension.coverage_score || 0) / 20),
+    score: Math.max(
+      0,
+      Math.min(5, Math.round((dimension.coverage_score || 0) / 20))
+    ),
     consolidatedFindings: [
       dimension.constats_cles[0] || "Constat non consolidé.",
       dimension.constats_cles[1] || "Constat non consolidé.",
@@ -202,10 +516,8 @@ function mapDiagnosticResultToFrozenDimensions(row: SessionRow) {
       .slice(0, 6)
       .map((zone) => ({
         constat: zone,
-        risqueManagerial:
-          "Cette zone reste insuffisamment pilotée au regard du diagnostic.",
-        consequence:
-          "Le risque est de maintenir un angle mort dans la trajectoire de redressement.",
+        risqueManagerial: inferZoneManagerialRisk({ zone, dimension }),
+        consequence: inferZoneConsequence({ zone, dimension }),
       })),
     frozenAt: row.updated_at ?? new Date().toISOString(),
     summary: dimension.cause_racine || undefined,
@@ -216,7 +528,7 @@ function mapDiagnosticResultToFrozenDimensions(row: SessionRow) {
   }));
 }
 
-function eventToTurn(
+function eventToTurns(
   event: {
     id?: string | number | null;
     kind?: string | null;
@@ -272,8 +584,12 @@ function eventToTurn(
     const questionText = normalizeText(question.question);
     const factId = normalizeText(payload.fact_id ?? question.fact_id);
     const theme = normalizeText(question.theme);
-    const questionId = `${factId || id}-${payload.question_index ?? index}`;
+    const questionIndex =
+      typeof payload.question_index !== "undefined"
+        ? Number(payload.question_index)
+        : index;
 
+    const questionId = `${factId || id}-${questionIndex}`;
     const out: PersistedTurn[] = [];
 
     if (questionText) {
@@ -289,10 +605,7 @@ function eventToTurn(
         questionId,
         signalId: factId || null,
         theme: theme || null,
-        ordinal:
-          typeof payload.question_index !== "undefined"
-            ? Number(payload.question_index) + 1
-            : null,
+        ordinal: Number.isFinite(questionIndex) ? questionIndex + 1 : null,
         total: null,
       });
     }
@@ -352,81 +665,33 @@ async function loadDiagnosticEvents(sessionId: string): Promise<PersistedTurn[]>
 
   for (let i = 0; i < (data ?? []).length; i += 1) {
     const event = data?.[i];
-    const eventTurns = eventToTurn(event as any, i);
-    turns.push(...eventTurns);
+    turns.push(...eventToTurns(event as any, i));
   }
 
   return turns;
-}
-
-async function clearLegacyQuestionState(sessionId: string) {
-  const admin = adminSupabase();
-
-  await admin
-    .from("diagnostic_sessions")
-    .update({
-      question_batch_json: [],
-      question_index: 0,
-      coverage_json: null,
-      global_analysis_json: null,
-      diagnostic_result_json: null,
-      phase: "dimension_questions",
-      status: "in_progress",
-      dimension: 1,
-      iteration: 1,
-    })
-    .eq("id", sessionId);
-}
-
-async function ensureDiagnosticBatch(params: {
-  sessionId: string;
-  userId: string;
-  row: SessionRow;
-}): Promise<SessionRow> {
-  if (!params.row.extracted_text) return params.row;
-
-  let session = mapSessionForUi(params.row);
-  let questions = normalizeQuestions(params.row.question_batch_json);
-
-  const mustGenerate =
-    session.phase === "dimension_iteration" &&
-    (questions.length === 0 || questionBatchLooksLegacy(questions));
-
-  if (!mustGenerate) return params.row;
-
-  if (questionBatchLooksLegacy(questions)) {
-    await clearLegacyQuestionState(params.sessionId);
-  }
-
-  await runDiagnosticEngine(params.sessionId, params.userId, "");
-
-  return loadSessionRow(params.sessionId);
 }
 
 export async function readDiagnosticSessionContext(params: {
   sessionId: string;
   userId: string;
 }) {
-  let row = await loadSessionRow(params.sessionId);
-  row = await ensureDiagnosticBatch({
-    sessionId: params.sessionId,
-    userId: params.userId,
-    row,
-  });
-
+  const row = await loadSessionRow(params.sessionId);
   const session = mapSessionForUi(row);
   const questions = normalizeQuestions(row.question_batch_json);
   const history = await loadDiagnosticEvents(params.sessionId);
+  const finalObjectives = normalizeFinalObjectives(row.final_objectives_json);
 
   return {
     ok: true,
     session,
     engine_state: {
       assistant_message: buildAssistantMessageFromSession(row),
-      needs_validation: session.phase === "iteration_validation",
+      needs_validation:
+        session.phase === "iteration_validation" ||
+        session.phase === "final_objectives_validation",
       question_batch_json:
         session.phase === "dimension_iteration" ? questions : [],
-      final_objectives_json: row.final_objectives_json ?? null,
+      final_objectives_json: finalObjectives,
       consolidation_json: mapDiagnosticResultToFrozenDimensions(row),
       conversation_history_json: history,
       theme_coverage_json: [],
@@ -437,7 +702,6 @@ export async function readDiagnosticSessionContext(params: {
         dimension: row.dimension,
         iteration: row.iteration,
         question_index: row.question_index,
-        legacy_batch_rejected: questionBatchLooksLegacy(questions),
       },
     },
   };
@@ -477,7 +741,7 @@ export async function bootstrapOrReadDiagnosticSession(params: {
   sessionId: string;
   userId: string;
 }) {
-  let row = await loadSessionRow(params.sessionId);
+  const row = await loadSessionRow(params.sessionId);
 
   if (!row.extracted_text) {
     const session = mapSessionForUi(row);
@@ -498,26 +762,30 @@ export async function bootstrapOrReadDiagnosticSession(params: {
     };
   }
 
-  row = await ensureDiagnosticBatch({
-    sessionId: params.sessionId,
-    userId: params.userId,
-    row,
-  });
-
   const questions = normalizeQuestions(row.question_batch_json);
   const session = mapSessionForUi(row);
 
-  if (questions.length > 0 && !questionBatchLooksLegacy(questions)) {
+  if (
+    questions.length > 0 ||
+    session.phase === "iteration_validation" ||
+    session.phase === "final_objectives_validation" ||
+    session.phase === "report_ready" ||
+    session.phase === "completed"
+  ) {
     return {
       assistant: {
         assistant_message: buildAssistantMessageFromSession(row),
         questions: session.phase === "dimension_iteration" ? questions : [],
-        needs_validation: session.phase === "iteration_validation",
+        needs_validation:
+          session.phase === "iteration_validation" ||
+          session.phase === "final_objectives_validation",
         session,
       },
       assistant_message: buildAssistantMessageFromSession(row),
       questions: session.phase === "dimension_iteration" ? questions : [],
-      needs_validation: session.phase === "iteration_validation",
+      needs_validation:
+        session.phase === "iteration_validation" ||
+        session.phase === "final_objectives_validation",
       session,
     };
   }

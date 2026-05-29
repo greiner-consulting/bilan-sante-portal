@@ -167,10 +167,12 @@ type BuildReportApiResponse = {
   ok: boolean;
   preview?: PreviewDiagnosticReport;
   html?: string;
+  htmlFileName?: string;
   pdfBase64?: string;
   pdfFileName?: string;
   docxBase64?: string;
   docxFileName?: string;
+  report?: unknown;
   compliance?: {
     ok: boolean;
     warnings?: Array<{ code?: string; message?: string } | string>;
@@ -235,10 +237,12 @@ function displayFileName(value?: string | null): string {
 
 function normalizeQuestions(value: unknown): StructuredQuestion[] {
   if (!Array.isArray(value)) return [];
+
   return value
     .filter((item) => item && typeof item === "object")
     .map((item) => {
       const row = item as Partial<StructuredQuestion>;
+
       return {
         fact_id: typeof row.fact_id === "string" ? row.fact_id : undefined,
         theme: typeof row.theme === "string" ? row.theme : undefined,
@@ -261,6 +265,7 @@ function mergeSessionState(
   fallbackId?: string
 ): SessionState | null {
   if (!current && !next && !fallbackId) return null;
+
   return {
     ...(current ?? { id: fallbackId ?? "" }),
     ...(next ?? {}),
@@ -355,11 +360,14 @@ function buildPlaceholder(params: {
   if (params.phase === "final_objectives_validation") {
     return 'Exemple : 1: validé | 2: refusé | 3: ajusté | objectif=... | indicateur=...';
   }
+
   if (params.currentQuestion) return "Votre réponse à la question affichée...";
   if (params.awaitingValidation) return 'Répondez "oui" ou "non"...';
+
   if (params.phase === "report_ready") {
     return "Le protocole est terminé. Vous pouvez construire le rapport PDF.";
   }
+
   return "Votre réponse...";
 }
 
@@ -406,7 +414,9 @@ function shouldAdoptServerHistory(current: DisplayMessage[], next: DisplayMessag
 
   const currentLast = current[current.length - 1];
   const nextLast = next[next.length - 1];
+
   if (!currentLast || !nextLast) return false;
+
   return next.length === current.length && nextLast.key !== currentLast.key;
 }
 
@@ -446,8 +456,10 @@ function buildConversationBlocks(messages: DisplayMessage[]): ConversationBlock[
 
       for (let i = blocks.length - 1; i >= 0; i -= 1) {
         const candidate = blocks[i];
+
         if (candidate.kind !== "question_exchange") continue;
         if (candidate.answer) continue;
+
         candidate.answer = message;
         break;
       }
@@ -470,20 +482,47 @@ function buildConversationBlocks(messages: DisplayMessage[]): ConversationBlock[
 }
 
 function triggerBinaryDownload(base64: string, fileName: string, mimeType: string) {
-  const byteCharacters = atob(base64);
+  const cleanBase64 = String(base64 || "").includes(",")
+    ? String(base64).split(",").pop() || ""
+    : String(base64 || "");
+
+  if (!cleanBase64) {
+    throw new Error("Fichier vide : aucun contenu base64 reçu.");
+  }
+
+  const byteCharacters = atob(cleanBase64);
   const byteNumbers = new Array(byteCharacters.length);
+
   for (let i = 0; i < byteCharacters.length; i += 1) {
     byteNumbers[i] = byteCharacters.charCodeAt(i);
   }
+
   const byteArray = new Uint8Array(byteNumbers);
   const blob = new Blob([byteArray], { type: mimeType });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
+
+  anchor.href = url;
+  anchor.download = fileName || "rapport-diagnostic.pdf";
+
+  document.body.appendChild(anchor);
+  anchor.click();
+  document.body.removeChild(anchor);
+
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
+}
+
+function triggerTextDownload(content: string, fileName: string, mimeType: string) {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+
   anchor.href = url;
   anchor.download = fileName;
   document.body.appendChild(anchor);
   anchor.click();
   document.body.removeChild(anchor);
+
   setTimeout(() => URL.revokeObjectURL(url), 1500);
 }
 
@@ -491,6 +530,7 @@ function ReportSectionView({ section }: { section: PreviewSection }) {
   return (
     <section className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
       <h3 className="text-base font-semibold text-slate-900">{section.title}</h3>
+
       {Array.isArray(section.paragraphs) && section.paragraphs.length > 0 && (
         <div className="space-y-2 text-sm leading-6 text-slate-800">
           {section.paragraphs.map((paragraph, index) => (
@@ -500,6 +540,7 @@ function ReportSectionView({ section }: { section: PreviewSection }) {
           ))}
         </div>
       )}
+
       {Array.isArray(section.bullets) && section.bullets.length > 0 && (
         <ul className="list-disc space-y-1 pl-5 text-sm leading-6 text-slate-800">
           {section.bullets.map((bullet, index) => (
@@ -507,6 +548,7 @@ function ReportSectionView({ section }: { section: PreviewSection }) {
           ))}
         </ul>
       )}
+
       {Array.isArray(section.tables) && section.tables.length > 0 && (
         <div className="space-y-4">
           {section.tables.map((table, tableIndex) => (
@@ -519,6 +561,7 @@ function ReportSectionView({ section }: { section: PreviewSection }) {
                   {table.title}
                 </div>
               )}
+
               <div className="overflow-x-auto">
                 <table className="min-w-full border-collapse text-sm">
                   <thead>
@@ -569,6 +612,7 @@ function FrozenDimensionCard({ dimension }: { dimension: FrozenDimension }) {
             Gelée le {formatDateTime(dimension.frozenAt)}
           </div>
         </div>
+
         <div className="inline-flex items-center rounded-full bg-slate-100 px-3 py-1 text-sm font-medium text-slate-800">
           Score : {dimension.score}/5
         </div>
@@ -611,12 +655,14 @@ function FrozenDimensionCard({ dimension }: { dimension: FrozenDimension }) {
 
       <div className="space-y-3">
         <div className="text-sm font-semibold text-slate-900">Zones non pilotées</div>
+
         {dimension.unmanagedZones.map((zone, index) => (
           <div
             key={`zone-${dimension.dimensionId}-${index}`}
             className="rounded-lg border border-slate-200 bg-slate-50 p-3"
           >
             <div className="mb-2 text-sm font-medium text-slate-900">Zone {index + 1}</div>
+
             <div className="grid gap-3 md:grid-cols-3">
               <div>
                 <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
@@ -626,6 +672,7 @@ function FrozenDimensionCard({ dimension }: { dimension: FrozenDimension }) {
                   {zone.constat}
                 </div>
               </div>
+
               <div>
                 <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
                   Risque managérial
@@ -634,6 +681,7 @@ function FrozenDimensionCard({ dimension }: { dimension: FrozenDimension }) {
                   {zone.risqueManagerial}
                 </div>
               </div>
+
               <div>
                 <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
                   Conséquence
@@ -662,6 +710,7 @@ function ObjectiveCardView({ objective }: { objective: FinalObjective }) {
             {objective.objectiveLabel}
           </div>
         </div>
+
         <div className="inline-flex items-center rounded-full bg-slate-100 px-3 py-1 text-sm font-medium text-slate-800">
           {validationStatusLabel(objective.validationStatus)}
         </div>
@@ -676,23 +725,32 @@ function ObjectiveCardView({ objective }: { objective: FinalObjective }) {
             {objective.keyIndicator}
           </div>
         </div>
+
         <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
           <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
             Échéance
           </div>
-          <div className="mt-1 text-sm leading-6 text-slate-800">{objective.dueDate}</div>
+          <div className="mt-1 text-sm leading-6 text-slate-800">
+            {objective.dueDate}
+          </div>
         </div>
+
         <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
           <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
             Responsable
           </div>
-          <div className="mt-1 text-sm leading-6 text-slate-800">{objective.owner}</div>
+          <div className="mt-1 text-sm leading-6 text-slate-800">
+            {objective.owner}
+          </div>
         </div>
+
         <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
           <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
             Quick win
           </div>
-          <div className="mt-1 text-sm leading-6 text-slate-800">{objective.quickWin}</div>
+          <div className="mt-1 text-sm leading-6 text-slate-800">
+            {objective.quickWin}
+          </div>
         </div>
       </div>
 
@@ -788,6 +846,7 @@ export default function ChatPanel({ sessionId }: Props) {
   const currentQuestion = useMemo(() => {
     if (questions.length === 0) return null;
     if (sessionState?.phase !== "dimension_iteration") return null;
+
     return questions[clampIndex(currentIndex, questions.length)] ?? null;
   }, [questions, currentIndex, sessionState?.phase]);
 
@@ -809,6 +868,7 @@ export default function ChatPanel({ sessionId }: Props) {
   function pushMessage(role: "assistant" | "user" | "system", text: string) {
     const content = String(text || "").trim();
     if (!content) return;
+
     setMessages((prev) => [
       ...prev,
       {
@@ -839,6 +899,7 @@ export default function ChatPanel({ sessionId }: Props) {
         Number(nextSession?.question_index ?? 0),
         nextQuestions.length
       );
+
       setQuestions([...nextQuestions]);
       setCurrentIndex(nextIndex);
       setAwaitingValidation(false);
@@ -870,6 +931,7 @@ export default function ChatPanel({ sessionId }: Props) {
           Number(data.session?.question_index ?? 0),
           nextQuestions.length
         );
+
         setQuestions([...nextQuestions]);
         setCurrentIndex(nextIndex);
       } else {
@@ -911,14 +973,20 @@ export default function ChatPanel({ sessionId }: Props) {
 
   async function loadContext() {
     setBootstrapping(true);
+
     try {
       const res = await fetch(`/api/session/context?id=${sessionId}`, {
         method: "GET",
         cache: "no-store",
         credentials: "include",
       });
+
       const data: ContextApiResponse = await res.json();
-      if (!data.ok) throw new Error(data.error || "Erreur de chargement du contexte");
+
+      if (!data.ok) {
+        throw new Error(data.error || "Erreur de chargement du contexte");
+      }
+
       applyContextData(data, { syncInteractive: true, syncHistory: true });
     } catch (e: any) {
       pushMessage(
@@ -937,8 +1005,11 @@ export default function ChatPanel({ sessionId }: Props) {
         cache: "no-store",
         credentials: "include",
       });
+
       const data: ContextApiResponse = await res.json();
+
       if (!data.ok) return;
+
       applyContextData(data, { syncInteractive: false, syncHistory: true });
     } catch {
       // silence volontaire
@@ -947,6 +1018,7 @@ export default function ChatPanel({ sessionId }: Props) {
 
   async function sendMessage(message: string) {
     setLoading(true);
+
     try {
       const payload: Record<string, unknown> = {
         message,
@@ -978,14 +1050,19 @@ export default function ChatPanel({ sessionId }: Props) {
           await loadContext();
           return;
         }
+
         throw new Error(data.error || "Erreur moteur diagnostic");
       }
 
       const mergedSession = mergeSessionState(sessionState, data.session, sessionId);
-      if (mergedSession) setSessionState(mergedSession);
+
+      if (mergedSession) {
+        setSessionState(mergedSession);
+      }
 
       const assistant = normalizeAssistantResponse(data);
       applyAssistantPayload(assistant, mergedSession);
+
       await loadSideStateSilently();
     } catch (e: any) {
       pushMessage("system", "Erreur : " + (e?.message || "Erreur inconnue"));
@@ -997,27 +1074,67 @@ export default function ChatPanel({ sessionId }: Props) {
   async function buildReport() {
     setBuildingReport(true);
     setReportPreview(null);
+
     try {
       const res = await fetch(`/api/session/${sessionId}/build-report`, {
         method: "POST",
         credentials: "include",
       });
-      const data: BuildReportApiResponse = await res.json();
-      if (!data.ok) {
+
+      const rawText = await res.text();
+      let data: BuildReportApiResponse;
+
+      try {
+        data = JSON.parse(rawText) as BuildReportApiResponse;
+      } catch {
+        throw new Error(
+          `Réponse build-report non JSON. Statut HTTP ${res.status}. ${rawText.slice(0, 500)}`
+        );
+      }
+
+      if (!res.ok || !data.ok) {
         const issues = Array.isArray(data.blocking_issues)
           ? data.blocking_issues
               .map((x) => `[${x.code ?? "ISSUE"}] ${x.message ?? ""}`.trim())
               .join("\n")
           : "";
+
         throw new Error(
-          [data.error || "Erreur build-report", issues].filter(Boolean).join("\n")
+          [data.error || `Erreur build-report HTTP ${res.status}`, issues]
+            .filter(Boolean)
+            .join("\n")
         );
       }
 
-      pushMessage(
-        "assistant",
-        "Le rapport dirigeant a été structuré et le PDF client a été généré."
-      );
+      setReportPreview(data.preview ?? null);
+
+      if (data.pdfBase64) {
+        triggerBinaryDownload(
+          data.pdfBase64,
+          data.pdfFileName || "rapport-diagnostic.pdf",
+          "application/pdf"
+        );
+
+        pushMessage(
+          "assistant",
+          "Le rapport dirigeant a été généré et le téléchargement du PDF a été déclenché."
+        );
+      } else if (data.html) {
+        triggerTextDownload(
+          data.html,
+          data.htmlFileName || "rapport-diagnostic.html",
+          "text/html;charset=utf-8"
+        );
+
+        pushMessage(
+          "system",
+          "L’API n’a pas renvoyé de PDF. Un fichier HTML de secours a été téléchargé. Il faut vérifier le générateur PDF côté serveur."
+        );
+      } else {
+        throw new Error(
+          "Rapport construit, mais aucun pdfBase64 ni html n’a été renvoyé par l’API."
+        );
+      }
 
       if (data.compliance?.summary?.length) {
         pushMessage(
@@ -1026,16 +1143,7 @@ export default function ChatPanel({ sessionId }: Props) {
         );
       }
 
-      setReportPreview(data.preview ?? null);
-
-      if (data.pdfBase64 && data.pdfFileName) {
-        triggerBinaryDownload(data.pdfBase64, data.pdfFileName, "application/pdf");
-      } else {
-        pushMessage(
-          "system",
-          "Aucun PDF n’a été renvoyé par l’API de construction du rapport."
-        );
-      }
+      await loadSideStateSilently();
     } catch (e: any) {
       pushMessage(
         "system",
@@ -1049,12 +1157,14 @@ export default function ChatPanel({ sessionId }: Props) {
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
+
     if (loading || bootstrapping) return;
 
     const userText = input.trim();
     if (!userText) return;
 
     const shouldPushStandaloneUserMessage = !currentQuestion && !awaitingValidation;
+
     if (shouldPushStandaloneUserMessage) {
       pushMessage("user", userText);
     }
@@ -1065,6 +1175,7 @@ export default function ChatPanel({ sessionId }: Props) {
 
   useEffect(() => {
     didBootstrapRef.current = false;
+
     setSessionState(null);
     resetQuestionState();
     setAwaitingValidation(false);
@@ -1078,6 +1189,7 @@ export default function ChatPanel({ sessionId }: Props) {
 
   useEffect(() => {
     if (didBootstrapRef.current) return;
+
     didBootstrapRef.current = true;
     loadContext();
   }, [sessionId]);
@@ -1085,21 +1197,26 @@ export default function ChatPanel({ sessionId }: Props) {
   useEffect(() => {
     function handleTrameIngested(event: Event) {
       const customEvent = event as CustomEvent<{ sessionId?: string }>;
+
       if (customEvent.detail?.sessionId !== sessionId) return;
+
       pushMessage(
         "system",
         "Trame ingérée avec succès. Le contexte de diagnostic est rechargé."
       );
+
       loadContext();
     }
 
     window.addEventListener("bilan-trame-ingested", handleTrameIngested);
+
     return () =>
       window.removeEventListener("bilan-trame-ingested", handleTrameIngested);
   }, [sessionId]);
 
   useEffect(() => {
     if (!scrollRef.current) return;
+
     scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [
     messages,
@@ -1114,6 +1231,7 @@ export default function ChatPanel({ sessionId }: Props) {
 
   useEffect(() => {
     if (questions.length === 0) return;
+
     setCurrentIndex((prev) => clampIndex(prev, questions.length));
   }, [questions]);
 
@@ -1136,6 +1254,7 @@ export default function ChatPanel({ sessionId }: Props) {
     : "";
 
   const canBuildReport = sessionState?.phase === "report_ready";
+  const inputDisabled = loading || bootstrapping || canBuildReport;
 
   return (
     <div className="space-y-4">
@@ -1160,6 +1279,7 @@ export default function ChatPanel({ sessionId }: Props) {
                 {displayFileName(sessionState.source_filename)}
               </div>
             </div>
+
             <div className="rounded-lg border border-slate-200 bg-white px-3 py-2.5">
               <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
                 Date de chargement
@@ -1168,6 +1288,7 @@ export default function ChatPanel({ sessionId }: Props) {
                 {formatDateTime(sessionState.updated_at ?? sessionState.created_at)}
               </div>
             </div>
+
             <div className="rounded-lg border border-slate-200 bg-white px-3 py-2.5">
               <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
                 Phase
@@ -1176,6 +1297,7 @@ export default function ChatPanel({ sessionId }: Props) {
                 {phaseLabel(sessionState.phase)}
               </div>
             </div>
+
             <div className="rounded-lg border border-slate-200 bg-white px-3 py-2.5">
               <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
                 Statut
@@ -1184,6 +1306,7 @@ export default function ChatPanel({ sessionId }: Props) {
                 {sessionState.status ?? "n/a"}
               </div>
             </div>
+
             <div className="rounded-lg border border-slate-200 bg-white px-3 py-2.5">
               <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
                 Dimension
@@ -1192,6 +1315,7 @@ export default function ChatPanel({ sessionId }: Props) {
                 {dimensionLabel(sessionState.dimension)}
               </div>
             </div>
+
             <div className="rounded-lg border border-slate-200 bg-white px-3 py-2.5">
               <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
                 Itération
@@ -1213,6 +1337,7 @@ export default function ChatPanel({ sessionId }: Props) {
               restent visibles pendant toute la fin du protocole.
             </div>
           </div>
+
           <div className="grid gap-4">
             {sortedFrozenDimensions.map((dimension) => (
               <FrozenDimensionCard
@@ -1234,6 +1359,7 @@ export default function ChatPanel({ sessionId }: Props) {
                 : "Ces objectifs sont issus des dimensions gelées et restent visibles jusqu’à la construction du rapport."}
             </div>
           </div>
+
           <div className="grid gap-4">
             {sortedObjectives.map((objective) => (
               <ObjectiveCardView key={objective.id} objective={objective} />
@@ -1281,7 +1407,7 @@ export default function ChatPanel({ sessionId }: Props) {
         <div className="space-y-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
           <div className="flex items-center justify-between text-sm text-slate-700">
             <div className="font-semibold text-slate-900">
-              Dimension {sessionState?.dimension ?? "?"} — Itération {" "}
+              Dimension {sessionState?.dimension ?? "?"} — Itération{" "}
               {sessionState?.iteration ?? "?"}/3
             </div>
             <div>
@@ -1317,6 +1443,7 @@ export default function ChatPanel({ sessionId }: Props) {
               ? "Validation des objectifs"
               : "Validation d’itération"}
           </div>
+
           <div className="text-sm leading-6 text-slate-700">
             {sessionState?.phase === "final_objectives_validation" ? (
               <>
@@ -1339,13 +1466,14 @@ export default function ChatPanel({ sessionId }: Props) {
             Le protocole est terminé. La construction du rapport génère un aperçu
             structuré lisible et déclenche le téléchargement du PDF client.
           </div>
+
           <button
             type="button"
             onClick={buildReport}
             disabled={buildingReport}
             className="inline-flex items-center justify-center rounded-lg bg-slate-950 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            {buildingReport ? "Construction..." : "Construire le rapport PDF"}
+            {buildingReport ? "Construction du rapport..." : "Construire le rapport PDF"}
           </button>
         </div>
       )}
@@ -1359,6 +1487,7 @@ export default function ChatPanel({ sessionId }: Props) {
               Généré le : {formatDateTime(reportPreview.generatedAt)}
             </div>
           </div>
+
           <div className="space-y-4">
             {reportPreview.sections.map((section) => (
               <ReportSectionView key={section.id} section={section} />
@@ -1373,8 +1502,9 @@ export default function ChatPanel({ sessionId }: Props) {
           placeholder={placeholder}
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          disabled={loading || bootstrapping || canBuildReport}
+          disabled={inputDisabled}
         />
+
         <button
           type="submit"
           disabled={

@@ -5,11 +5,12 @@ import OpenAI from "openai";
  *
  * Génère des questions d’entretien à partir de faits diagnostiques enrichis.
  *
- * Objectif :
- * - utiliser les faits précis issus de la trame ;
- * - exploiter les extraits source, chiffres et questions suggérées ;
- * - éviter les questions génériques ;
- * - faire des itérations 2 et 3 de vraies questions de rebond.
+ * Principe :
+ * - le LLM doit raisonner comme un consultant senior ;
+ * - il doit formuler la meilleure question d’entretien, pas appliquer un gabarit ;
+ * - les garde-fous restent minimaux pour éviter les questions vides, génériques
+ *   ou manifestement hors sujet ;
+ * - les fallbacks ne servent qu’en secours.
  */
 
 export interface FactSummary {
@@ -84,25 +85,41 @@ function normalizeAngle(value: string) {
   if (ALLOWED_ANGLES.includes(x)) return x;
 
   if (x.includes("exemple") || x.includes("cas")) return "example";
-  if (x.includes("ordre") || x.includes("quant") || x.includes("combien")) {
+  if (
+    x.includes("ordre") ||
+    x.includes("quant") ||
+    x.includes("combien") ||
+    x.includes("montant") ||
+    x.includes("volume")
+  ) {
     return "magnitude";
   }
-  if (x.includes("mecan") || x.includes("fonction")) return "mechanism";
-  if (x.includes("cause") || x.includes("pourquoi")) return "causality";
+  if (x.includes("mecan") || x.includes("fonction") || x.includes("process")) {
+    return "mechanism";
+  }
+  if (x.includes("cause") || x.includes("pourquoi") || x.includes("explique")) {
+    return "causality";
+  }
   if (x.includes("depend")) return "dependency";
-  if (x.includes("arbitr")) return "arbitration";
-  if (x.includes("formal")) return "formalization";
-  if (x.includes("transition") || x.includes("bascule")) return "transition";
+  if (x.includes("arbitr") || x.includes("decision")) return "arbitration";
+  if (x.includes("formal") || x.includes("regle") || x.includes("procedure")) {
+    return "formalization";
+  }
+  if (x.includes("transition") || x.includes("bascule") || x.includes("changement")) {
+    return "transition";
+  }
   if (x.includes("econom") || x.includes("marge") || x.includes("rentabilite")) {
     return "economics";
   }
-  if (x.includes("frequence") || x.includes("souvent")) return "frequency";
+  if (x.includes("frequence") || x.includes("rythme") || x.includes("souvent")) {
+    return "frequency";
+  }
   if (x.includes("rex") || x.includes("retour")) return "feedback";
 
   return "mechanism";
 }
 
-function cleanArray(values: unknown[] | undefined, max = 6): string[] {
+function cleanArray(values: unknown[] | undefined, max = 8): string[] {
   if (!Array.isArray(values)) return [];
 
   const out: string[] = [];
@@ -147,17 +164,35 @@ function cleanNumericValues(value: unknown): Record<string, number | string> | u
 
 function numericValuesToText(values?: Record<string, number | string>) {
   if (!values || Object.keys(values).length === 0) return "";
+
   return Object.entries(values)
     .map(([key, value]) => `${key}: ${String(value)}`)
     .join(" | ");
 }
 
-function hasPreviousAnswers(fact: FactSummary) {
+function statementForFact(fact: FactSummary) {
   return (
-    cleanArray(fact.previous_answers, 1).length > 0 ||
-    cleanArray(fact.answer_summaries, 1).length > 0 ||
-    cleanArray(fact.validated_findings, 1).length > 0
+    normalizeQuestion(fact.diagnostic_statement || "") ||
+    normalizeQuestion(fact.raw_signal || "") ||
+    normalizeQuestion(fact.source_excerpt || "") ||
+    normalizeQuestion(fact.theme || "")
   );
+}
+
+function numericTextForFact(fact: FactSummary) {
+  return (
+    normalizeQuestion(fact.numeric_context || "") ||
+    numericValuesToText(cleanNumericValues(fact.numeric_values))
+  );
+}
+
+function previousMemoryForFact(fact: FactSummary) {
+  return [
+    ...cleanArray(fact.previous_answers, 5),
+    ...cleanArray(fact.answer_summaries, 5),
+    ...cleanArray(fact.validated_findings, 5),
+    ...cleanArray(fact.open_hypotheses, 5),
+  ];
 }
 
 function isGenericQuestion(question: string) {
@@ -174,38 +209,235 @@ function isGenericQuestion(question: string) {
     "que pouvez vous dire sur",
     "sur ce theme pouvez vous",
     "pouvez vous decrire concretement ce point",
+    "pouvez vous m en dire plus",
+    "qu en pensez vous",
+    "qu est ce qui explique principalement ce point qui arbitre lorsqu il se produit",
+    "qu est ce qui explique principalement ce point",
   ];
 
   return forbidden.some((f) => q.includes(f));
+}
+
+function questionTooMechanical(question: string) {
+  const q = normalizeText(question);
+
+  const badPatterns = [
+    "qui arbitre lorsqu il se produit et quelle regle permettrait",
+    "qui arbitre lorsqu il se produit",
+    "quelle regle permettrait d eviter qu il reste insuffisamment pilote",
+    "sur ce point qui fixe concretement les priorites qui arbitre",
+    "quel changement concret porte par quel responsable et suivi avec quel indicateur",
+  ];
+
+  return badPatterns.some((pattern) => q.includes(pattern));
+}
+
+function questionHasSomeAnchor(question: string, fact: FactSummary) {
+  const q = normalizeText(question);
+  if (!q || q.length < 25) return false;
+
+  const numeric = normalizeText(numericTextForFact(fact));
+  if (numeric) {
+    const numericTokens = numeric
+      .split(" ")
+      .filter((token) => token.length >= 2 || /\d/.test(token));
+
+    if (numericTokens.some((token) => q.includes(token))) return true;
+  }
+
+  const source = normalizeText(
+    [
+      fact.theme,
+      fact.diagnostic_statement,
+      fact.raw_signal,
+      fact.source_excerpt,
+      fact.managerial_risk,
+      ...previousMemoryForFact(fact),
+    ].join(" ")
+  );
+
+  const tokens = source
+    .split(" ")
+    .filter((token) => token.length >= 4)
+    .slice(0, 60);
+
+  let hits = 0;
+  for (const token of tokens) {
+    if (q.includes(token)) hits += 1;
+  }
+
+  return hits >= 1;
+}
+
+function inferSignalFamily(fact: FactSummary) {
+  const text = normalizeText(
+    [
+      fact.theme,
+      fact.raw_signal,
+      fact.diagnostic_statement,
+      fact.source_excerpt,
+      fact.managerial_risk,
+      numericTextForFact(fact),
+    ].join(" ")
+  );
+
+  if (
+    text.includes("tf1") ||
+    text.includes("zero accident") ||
+    text.includes("0 accident") ||
+    text.includes("absence d accidents") ||
+    text.includes("bonne pratique") ||
+    text.includes("signal positif") ||
+    text.includes("superieure au budget") ||
+    text.includes("maitrise")
+  ) {
+    return "signal positif / maintien de la performance";
+  }
+
+  if (
+    text.includes("marge") ||
+    text.includes("ebitda") ||
+    text.includes("rentabilite") ||
+    text.includes("cout") ||
+    text.includes("impute") ||
+    text.includes("facturation") ||
+    text.includes("ecart") ||
+    text.includes("budget") ||
+    text.includes("taux horaire")
+  ) {
+    return "économie / marge / fiabilité financière";
+  }
+
+  if (
+    text.includes("client") ||
+    text.includes("top 10") ||
+    text.includes("pipeline") ||
+    text.includes("pipe") ||
+    text.includes("conversion") ||
+    text.includes("commercial") ||
+    text.includes("devis") ||
+    text.includes("offre")
+  ) {
+    return "commercial / clients / pipeline";
+  }
+
+  if (
+    text.includes("dependance") ||
+    text.includes("responsabilite") ||
+    text.includes("relais") ||
+    text.includes("encadrement") ||
+    text.includes("collaborateur") ||
+    text.includes("rattache") ||
+    text.includes("direction technique") ||
+    text.includes("qhse") ||
+    text.includes("qse")
+  ) {
+    return "organisation / responsabilités / dépendance humaine";
+  }
+
+  if (
+    text.includes("planning") ||
+    text.includes("charge") ||
+    text.includes("capacite") ||
+    text.includes("chantier") ||
+    text.includes("production") ||
+    text.includes("execution") ||
+    text.includes("delai") ||
+    text.includes("retard") ||
+    text.includes("heures") ||
+    text.includes("ressources")
+  ) {
+    return "exécution / planning / ressources";
+  }
+
+  return "diagnostic général";
+}
+
+function chooseFallbackAngle(fact: FactSummary, iteration: number) {
+  const missingAngles = cleanArray(fact.missing_angles, 8).map(normalizeAngle);
+  const askedAngles = new Set(cleanArray(fact.asked_angles, 8).map(normalizeAngle));
+  const firstMissing = missingAngles.find((angle) => !askedAngles.has(angle));
+
+  if (firstMissing) return firstMissing;
+
+  const family = inferSignalFamily(fact);
+
+  if (family.includes("positif")) return iteration <= 1 ? "mechanism" : "feedback";
+  if (family.includes("économie")) return iteration <= 1 ? "magnitude" : "economics";
+  if (family.includes("commercial")) return iteration <= 1 ? "mechanism" : "arbitration";
+  if (family.includes("responsabilités")) return iteration <= 1 ? "dependency" : "arbitration";
+  if (family.includes("exécution")) return iteration <= 1 ? "mechanism" : "transition";
+
+  if (iteration <= 1) {
+    if (numericTextForFact(fact)) return "magnitude";
+    return normalizeAngle(fact.recommended_entry_angle || "mechanism");
+  }
+
+  if (iteration === 2) return "causality";
+  return "transition";
+}
+
+function fallbackQuestionForFact(fact: FactSummary, iteration: number): GeneratedQuestion {
+  const statement = statementForFact(fact);
+  const numeric = numericTextForFact(fact);
+  const previous = previousMemoryForFact(fact)[0];
+  const family = inferSignalFamily(fact);
+
+  let question: string;
+
+  if (previous && iteration >= 2) {
+    question = `Vous avez indiqué "${previous}". Quelle question faudrait-il encore clarifier pour confirmer ou infirmer le diagnostic sur ce point : ${statement} ?`;
+  } else if (family.includes("positif")) {
+    question = `Ce point semble positif : qu’est-ce qui permet aujourd’hui de maintenir ce niveau, et quel signal faible vous alerterait sur une dégradation possible ?`;
+  } else if (family.includes("économie") && numeric) {
+    question = `Sur ce point chiffré (${numeric}), quelle lecture faites-vous de l’écart, et quelle décision opérationnelle permettrait de le maîtriser ?`;
+  } else if (family.includes("commercial") && numeric) {
+    question = `Sur ce point commercial (${numeric}), comment qualifiez-vous la solidité des opportunités ou clients concernés, et quel risque principal voyez-vous ?`;
+  } else if (family.includes("responsabilités")) {
+    question = `Sur ce point d’organisation, qu’est-ce qui permet de savoir que la responsabilité est réellement portée au bon niveau, et où voyez-vous le risque de fragilité ?`;
+  } else if (family.includes("exécution")) {
+    question = `Sur ce point opérationnel, comment l’écart est-il détecté sur le terrain, et qu’est-ce qui permettrait de le traiter plus tôt ?`;
+  } else if (numeric) {
+    question = `Sur ce point chiffré (${numeric}), qu’est-ce qui vous paraît le plus important à comprendre pour établir le bon diagnostic ?`;
+  } else {
+    question = `Sur ce point précis, qu’est-ce qui vous paraît le plus important à comprendre pour établir le bon diagnostic : ${statement} ?`;
+  }
+
+  return {
+    fact_id: fact.id,
+    theme: fact.theme,
+    question: normalizeQuestion(question),
+    intended_angle: chooseFallbackAngle(fact, iteration),
+  };
 }
 
 function buildIterationInstruction(iteration: number) {
   if (iteration <= 1) {
     return `
 Itération 1 :
-- partir de la trame ;
-- poser une question directement ancrée dans un fait précis ;
-- si un chiffre existe, l'utiliser explicitement dans la question ;
-- éviter toute question générique de découverte.
+- ouvrir le sujet avec une question précise et naturelle ;
+- exploiter la trame, les chiffres et l’extrait source ;
+- ne pas poser une question générale ;
+- la question doit aider le dirigeant à expliciter le fonctionnement réel, pas seulement confirmer le constat.
 `.trim();
   }
 
   if (iteration === 2) {
     return `
 Itération 2 :
-- utiliser prioritairement les réponses déjà données ;
-- ne pas repartir du signal initial comme si rien n'avait été dit ;
-- approfondir la cause, le mécanisme, la dépendance, l'arbitrage ou l'ordre de grandeur manquant ;
-- la question doit être une vraie question de rebond.
+- rebondir sur la matière déjà obtenue ;
+- chercher la cause, le mécanisme, l’arbitrage, la fragilité ou la condition de maîtrise ;
+- ne pas répéter la question d’itération 1 ;
+- ne pas appliquer de gabarit automatique.
 `.trim();
   }
 
   return `
 Itération 3 :
-- consolider et tester la robustesse du diagnostic ;
-- ne pas poser une question de découverte générale ;
-- utiliser les réponses précédentes pour aller vers l'arbitrage, l'impact, la condition de maîtrise ou la correction possible ;
-- rechercher ce qui permet de verrouiller ou d'infirmer le constat final.
+- consolider le diagnostic ;
+- tester la robustesse de ce qui a été dit ;
+- faire émerger la conséquence, la priorité d’action, l’indicateur ou la condition de réussite ;
+- préparer un objectif actionnable, sans poser une question de découverte générale.
 `.trim();
 }
 
@@ -219,6 +451,7 @@ function buildFactSummariesForPrompt(facts: FactSummary[]) {
     return {
       fact_id: f.id,
       theme: f.theme,
+      signal_family: inferSignalFamily(f),
       diagnostic_statement:
         normalizeQuestion(f.diagnostic_statement || "") ||
         normalizeQuestion(f.raw_signal || ""),
@@ -226,116 +459,44 @@ function buildFactSummariesForPrompt(facts: FactSummary[]) {
       source_excerpt: normalizeQuestion(f.source_excerpt || ""),
       numeric_values: numericValues ?? {},
       numeric_context: numericContext,
-      suggested_questions: cleanArray(f.suggested_questions, 5),
       managerial_risk: normalizeQuestion(f.managerial_risk || ""),
+      suggested_questions: cleanArray(f.suggested_questions, 5),
       recommended_entry_angle: normalizeAngle(f.recommended_entry_angle || ""),
       progress: f.progress ?? null,
       missing_angles: cleanArray(f.missing_angles, 8).map(normalizeAngle),
       asked_angles: cleanArray(f.asked_angles, 8).map(normalizeAngle),
-      previous_questions: cleanArray(f.previous_questions, 6),
-      previous_answers: cleanArray(f.previous_answers, 6),
-      answer_summaries: cleanArray(f.answer_summaries, 6),
-      validated_findings: cleanArray(f.validated_findings, 6),
-      open_hypotheses: cleanArray(f.open_hypotheses, 6),
+      previous_questions: cleanArray(f.previous_questions, 8),
+      previous_answers: cleanArray(f.previous_answers, 8),
+      answer_summaries: cleanArray(f.answer_summaries, 8),
+      validated_findings: cleanArray(f.validated_findings, 8),
+      open_hypotheses: cleanArray(f.open_hypotheses, 8),
       contradictions: cleanArray(f.contradictions, 6),
       next_question_hints: cleanArray(f.next_question_hints, 6),
-      has_previous_answers: hasPreviousAnswers(f),
     };
   });
 }
 
-function fallbackQuestionForFact(
+function validateGeneratedQuestion(
+  question: GeneratedQuestion,
   fact: FactSummary,
   iteration: number
 ): GeneratedQuestion {
-  const numericValues = cleanNumericValues(fact.numeric_values);
-  const numericText =
-    normalizeQuestion(fact.numeric_context || "") || numericValuesToText(numericValues);
+  const text = normalizeQuestion(question.question);
 
-  const statement =
-    normalizeQuestion(fact.diagnostic_statement || "") ||
-    normalizeQuestion(fact.raw_signal || "") ||
-    normalizeQuestion(fact.source_excerpt || "");
-
-  const previous =
-    cleanArray(fact.answer_summaries, 1)[0] ||
-    cleanArray(fact.previous_answers, 1)[0] ||
-    cleanArray(fact.validated_findings, 1)[0];
-
-  let question: string;
-  let angle: string;
-
-  if (iteration <= 1 && numericText) {
-    question = `Sur ce point chiffré (${numericText}), qu'est-ce qui explique concrètement la situation suivante : ${statement} ?`;
-    angle = "causality";
-  } else if (iteration <= 1) {
-    question = `Concrètement, comment se manifeste aujourd'hui ce point dans le fonctionnement réel : ${statement} ?`;
-    angle = normalizeAngle(fact.recommended_entry_angle || "mechanism");
-  } else if (iteration === 2 && previous) {
-    question = `Vous avez indiqué "${previous}". Qu'est-ce qui explique principalement cette situation par rapport au point suivant : ${statement} ?`;
-    angle = "causality";
-  } else if (iteration === 2) {
-    question = `Qu'est-ce qui explique principalement ce point et qui arbitre aujourd'hui lorsqu'il se produit : ${statement} ?`;
-    angle = "arbitration";
-  } else if (previous) {
-    question = `À partir de votre réponse "${previous}", quel arbitrage concret permettrait de sécuriser durablement ce point : ${statement} ?`;
-    angle = "arbitration";
-  } else {
-    question = `Quel changement concret permettrait de sécuriser durablement ce point : ${statement} ?`;
-    angle = "transition";
+  if (
+    !text ||
+    isGenericQuestion(text) ||
+    questionTooMechanical(text) ||
+    !questionHasSomeAnchor(text, fact)
+  ) {
+    return fallbackQuestionForFact(fact, iteration);
   }
 
   return {
-    fact_id: fact.id,
-    theme: fact.theme,
-    question: normalizeQuestion(question),
-    intended_angle: angle,
+    ...question,
+    question: text,
+    intended_angle: normalizeAngle(question.intended_angle),
   };
-}
-
-function questionHasUsefulAnchor(question: string, fact: FactSummary) {
-  const q = normalizeText(question);
-
-  if (!q || q.length < 25) return false;
-
-  const numericValues = cleanNumericValues(fact.numeric_values);
-  const numericText = normalizeText(
-    normalizeQuestion(fact.numeric_context || "") || numericValuesToText(numericValues)
-  );
-
-  if (numericText) {
-    const numericTokens = numericText
-      .split(" ")
-      .filter((token) => token.length >= 2 || /\d/.test(token));
-
-    if (numericTokens.some((token) => q.includes(token))) return true;
-  }
-
-  const statement = normalizeText(
-    normalizeQuestion(fact.diagnostic_statement || "") ||
-      normalizeQuestion(fact.raw_signal || "")
-  );
-
-  const source = normalizeText(fact.source_excerpt || "");
-
-  const previous = normalizeText(
-    [
-      ...(fact.previous_answers || []),
-      ...(fact.answer_summaries || []),
-      ...(fact.validated_findings || []),
-    ].join(" ")
-  );
-
-  const tokens = [...statement.split(" "), ...source.split(" "), ...previous.split(" ")]
-    .filter((token) => token.length >= 4)
-    .slice(0, 40);
-
-  let hits = 0;
-  for (const token of tokens) {
-    if (q.includes(token)) hits += 1;
-  }
-
-  return hits >= 2;
 }
 
 export async function generateQuestionBatch(params: {
@@ -350,37 +511,42 @@ export async function generateQuestionBatch(params: {
   const factSummaries = buildFactSummariesForPrompt(facts);
 
   const prompt = `
-Tu es un consultant senior en diagnostic d'entreprise et redressement de PME.
+Tu es un consultant senior en diagnostic d'entreprise, redressement de PME et performance opérationnelle.
 
-OBJECTIF MAJEUR :
-Générer des questions d'entretien utiles, précises et ancrées.
-Les questions doivent exploiter les faits extraits de la trame, les chiffres, les extraits source et la mémoire des réponses précédentes.
+Ta mission :
+formuler la meilleure question d’entretien possible pour chaque fait fourni.
+
+Tu dois raisonner librement comme un consultant expérimenté.
+Ne transforme pas les règles en gabarit.
+Ne colle pas automatiquement "qui arbitre", "quelle règle" ou "quel indicateur" dans chaque question.
+Utilise ces notions seulement quand elles sont réellement pertinentes.
 
 ${buildIterationInstruction(iteration)}
 
-Pour chaque fait, tu reçois :
-- diagnostic_statement : le constat précis ;
-- source_excerpt : l'extrait de trame qui justifie le constat ;
-- numeric_values / numeric_context : les chiffres éventuels ;
-- suggested_questions : questions suggérées par l'extracteur ;
-- previous_questions : questions déjà posées ;
-- previous_answers / answer_summaries : réponses déjà obtenues ;
-- validated_findings : constats déjà validés ;
-- open_hypotheses : hypothèses encore ouvertes ;
-- asked_angles et missing_angles.
+Ce que doit faire une bonne question :
+- être spécifique au fait ;
+- être naturelle dans un entretien avec un dirigeant ;
+- exploiter si possible un chiffre, une personne, un client, un écart, un rôle, un processus ou une réponse précédente ;
+- faire avancer le diagnostic ;
+- éviter de simplement reformuler le constat ;
+- ne poser qu’une seule vraie question, même si elle peut comporter deux éléments liés ;
+- être courte à moyenne, pas une phrase lourde.
 
-RÈGLES ABSOLUES :
-1. Ne repose jamais une question déjà posée, même reformulée.
-2. Ne produis jamais une question générique de type "quel est le point le moins maîtrisé ?".
-3. La question doit mentionner ou exploiter un élément précis du fait : chiffre, extrait source, mécanisme, rôle, client, outil, retard, marge, charge, responsable, rituel ou réponse précédente.
-4. Si numeric_values ou numeric_context existent, la question doit si possible citer le chiffre ou demander son explication.
-5. Si suggested_questions existe et qu'elle est bonne, tu peux l'utiliser ou l'améliorer.
-6. Si previous_answers ou answer_summaries existent, la question doit rebondir dessus.
-7. En itération 2, approfondis cause, mécanisme, dépendance ou arbitrage.
-8. En itération 3, teste impact, robustesse, arbitrage final, correction ou condition de maîtrise.
-9. Une question = une seule phrase.
-10. Ne produis aucune phrase tronquée.
-11. Le champ intended_angle doit être exactement l'un de ces angles :
+Ce que tu dois éviter :
+- question générique ;
+- question scolaire ;
+- question mécanique ;
+- question qui juxtapose "cause + arbitrage + règle + indicateur" sans logique ;
+- question déjà posée ;
+- question trop longue ;
+- question qui ignore les réponses précédentes en itération 2 ou 3.
+
+Orientation par itération :
+- Itération 1 : comprendre le fonctionnement réel derrière le fait.
+- Itération 2 : approfondir ce que les réponses ont révélé.
+- Itération 3 : consolider la conséquence, la priorité d’action ou la condition de maîtrise.
+
+Le champ intended_angle doit être exactement l'un de ces angles :
 ${ALLOWED_ANGLES.join(", ")}.
 
 Retourne STRICTEMENT ce JSON :
@@ -404,13 +570,13 @@ Iteration: ${iteration}
   try {
     const resp = await openai.chat.completions.create({
       model: process.env.OPENAI_MODEL_CHAT || "gpt-4o-mini",
-      temperature: 0.03,
+      temperature: 0.35,
       response_format: { type: "json_object" },
       messages: [
         {
           role: "system",
           content:
-            "Consultant senior en retournement de PME. Tu génères des questions d'entretien précises, ancrées, non répétitives. JSON uniquement.",
+            "Tu es un consultant senior exigeant. Tu produis des questions d'entretien précises, naturelles, ancrées, non mécaniques. JSON uniquement.",
         },
         { role: "user", content: prompt },
       ],
@@ -442,13 +608,13 @@ Iteration: ${iteration}
       const fact = byFact.get(question.fact_id);
       if (!fact) continue;
 
-      const normalized = normalizeText(question.question);
+      const checked = validateGeneratedQuestion(question, fact, iteration);
+      const normalized = normalizeText(checked.question);
+
       if (!normalized || seen.has(normalized)) continue;
-      if (isGenericQuestion(question.question)) continue;
-      if (!questionHasUsefulAnchor(question.question, fact)) continue;
 
       seen.add(normalized);
-      finalQuestions.push(question);
+      finalQuestions.push(checked);
     }
 
     for (const fact of facts) {

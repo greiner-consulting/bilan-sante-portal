@@ -5,6 +5,7 @@ import type { StructuredQuestion } from "@/lib/diagnostic/types";
 import type {
   AnalysisStep,
   CoverageState,
+  DiagnosticDimensionResult,
   DiagnosticResult,
   FactBackedQuestion,
   SignalAngle,
@@ -76,9 +77,9 @@ type SessionRow = {
   consolidation_json?: unknown;
 };
 
-type FinalObjectiveForUi = {
+type FinalObjective = {
   id: string;
-  dimensionId: string | number;
+  dimensionId: number;
   objectiveLabel: string;
   owner: string;
   keyIndicator: string;
@@ -89,9 +90,9 @@ type FinalObjectiveForUi = {
   quickWin: string;
 };
 
-type FinalObjectiveSetForUi = {
+type FinalObjectiveSet = {
   header: string;
-  objectives: FinalObjectiveForUi[];
+  objectives: FinalObjective[];
   decisionsCapturedAt?: string;
 };
 
@@ -170,148 +171,6 @@ function limitUniqueAngles(values: SignalAngle[], max = 6): SignalAngle[] {
     if (out.length >= max) break;
   }
   return out;
-}
-
-function normalizeStringArray(value: unknown, max = 8): string[] {
-  if (!Array.isArray(value)) return [];
-  return value
-    .map((x) => String(x ?? "").trim())
-    .filter(Boolean)
-    .slice(0, max);
-}
-
-function normalizeFinalObjectivesForPersistence(
-  raw: unknown
-): FinalObjectiveSetForUi {
-  const fallback: FinalObjectiveSetForUi = {
-    header:
-      "Objectifs finaux à valider à partir des dimensions consolidées du diagnostic.",
-    objectives: [],
-  };
-
-  if (!raw || typeof raw !== "object") return fallback;
-
-  const value = raw as any;
-  const objectives = Array.isArray(value.objectives)
-    ? value.objectives
-        .map((o: any, index: number) => ({
-          id: String(o?.id ?? `objective-${index + 1}`).trim(),
-          dimensionId: o?.dimensionId ?? o?.dimension_id ?? o?.dimension ?? "",
-          objectiveLabel: String(
-            o?.objectiveLabel ?? o?.objectif ?? o?.label ?? ""
-          ).trim(),
-          owner: String(o?.owner ?? o?.responsable ?? "Dirigeant").trim(),
-          keyIndicator: String(
-            o?.keyIndicator ?? o?.indicateur ?? ""
-          ).trim(),
-          dueDate: String(o?.dueDate ?? o?.echeance ?? "").trim(),
-          potentialGain: String(
-            o?.potentialGain ?? o?.gain_potentiel ?? ""
-          ).trim(),
-          gainHypotheses: normalizeStringArray(
-            o?.gainHypotheses ?? o?.hypotheses ?? [],
-            6
-          ),
-          validationStatus:
-            o?.validationStatus === "validated" ||
-            o?.validationStatus === "adjusted" ||
-            o?.validationStatus === "refused" ||
-            o?.validationStatus === "proposed"
-              ? o.validationStatus
-              : "proposed",
-          quickWin: String(o?.quickWin ?? o?.quick_win ?? "").trim(),
-        }))
-        .filter(
-          (o: FinalObjectiveForUi) =>
-            Boolean(o.id) && Boolean(o.objectiveLabel)
-        )
-    : [];
-
-  return {
-    header: String(value.header ?? fallback.header).trim() || fallback.header,
-    objectives,
-    decisionsCapturedAt:
-      String(value.decisionsCapturedAt ?? "").trim() || undefined,
-  };
-}
-
-function normalizeConsolidationForPersistence(raw: unknown): unknown[] {
-  if (!Array.isArray(raw)) return [];
-  return raw;
-}
-
-function buildDefaultFinalObjectivesFromDiagnosticResult(
-  diagnosticResult: DiagnosticResult
-): FinalObjectiveSetForUi {
-  const objectives: FinalObjectiveForUi[] = [];
-
-  for (const dimension of diagnosticResult.dimensions) {
-    const firstFinding =
-      dimension.constats_cles?.[0] ||
-      dimension.zones_non_pilotees?.[0] ||
-      `Sécuriser la dimension ${dimension.dimension}`;
-
-    const firstZone =
-      dimension.zones_non_pilotees?.[0] ||
-      dimension.cause_racine ||
-      "zone de pilotage à renforcer";
-
-    objectives.push({
-      id: `objective-d${dimension.dimension}`,
-      dimensionId: dimension.dimension,
-      objectiveLabel: `Sécuriser ${dimension.name} : ${firstFinding}`,
-      owner: "Dirigeant / responsable désigné",
-      keyIndicator: `Indicateur de maîtrise défini et suivi sur : ${firstZone}`,
-      dueDate: "90 jours",
-      potentialGain:
-        "Gain à préciser après validation dirigeant : réduction des reprises, meilleure maîtrise des dérives et sécurisation du pilotage.",
-      gainHypotheses: [
-        "Objectif construit à partir des constats consolidés de la dimension.",
-        "Gain dépendant du niveau d’appropriation managériale et de la régularité du pilotage.",
-      ],
-      validationStatus: "proposed",
-      quickWin:
-        "Nommer un responsable, définir un indicateur simple et lancer un premier rituel de suivi.",
-    });
-  }
-
-  return {
-    header:
-      "Objectifs finaux proposés à partir des dimensions consolidées. Merci de les valider ou de demander les ajustements nécessaires.",
-    objectives,
-  };
-}
-
-function buildFinalObjectivesForValidation(params: {
-  existing: unknown;
-  diagnosticResult: DiagnosticResult;
-}): FinalObjectiveSetForUi {
-  const existing = normalizeFinalObjectivesForPersistence(params.existing);
-
-  if (existing.objectives.length > 0) {
-    return existing;
-  }
-
-  return buildDefaultFinalObjectivesFromDiagnosticResult(
-    params.diagnosticResult
-  );
-}
-
-function markFinalObjectivesValidated(raw: unknown): FinalObjectiveSetForUi {
-  const current = normalizeFinalObjectivesForPersistence(raw);
-
-  return {
-    ...current,
-    decisionsCapturedAt: new Date().toISOString(),
-    objectives: current.objectives.map((objective) => ({
-      ...objective,
-      validationStatus:
-        objective.validationStatus === "refused" ||
-        objective.validationStatus === "adjusted"
-          ? objective.validationStatus
-          : "validated",
-    })),
-  };
 }
 
 function convertBatchToStructuredQuestions(
@@ -666,9 +525,7 @@ CONTEXTE DE LA QUESTION ACTIVE
 ETAT ACTUEL DU SIGNAL
 - observed_element: ${activeFact?.observed_element ?? "n/a"}
 - source_excerpt: ${activeFact?.source_excerpt ?? "n/a"}
-- numeric_values: ${
-    activeFact?.numeric_values ? JSON.stringify(activeFact.numeric_values) : "n/a"
-  }
+- numeric_values: ${activeFact?.numeric_values ? JSON.stringify(activeFact.numeric_values) : "n/a"}
 - progress: ${activeFact?.progress ?? "n/a"}
 - asked_angles: ${(activeFact?.asked_angles ?? []).join(" | ") || "aucun"}
 - missing_angles: ${(activeFact?.missing_angles ?? []).join(" | ") || "aucun"}
@@ -1093,6 +950,220 @@ function buildAssistantResponse(
   };
 }
 
+function normalizeFinalObjectiveSet(raw: unknown): FinalObjectiveSet | null {
+  if (!raw || typeof raw !== "object") return null;
+
+  const source = raw as any;
+  const objectives = Array.isArray(source.objectives)
+    ? source.objectives
+    : Array.isArray(raw)
+    ? raw
+    : [];
+
+  const normalizedObjectives = objectives
+    .map((o: any, index: number): FinalObjective => {
+      const dimensionId = Number(o?.dimensionId ?? o?.dimension ?? index + 1) || 1;
+
+      return {
+        id: String(o?.id ?? `obj-${dimensionId}-${index + 1}`),
+        dimensionId,
+        objectiveLabel: String(
+          o?.objectiveLabel ?? o?.objectif ?? o?.label ?? ""
+        ).trim(),
+        owner: String(o?.owner ?? o?.responsable ?? "Direction agence").trim(),
+        keyIndicator: String(
+          o?.keyIndicator ?? o?.indicateur ?? "Indicateur à préciser"
+        ).trim(),
+        dueDate: String(o?.dueDate ?? o?.echeance ?? "90 jours").trim(),
+        potentialGain: String(
+          o?.potentialGain ?? o?.gain_potentiel ?? "Gain à chiffrer"
+        ).trim(),
+        gainHypotheses: Array.isArray(o?.gainHypotheses)
+          ? o.gainHypotheses.map(String).filter(Boolean)
+          : Array.isArray(o?.hypotheses)
+          ? o.hypotheses.map(String).filter(Boolean)
+          : [],
+        validationStatus:
+          o?.validationStatus === "validated" ||
+          o?.validationStatus === "adjusted" ||
+          o?.validationStatus === "refused" ||
+          o?.validationStatus === "proposed"
+            ? o.validationStatus
+            : "proposed",
+        quickWin: String(
+          o?.quickWin ?? o?.quick_win ?? "Action rapide à cadrer"
+        ).trim(),
+      };
+    })
+    .filter((o: FinalObjective) => Boolean(o.objectiveLabel));
+
+  if (normalizedObjectives.length === 0) return null;
+
+  return {
+    header:
+      String(source.header ?? "").trim() ||
+      "Objectifs finaux proposés à partir des dimensions consolidées.",
+    objectives: normalizedObjectives,
+    decisionsCapturedAt:
+      typeof source.decisionsCapturedAt === "string"
+        ? source.decisionsCapturedAt
+        : undefined,
+  };
+}
+
+function objectiveLabelFromDimension(dimension: DiagnosticDimensionResult): string {
+  const firstConstat = dimension.constats_cles?.[0] || "";
+  const firstZone = dimension.zones_non_pilotees?.[0] || "";
+
+  if (firstZone) {
+    return `Sécuriser le pilotage de la zone suivante : ${firstZone}`;
+  }
+
+  if (firstConstat) {
+    return `Transformer le constat prioritaire en plan de maîtrise : ${firstConstat}`;
+  }
+
+  return `Structurer le plan de maîtrise de la dimension ${dimension.dimension} — ${dimension.name}`;
+}
+
+function keyIndicatorFromDimension(dimension: DiagnosticDimensionResult): string {
+  const zone = dimension.zones_non_pilotees?.[0] || "";
+
+  if (zone.toLowerCase().includes("marge")) {
+    return "Écart marge prévue / marge réalisée suivi chaque semaine";
+  }
+
+  if (zone.toLowerCase().includes("charge") || zone.toLowerCase().includes("capacité")) {
+    return "Taux d’adéquation charge / capacité mis à jour chaque semaine";
+  }
+
+  if (zone.toLowerCase().includes("commercial") || zone.toLowerCase().includes("pipeline")) {
+    return "Pipeline qualifié, pondéré et revu hebdomadairement";
+  }
+
+  if (zone.toLowerCase().includes("rôle") || zone.toLowerCase().includes("responsabilité")) {
+    return "Responsabilités clarifiées et arbitrages tracés";
+  }
+
+  return "Indicateur de maîtrise défini et suivi mensuellement";
+}
+
+function potentialGainFromDimension(dimension: DiagnosticDimensionResult): string {
+  const text = [
+    ...(dimension.constats_cles || []),
+    ...(dimension.zones_non_pilotees || []),
+    ...(dimension.evidences || []),
+    ...(dimension.signals || []),
+  ]
+    .join(" ")
+    .toLowerCase();
+
+  if (text.includes("marge") || text.includes("ebitda") || text.includes("rentabilité")) {
+    return "Amélioration potentielle de marge à chiffrer sur les affaires prioritaires";
+  }
+
+  if (text.includes("retard") || text.includes("facturation")) {
+    return "Réduction du retard de facturation et amélioration du cash opérationnel";
+  }
+
+  if (text.includes("charge") || text.includes("heures") || text.includes("productivité")) {
+    return "Gain de productivité à chiffrer via le suivi charge / capacité";
+  }
+
+  return "Gain économique à quantifier lors du cadrage du plan d’actions";
+}
+
+function buildDeterministicFinalObjectives(
+  diagnosticResult: DiagnosticResult
+): FinalObjectiveSet {
+  const dimensions = diagnosticResult.dimensions
+    .filter((d) => d && Number(d.dimension) >= 1 && Number(d.dimension) <= 4)
+    .sort((a, b) => a.dimension - b.dimension);
+
+  const objectives = dimensions.map((dimension, index): FinalObjective => ({
+    id: `obj-d${dimension.dimension}-${index + 1}`,
+    dimensionId: dimension.dimension,
+    objectiveLabel: objectiveLabelFromDimension(dimension),
+    owner: "Direction agence",
+    keyIndicator: keyIndicatorFromDimension(dimension),
+    dueDate: "90 jours",
+    potentialGain: potentialGainFromDimension(dimension),
+    gainHypotheses: [
+      "Hypothèse à confirmer avec les données économiques disponibles.",
+      "Gain à sécuriser par un responsable nommé et un suivi périodique.",
+    ],
+    validationStatus: "proposed",
+    quickWin:
+      dimension.zones_non_pilotees?.[0]
+        ? `Mettre sous revue hebdomadaire : ${dimension.zones_non_pilotees[0]}`
+        : "Désigner un responsable et un indicateur de pilotage.",
+  }));
+
+  return {
+    header:
+      "Voici les objectifs finaux proposés à partir des quatre dimensions consolidées. Vous pouvez les valider globalement ou demander un ajustement.",
+    objectives,
+  };
+}
+
+function hasUsableObjectives(raw: unknown): boolean {
+  const normalized = normalizeFinalObjectiveSet(raw);
+  return Boolean(normalized && normalized.objectives.length > 0);
+}
+
+function buildFinalObjectivesValidationMessage(objectives: FinalObjectiveSet): string {
+  const lines = objectives.objectives.map((objective, index) => {
+    return `${index + 1}. Dimension ${objective.dimensionId} — ${objective.objectiveLabel}
+   Indicateur : ${objective.keyIndicator}
+   Responsable : ${objective.owner}
+   Échéance : ${objective.dueDate}
+   Gain potentiel : ${objective.potentialGain}`;
+  });
+
+  return `${objectives.header}
+
+${lines.join("\n\n")}
+
+Validez-vous ces objectifs finaux ? Répondez "oui" pour les valider, ou indiquez les ajustements souhaités objectif par objectif.`;
+}
+
+function applyObjectiveValidation(
+  raw: unknown,
+  message: string
+): FinalObjectiveSet {
+  const normalized =
+    normalizeFinalObjectiveSet(raw) ??
+    ({
+      header: "Objectifs finaux proposés.",
+      objectives: [],
+    } as FinalObjectiveSet);
+
+  const now = new Date().toISOString();
+
+  if (isYes(message)) {
+    return {
+      ...normalized,
+      decisionsCapturedAt: now,
+      objectives: normalized.objectives.map((objective) => ({
+        ...objective,
+        validationStatus: "validated",
+      })),
+    };
+  }
+
+  return {
+    ...normalized,
+    decisionsCapturedAt: now,
+    header: `${normalized.header}
+
+Ajustement demandé par le dirigeant : ${message}`,
+    objectives: normalized.objectives.map((objective) => ({
+      ...objective,
+      validationStatus: "adjusted",
+    })),
+  };
+}
+
 export async function runDiagnosticEngine(
   sessionId: string,
   userId: string,
@@ -1135,6 +1206,7 @@ export async function runDiagnosticEngine(
   let diagnosticResult: DiagnosticResult = normalizeDiagnosticResult(
     s.diagnostic_result_json
   );
+
   diagnosticResult.synthesis = computeDiagnosticSynthesis(
     diagnosticResult,
     coverage.global_analysis
@@ -1149,14 +1221,8 @@ export async function runDiagnosticEngine(
     .from("diagnostic_sessions")
     .update({
       coverage_json: coverage,
-      global_analysis_json: coverage.global_analysis ?? {},
+      global_analysis_json: coverage.global_analysis,
       diagnostic_result_json: diagnosticResult,
-      final_objectives_json: normalizeFinalObjectivesForPersistence(
-        s.final_objectives_json
-      ),
-      consolidation_json: normalizeConsolidationForPersistence(
-        s.consolidation_json
-      ),
     })
     .eq("id", sessionId);
 
@@ -1171,12 +1237,101 @@ export async function runDiagnosticEngine(
     currentQuestionIndex: questionIndex,
   });
 
+  const normalizedMessage = String(message ?? "").trim();
+
+  if (phase === "final_objectives_validation") {
+    const existingObjectives =
+      normalizeFinalObjectiveSet(s.final_objectives_json) ??
+      buildDeterministicFinalObjectives(diagnosticResult);
+
+    if (!normalizedMessage) {
+      await admin
+        .from("diagnostic_sessions")
+        .update({
+          status: "in_progress",
+          phase: "final_objectives_validation",
+          final_objectives_json: existingObjectives,
+          question_batch_json: [],
+          question_index: 0,
+          coverage_json: coverage,
+          global_analysis_json: coverage.global_analysis,
+          diagnostic_result_json: diagnosticResult,
+        })
+        .eq("id", sessionId);
+
+      return {
+        assistant_message: buildFinalObjectivesValidationMessage(existingObjectives),
+        questions: [],
+        needs_validation: true,
+      };
+    }
+
+    const validatedObjectives = applyObjectiveValidation(
+      existingObjectives,
+      normalizedMessage
+    );
+
+    if (!hasUsableObjectives(validatedObjectives)) {
+      return {
+        assistant_message:
+          "Les objectifs finaux ne sont pas exploitables. Merci de préciser au moins un objectif opérationnel, un indicateur et un responsable.",
+        questions: [],
+        needs_validation: true,
+      };
+    }
+
+    await admin
+      .from("diagnostic_sessions")
+      .update({
+        status: "report_ready",
+        phase: "report_ready",
+        final_objectives_json: validatedObjectives,
+        question_batch_json: [],
+        question_index: 0,
+        coverage_json: coverage,
+        global_analysis_json: coverage.global_analysis,
+        diagnostic_result_json: diagnosticResult,
+      })
+      .eq("id", sessionId);
+
+    return {
+      assistant_message:
+        "Les objectifs finaux sont validés. Le diagnostic est prêt pour la construction du rapport dirigeant.",
+      questions: [],
+      needs_validation: false,
+    };
+  }
+
   if (
     status === "completed" ||
     phase === "completed" ||
     phase === "diagnostic_complete" ||
     phase === "report_ready"
   ) {
+    if (!hasUsableObjectives(s.final_objectives_json)) {
+      const objectives = buildDeterministicFinalObjectives(diagnosticResult);
+
+      await admin
+        .from("diagnostic_sessions")
+        .update({
+          status: "in_progress",
+          phase: "final_objectives_validation",
+          final_objectives_json: objectives,
+          question_batch_json: [],
+          question_index: 0,
+          coverage_json: coverage,
+          global_analysis_json: coverage.global_analysis,
+          diagnostic_result_json: diagnosticResult,
+        })
+        .eq("id", sessionId);
+
+      return {
+        assistant_message: buildFinalObjectivesValidationMessage(objectives),
+        questions: [],
+        needs_validation: true,
+      };
+    }
+
     return {
       assistant_message:
         "Le diagnostic conversationnel est terminé. La prochaine étape est la génération du rapport final.",
@@ -1194,49 +1349,9 @@ export async function runDiagnosticEngine(
 
   if (eventsErr) throw new Error(eventsErr.message);
 
-  const normalizedMessage = String(message ?? "").trim();
   const history = buildHistory(
     (events ?? []) as Array<{ kind?: string; payload?: any }>
   );
-
-  if (phase === "final_objectives_validation") {
-    if (isYes(normalizedMessage)) {
-      const validatedObjectives = markFinalObjectivesValidated(
-        s.final_objectives_json
-      );
-
-      await admin
-        .from("diagnostic_sessions")
-        .update({
-          phase: "report_ready",
-          status: "report_ready",
-          coverage_json: coverage,
-          global_analysis_json: coverage.global_analysis ?? {},
-          diagnostic_result_json: diagnosticResult,
-          final_objectives_json: validatedObjectives,
-          consolidation_json: normalizeConsolidationForPersistence(
-            s.consolidation_json
-          ),
-          question_batch_json: [],
-          question_index: 0,
-        })
-        .eq("id", sessionId);
-
-      return {
-        assistant_message:
-          "Les objectifs finaux sont validés. Vous pouvez maintenant construire le rapport.",
-        questions: [],
-        needs_validation: false,
-      };
-    }
-
-    return {
-      assistant_message:
-        "Merci. Les ajustements d’objectifs finaux ne sont pas encore automatisés dans cette version. Répondez par oui pour valider les objectifs proposés, ou indiquez précisément les objectifs à modifier pour traitement manuel.",
-      questions: [],
-      needs_validation: true,
-    };
-  }
 
   if (phase === "iteration_validation") {
     if (isYes(normalizedMessage)) {
@@ -1249,10 +1364,9 @@ export async function runDiagnosticEngine(
         });
 
         if (dimension >= 4) {
-          const finalObjectives = buildFinalObjectivesForValidation({
-            existing: s.final_objectives_json,
-            diagnosticResult,
-          });
+          const objectives =
+            normalizeFinalObjectiveSet(s.final_objectives_json) ??
+            buildDeterministicFinalObjectives(diagnosticResult);
 
           await admin
             .from("diagnostic_sessions")
@@ -1260,20 +1374,16 @@ export async function runDiagnosticEngine(
               phase: "final_objectives_validation",
               status: "in_progress",
               coverage_json: coverage,
-              global_analysis_json: coverage.global_analysis ?? {},
+              global_analysis_json: coverage.global_analysis,
               diagnostic_result_json: diagnosticResult,
-              final_objectives_json: finalObjectives,
-              consolidation_json: normalizeConsolidationForPersistence(
-                s.consolidation_json
-              ),
+              final_objectives_json: objectives,
               question_batch_json: [],
               question_index: 0,
             })
             .eq("id", sessionId);
 
           return {
-            assistant_message:
-              "Les 4 dimensions du diagnostic ont été parcourues et consolidées.\n\nNous passons maintenant à la validation des objectifs finaux. Répondez par oui pour valider les objectifs proposés, ou indiquez les ajustements souhaités.",
+            assistant_message: buildFinalObjectivesValidationMessage(objectives),
             questions: [],
             needs_validation: true,
           };
@@ -1303,14 +1413,8 @@ export async function runDiagnosticEngine(
             question_batch_json: nextBatch,
             question_index: 0,
             coverage_json: coverage,
-            global_analysis_json: coverage.global_analysis ?? {},
+            global_analysis_json: coverage.global_analysis,
             diagnostic_result_json: diagnosticResult,
-            final_objectives_json: normalizeFinalObjectivesForPersistence(
-              s.final_objectives_json
-            ),
-            consolidation_json: normalizeConsolidationForPersistence(
-              s.consolidation_json
-            ),
           })
           .eq("id", sessionId);
 
@@ -1347,14 +1451,8 @@ ${buildIterationMessage(
           question_batch_json: nextBatch,
           question_index: 0,
           coverage_json: coverage,
-          global_analysis_json: coverage.global_analysis ?? {},
+          global_analysis_json: coverage.global_analysis,
           diagnostic_result_json: diagnosticResult,
-          final_objectives_json: normalizeFinalObjectivesForPersistence(
-            s.final_objectives_json
-          ),
-          consolidation_json: normalizeConsolidationForPersistence(
-            s.consolidation_json
-          ),
         })
         .eq("id", sessionId);
 
@@ -1387,14 +1485,8 @@ ${buildIterationMessage(
           question_batch_json: relaunchBatch,
           question_index: 0,
           coverage_json: coverage,
-          global_analysis_json: coverage.global_analysis ?? {},
+          global_analysis_json: coverage.global_analysis,
           diagnostic_result_json: diagnosticResult,
-          final_objectives_json: normalizeFinalObjectivesForPersistence(
-            s.final_objectives_json
-          ),
-          consolidation_json: normalizeConsolidationForPersistence(
-            s.consolidation_json
-          ),
         })
         .eq("id", sessionId);
 
@@ -1438,14 +1530,8 @@ ${buildIterationMessage(
           question_batch_json: rebuiltBatch,
           question_index: 0,
           coverage_json: coverage,
-          global_analysis_json: coverage.global_analysis ?? {},
+          global_analysis_json: coverage.global_analysis,
           diagnostic_result_json: diagnosticResult,
-          final_objectives_json: normalizeFinalObjectivesForPersistence(
-            s.final_objectives_json
-          ),
-          consolidation_json: normalizeConsolidationForPersistence(
-            s.consolidation_json
-          ),
         })
         .eq("id", sessionId);
 
@@ -1463,11 +1549,7 @@ ${buildIterationMessage(
 
     safeBatch = batch;
 
-    if (
-      safeBatch.length > 0 &&
-      questionIndex < safeBatch.length &&
-      normalizedMessage
-    ) {
+    if (safeBatch.length > 0 && questionIndex < safeBatch.length && normalizedMessage) {
       const activeQuestion = safeBatch[questionIndex] ?? null;
 
       const resolved = await resolveFactsFromAnswer({
@@ -1523,14 +1605,8 @@ ${buildIterationMessage(
             question_index: nextIndex,
             phase: "iteration_validation",
             coverage_json: coverage,
-            global_analysis_json: coverage.global_analysis ?? {},
+            global_analysis_json: coverage.global_analysis,
             diagnostic_result_json: diagnosticResult,
-            final_objectives_json: normalizeFinalObjectivesForPersistence(
-              s.final_objectives_json
-            ),
-            consolidation_json: normalizeConsolidationForPersistence(
-              s.consolidation_json
-            ),
             question_batch_json: safeBatch,
           })
           .eq("id", sessionId);
@@ -1552,14 +1628,8 @@ ${buildIterationMessage(
           question_index: nextIndex,
           phase: "dimension_questions",
           coverage_json: coverage,
-          global_analysis_json: coverage.global_analysis ?? {},
+          global_analysis_json: coverage.global_analysis,
           diagnostic_result_json: diagnosticResult,
-          final_objectives_json: normalizeFinalObjectivesForPersistence(
-            s.final_objectives_json
-          ),
-          consolidation_json: normalizeConsolidationForPersistence(
-            s.consolidation_json
-          ),
           question_batch_json: safeBatch,
         })
         .eq("id", sessionId);
@@ -1596,14 +1666,8 @@ ${buildIterationMessage(
         question_batch_json: regeneratedBatch,
         question_index: 0,
         coverage_json: coverage,
-        global_analysis_json: coverage.global_analysis ?? {},
+        global_analysis_json: coverage.global_analysis,
         diagnostic_result_json: diagnosticResult,
-        final_objectives_json: normalizeFinalObjectivesForPersistence(
-          s.final_objectives_json
-        ),
-        consolidation_json: normalizeConsolidationForPersistence(
-          s.consolidation_json
-        ),
       })
       .eq("id", sessionId);
 
