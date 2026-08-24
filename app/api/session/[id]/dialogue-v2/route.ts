@@ -91,7 +91,7 @@ function mapPhase(row: any) {
 function sessionPayload(row: any) {
   return {
     id: row.id,
-    status: row.status ?? "in_progress",
+    status: row.extracted_text ? row.status ?? "in_progress" : "collected",
     phase: mapPhase(row),
     dimension: row.dimension ?? null,
     iteration: row.iteration ?? null,
@@ -106,8 +106,7 @@ async function initializeConversationSession(sessionId: string) {
   const { error } = await admin
     .from("diagnostic_sessions")
     .update({
-      status: "in_progress",
-      phase: CONTEXT_INTAKE_PHASE,
+      status: "collected",
       dimension: null,
       iteration: null,
       question_index: 0,
@@ -182,12 +181,10 @@ export async function GET(
     const userId = await getEffectiveUserId();
     let row = await loadOwnedSession(sessionId, userId);
 
-    if (!row.extracted_text && row.phase !== CONTEXT_INTAKE_PHASE) {
+    if (!row.extracted_text) {
       await initializeConversationSession(sessionId);
       row = await loadOwnedSession(sessionId, userId);
-    }
 
-    if (!row.extracted_text) {
       return json({
         ok: true,
         assistant_message: CONTEXT_INTAKE_PROMPT,
