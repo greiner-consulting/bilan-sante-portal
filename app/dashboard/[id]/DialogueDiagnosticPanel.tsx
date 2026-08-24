@@ -14,6 +14,8 @@ type SessionState = {
   id: string;
   status?: string;
   phase?: string;
+  area?: string;
+  area_label?: string;
   dimension?: number | null;
   iteration?: number | null;
   question_index?: number;
@@ -62,35 +64,14 @@ function normalizeQuestions(value: unknown): StructuredQuestion[] {
 
 function phaseLabel(phase?: string | null) {
   switch (phase) {
-    case "context_intake":
-      return "Contexte — Histoire & résultats";
+    case "area_intake":
+      return "Recueil des éléments du domaine";
     case "dimension_iteration":
       return "Questions de diagnostic";
-    case "iteration_validation":
-      return "Validation d’itération";
-    case "final_objectives_validation":
-      return "Validation des objectifs";
     case "report_ready":
-      return "Rapport à produire";
-    case "completed":
-      return "Diagnostic terminé";
+      return "Entretien terminé";
     default:
       return phase || "Initialisation";
-  }
-}
-
-function dimensionLabel(dimension?: number | null) {
-  switch (Number(dimension)) {
-    case 1:
-      return "Organisation & RH";
-    case 2:
-      return "Commercial & Marchés";
-    case 3:
-      return "Cycle de vente & Prix";
-    case 4:
-      return "Exécution & Performance";
-    default:
-      return "Contexte & résultats";
   }
 }
 
@@ -117,6 +98,7 @@ function historyToMessages(events: HistoryEvent[]): DisplayMessage[] {
     if (kind === "QUESTION_ANSWER") {
       const questionText = String(payload?.question?.question ?? "").trim();
       const answerText = String(payload.answer ?? "").trim();
+
       if (questionText) {
         out.push({ id: `${baseId}-q`, role: "assistant", text: questionText });
       }
@@ -134,7 +116,6 @@ export default function DialogueDiagnosticPanel({ sessionId }: Props) {
   const [questions, setQuestions] = useState<StructuredQuestion[]>([]);
   const [assistantMessage, setAssistantMessage] = useState("");
   const [history, setHistory] = useState<DisplayMessage[]>([]);
-  const [needsValidation, setNeedsValidation] = useState(false);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -150,15 +131,15 @@ export default function DialogueDiagnosticPanel({ sessionId }: Props) {
     setSession(data.session ?? null);
     setQuestions(normalizeQuestions(data.questions));
     setAssistantMessage(String(data.assistant_message ?? "").trim());
-    setNeedsValidation(Boolean(data.needs_validation));
 
     const persisted = historyToMessages(Array.isArray(data.history) ? data.history : []);
-    if (persisted.length > 0) setHistory(persisted);
+    setHistory(persisted);
   }
 
   async function load() {
     setLoading(true);
     setError("");
+
     try {
       const res = await fetch(`/api/session/${sessionId}/dialogue-v2`, {
         method: "GET",
@@ -181,10 +162,6 @@ export default function DialogueDiagnosticPanel({ sessionId }: Props) {
 
     setInput("");
     setError("");
-    setHistory((prev) => [
-      ...prev,
-      { id: `local-${Date.now()}`, role: "user", text: message },
-    ]);
     setLoading(true);
 
     try {
@@ -215,11 +192,16 @@ export default function DialogueDiagnosticPanel({ sessionId }: Props) {
 
   const prompt = currentQuestion?.question || assistantMessage;
   const inputPlaceholder =
-    session?.phase === "context_intake"
-      ? "Présentez l’histoire récente et les résultats des trois derniers exercices..."
-      : needsValidation
-      ? 'Répondez "oui" ou "non", ou précisez votre demande...'
+    session?.phase === "area_intake"
+      ? "Transmettez les éléments disponibles ; indiquez simplement ceux qui ne sont pas suivis..."
       : "Votre réponse...";
+
+  const progression = session?.iteration
+    ? `Itération ${session.iteration}/3 — Question ${Math.min(
+        currentIndex + 1,
+        Math.max(questions.length, 1)
+      )}/${questions.length || "?"}`
+    : "Recueil initial";
 
   return (
     <div className="space-y-4">
@@ -230,19 +212,19 @@ export default function DialogueDiagnosticPanel({ sessionId }: Props) {
         </div>
         <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
           <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Domaine</div>
-          <div className="mt-1 text-sm font-medium text-slate-900">{dimensionLabel(session?.dimension)}</div>
+          <div className="mt-1 text-sm font-medium text-slate-900">
+            {session?.area_label || "Contexte — Histoire & résultats"}
+          </div>
         </div>
         <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
           <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Progression</div>
-          <div className="mt-1 text-sm font-medium text-slate-900">
-            {session?.iteration ? `Itération ${session.iteration}/3` : "Recueil initial"}
-          </div>
+          <div className="mt-1 text-sm font-medium text-slate-900">{progression}</div>
         </div>
       </div>
 
       <div
         ref={scrollRef}
-        className="max-h-[420px] space-y-3 overflow-y-auto rounded-xl border border-slate-200 bg-white p-4"
+        className="max-h-[460px] space-y-3 overflow-y-auto rounded-xl border border-slate-200 bg-white p-4"
       >
         {history.map((message) => (
           <div
@@ -263,9 +245,7 @@ export default function DialogueDiagnosticPanel({ sessionId }: Props) {
           </div>
         )}
 
-        {loading && (
-          <div className="text-sm text-slate-500">Analyse en cours...</div>
-        )}
+        {loading && <div className="text-sm text-slate-500">Analyse en cours...</div>}
       </div>
 
       {currentQuestion && (
@@ -279,7 +259,7 @@ export default function DialogueDiagnosticPanel({ sessionId }: Props) {
             <div><span className="font-semibold">Constat :</span> {currentQuestion.constat}</div>
           )}
           {currentQuestion.risque_managerial && (
-            <div><span className="font-semibold">Risque managérial :</span> {currentQuestion.risque_managerial}</div>
+            <div><span className="font-semibold">Pourquoi l’éclaircir :</span> {currentQuestion.risque_managerial}</div>
           )}
         </div>
       )}
@@ -292,7 +272,7 @@ export default function DialogueDiagnosticPanel({ sessionId }: Props) {
 
       {session?.phase === "report_ready" ? (
         <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm leading-6 text-emerald-900">
-          Le diagnostic conversationnel est terminé. La génération du rapport sera reprise dans le dernier lot de la refonte.
+          L’entretien de diagnostic est terminé. La consolidation des objectifs et l’édition du rapport seront traitées dans les lots suivants.
         </div>
       ) : (
         <form
