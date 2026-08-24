@@ -21,8 +21,11 @@ type DashboardSessionRow = {
 
 function phaseLabel(phase?: string | null) {
   switch (phase) {
+    case "context_intake":
+      return "Contexte & résultats";
     case "awaiting_trame":
-      return "En attente de trame";
+      return "Ancien diagnostic — données initiales attendues";
+    case "dimension_questions":
     case "dimension_iteration":
       return "Questions en cours";
     case "iteration_validation":
@@ -34,7 +37,7 @@ function phaseLabel(phase?: string | null) {
     case "completed":
       return "Terminée";
     default:
-      return phase ?? "n/a";
+      return phase ?? "À démarrer";
   }
 }
 
@@ -48,11 +51,6 @@ function formatDateTime(value?: string | null): string {
   } catch {
     return value;
   }
-}
-
-function displayFileName(value?: string | null): string {
-  const text = String(value ?? "").trim();
-  return text || "Diagnostic sans trame renseignée";
 }
 
 async function loadDashboardContext() {
@@ -126,7 +124,8 @@ export default async function DashboardPage() {
       .from("diagnostic_sessions")
       .insert({
         user_id: user.id,
-        status: "collected",
+        status: "in_progress",
+        phase: "context_intake",
       })
       .select("id")
       .single();
@@ -148,7 +147,7 @@ export default async function DashboardPage() {
               ? "Vous pouvez gérer les accès invités, créer un nouveau diagnostic et accéder aux diagnostics réalisés depuis une interface unique."
               : existingSession
                 ? "Votre diagnostic reste conservé en mémoire. Vous pouvez l’interrompre puis le reprendre sur la même session."
-                : "Vous pouvez créer votre diagnostic. Une fois démarré, il sera conservé et repris sur cette même session."
+                : "Vous pouvez démarrer directement votre diagnostic conversationnel. La session sera conservée pour être reprise à tout moment."
           }
           userLabel="Connecté"
           userValue={user.email ?? user.id}
@@ -197,8 +196,8 @@ export default async function DashboardPage() {
                   Diagnostic en mémoire
                 </div>
                 <div className="mt-1 text-sm leading-6 text-emerald-900">
-                  Votre diagnostic a déjà été créé. Utilisez uniquement la reprise de
-                  session pour continuer.
+                  Votre diagnostic a déjà été créé. Utilisez la reprise de session pour
+                  continuer exactement là où vous vous êtes arrêté.
                 </div>
               </div>
               <Link
@@ -238,7 +237,7 @@ export default async function DashboardPage() {
                     <div className="space-y-2">
                       <div>
                         <div className="text-base font-semibold text-slate-900">
-                          {displayFileName(session.source_filename)}
+                          Bilan de Santé — Diagnostic dirigeant
                         </div>
                         <div className="mt-1 text-xs text-slate-500">
                           Session : {session.id}
