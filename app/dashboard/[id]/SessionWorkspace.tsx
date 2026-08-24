@@ -6,14 +6,6 @@ type Props = {
   sessionId: string;
 };
 
-const DIAGNOSTIC_DOMAINS = [
-  "Contexte — Histoire & résultats",
-  "Organisation & RH",
-  "Commercial & Marchés",
-  "Cycle de vente & Prix",
-  "Exécution & Performance opérationnelle",
-] as const;
-
 export default function SessionWorkspace({ sessionId }: Props) {
   return (
     <div className="space-y-6">
@@ -40,34 +32,8 @@ export default function SessionWorkspace({ sessionId }: Props) {
         </div>
       </section>
 
-      <div className="grid gap-6 xl:grid-cols-[320px_minmax(0,1fr)]">
-        <aside className="space-y-6 self-start xl:sticky xl:top-6">
-          <section className="space-y-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-            <div>
-              <h2 className="text-base font-semibold text-slate-900">
-                Domaines du diagnostic
-              </h2>
-              <p className="mt-1 text-sm leading-6 text-slate-600">
-                L’entretien commence par la trajectoire de l’entreprise, puis couvre les
-                quatre domaines opérationnels.
-              </p>
-            </div>
-
-            <ul className="space-y-2 text-sm text-slate-700">
-              {DIAGNOSTIC_DOMAINS.map((item, index) => (
-                <li
-                  key={item}
-                  className="flex gap-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5"
-                >
-                  <span className="min-w-6 font-semibold text-slate-900">
-                    {index}.
-                  </span>
-                  <span>{item}</span>
-                </li>
-              ))}
-            </ul>
-          </section>
-
+      <div className="grid gap-6 xl:grid-cols-[280px_minmax(0,1fr)]">
+        <aside className="self-start xl:sticky xl:top-6">
           <section className="space-y-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
             <div>
               <h2 className="text-base font-semibold text-slate-900">
