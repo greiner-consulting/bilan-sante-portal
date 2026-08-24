@@ -22,9 +22,8 @@ type DashboardSessionRow = {
 function phaseLabel(phase?: string | null) {
   switch (phase) {
     case "context_intake":
-      return "Contexte & résultats";
     case "awaiting_trame":
-      return "Ancien diagnostic — données initiales attendues";
+      return "Contexte & résultats";
     case "dimension_questions":
     case "dimension_iteration":
       return "Questions en cours";
@@ -124,8 +123,7 @@ export default async function DashboardPage() {
       .from("diagnostic_sessions")
       .insert({
         user_id: user.id,
-        status: "in_progress",
-        phase: "context_intake",
+        status: "collected",
       })
       .select("id")
       .single();
