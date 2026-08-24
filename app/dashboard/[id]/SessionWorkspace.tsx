@@ -1,27 +1,17 @@
-import ChatPanel from "./ChatPanel";
 import BrandMark from "./BrandMark";
-import TrameUploadForm from "./TrameUploadForm";
+import DialogueDiagnosticPanel from "./DialogueDiagnosticPanel";
+import { DIAGNOSTIC_JOURNEY_STEPS } from "@/lib/diagnostic/conversationProtocol";
 
 type Props = {
   sessionId: string;
 };
 
-const DIMENSIONS = [
-  "1. Organisation & RH",
-  "2. Commercial & Marchés",
-  "3. Cycle de vente & Prix",
-  "4. Exécution & Performance opérationnelle",
-] as const;
-
-const FLOW_STEPS = [
-  "Upload d’une trame DOCX",
-  "Extraction de la matière de base",
-  "Démarrage du protocole dirigeant",
-  "3 itérations par dimension",
-  "Validations intermédiaires",
-  "Gel de chaque dimension",
-  "Validation des objectifs finaux",
-  "Construction du rapport",
+const DIAGNOSTIC_DOMAINS = [
+  "Contexte — Histoire & résultats",
+  "Organisation & RH",
+  "Commercial & Marchés",
+  "Cycle de vente & Prix",
+  "Exécution & Performance opérationnelle",
 ] as const;
 
 export default function SessionWorkspace({ sessionId }: Props) {
@@ -32,18 +22,19 @@ export default function SessionWorkspace({ sessionId }: Props) {
           <div className="space-y-3">
             <BrandMark />
             <p className="max-w-3xl text-sm leading-6 text-slate-700">
-              Cet espace pilote le protocole 4D complet : ingestion de la trame,
-              exploration progressive, consolidation par dimension, gel, objectifs finaux
-              puis préparation du rapport dirigeant.
+              Le diagnostic est conduit sous forme d’un entretien structuré avec l’IA.
+              L’IA analyse la matière communiquée, identifie les points d’étonnement et
+              approfondit progressivement le diagnostic. L’application garantit le
+              respect de la méthode, le séquencement et la traçabilité des échanges.
             </p>
           </div>
 
           <div className="max-w-sm rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-700">
             <div className="font-medium text-slate-900">Principe de travail</div>
             <div className="mt-1">
-              On privilégie d’abord la qualité de la matière collectée, puis sa
-              consolidation métier. L’interface reste simple ; la profondeur vient du
-              moteur de diagnostic.
+              Vous répondez librement. Les informations disponibles, les écarts, les
+              incohérences et les données non suivies alimentent ensuite les questions
+              du consultant IA.
             </div>
           </div>
         </div>
@@ -54,35 +45,24 @@ export default function SessionWorkspace({ sessionId }: Props) {
           <section className="space-y-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
             <div>
               <h2 className="text-base font-semibold text-slate-900">
-                Chargement de la trame
+                Domaines du diagnostic
               </h2>
               <p className="mt-1 text-sm leading-6 text-slate-600">
-                Déposez ici la trame DOCX de référence qui sert de base au protocole.
-              </p>
-            </div>
-
-            <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
-              <TrameUploadForm sessionId={sessionId} />
-            </div>
-          </section>
-
-          <section className="space-y-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-            <div>
-              <h2 className="text-base font-semibold text-slate-900">
-                Dimensions couvertes
-              </h2>
-              <p className="mt-1 text-sm leading-6 text-slate-600">
-                Le protocole explore successivement les 4 axes du diagnostic dirigeant.
+                L’entretien commence par la trajectoire de l’entreprise, puis couvre les
+                quatre domaines opérationnels.
               </p>
             </div>
 
             <ul className="space-y-2 text-sm text-slate-700">
-              {DIMENSIONS.map((item) => (
+              {DIAGNOSTIC_DOMAINS.map((item, index) => (
                 <li
                   key={item}
-                  className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5"
+                  className="flex gap-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5"
                 >
-                  {item}
+                  <span className="min-w-6 font-semibold text-slate-900">
+                    {index}.
+                  </span>
+                  <span>{item}</span>
                 </li>
               ))}
             </ul>
@@ -91,16 +71,16 @@ export default function SessionWorkspace({ sessionId }: Props) {
           <section className="space-y-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
             <div>
               <h2 className="text-base font-semibold text-slate-900">
-                Séquencement du flux
+                Parcours du diagnostic
               </h2>
               <p className="mt-1 text-sm leading-6 text-slate-600">
-                Le moteur suit un enchaînement structuré, sans rupture avec les routes
-                déjà stabilisées.
+                L’application contrôle l’enchaînement ; l’IA conduit l’entretien et les
+                approfondissements.
               </p>
             </div>
 
             <ol className="space-y-2 text-sm text-slate-700">
-              {FLOW_STEPS.map((step, index) => (
+              {DIAGNOSTIC_JOURNEY_STEPS.map((step, index) => (
                 <li
                   key={step}
                   className="flex gap-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5"
@@ -119,15 +99,15 @@ export default function SessionWorkspace({ sessionId }: Props) {
           <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
             <div className="mb-4">
               <h2 className="text-base font-semibold text-slate-900">
-                Espace de dialogue et de pilotage
+                Entretien de diagnostic
               </h2>
               <p className="mt-1 text-sm leading-6 text-slate-600">
-                Le panneau ci-dessous orchestre les questions, validations, dimensions
-                gelées, objectifs finaux et la construction du rapport.
+                Commencez directement par le dialogue. Aucun document préalable n’est
+                nécessaire pour engager le diagnostic.
               </p>
             </div>
 
-            <ChatPanel sessionId={sessionId} />
+            <DialogueDiagnosticPanel sessionId={sessionId} />
           </section>
         </main>
       </div>
