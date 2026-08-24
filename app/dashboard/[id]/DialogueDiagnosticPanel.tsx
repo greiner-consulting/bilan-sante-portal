@@ -68,6 +68,8 @@ function phaseLabel(phase?: string | null) {
       return "Recueil des éléments du domaine";
     case "dimension_iteration":
       return "Questions de diagnostic";
+    case "domain_review":
+      return "Bilan du domaine à valider";
     case "report_ready":
       return "Entretien terminé";
     default:
@@ -116,6 +118,7 @@ export default function DialogueDiagnosticPanel({ sessionId }: Props) {
   const [questions, setQuestions] = useState<StructuredQuestion[]>([]);
   const [assistantMessage, setAssistantMessage] = useState("");
   const [history, setHistory] = useState<DisplayMessage[]>([]);
+  const [needsValidation, setNeedsValidation] = useState(false);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -131,15 +134,13 @@ export default function DialogueDiagnosticPanel({ sessionId }: Props) {
     setSession(data.session ?? null);
     setQuestions(normalizeQuestions(data.questions));
     setAssistantMessage(String(data.assistant_message ?? "").trim());
-
-    const persisted = historyToMessages(Array.isArray(data.history) ? data.history : []);
-    setHistory(persisted);
+    setNeedsValidation(Boolean(data.needs_validation));
+    setHistory(historyToMessages(Array.isArray(data.history) ? data.history : []));
   }
 
   async function load() {
     setLoading(true);
     setError("");
-
     try {
       const res = await fetch(`/api/session/${sessionId}/dialogue-v2`, {
         method: "GET",
@@ -194,14 +195,21 @@ export default function DialogueDiagnosticPanel({ sessionId }: Props) {
   const inputPlaceholder =
     session?.phase === "area_intake"
       ? "Transmettez les éléments disponibles ; indiquez simplement ceux qui ne sont pas suivis..."
+      : needsValidation
+      ? "Répondez « oui » pour valider, ou indiquez ce que vous souhaitez corriger ou nuancer..."
       : "Votre réponse...";
 
-  const progression = session?.iteration
-    ? `Itération ${session.iteration}/3 — Question ${Math.min(
-        currentIndex + 1,
-        Math.max(questions.length, 1)
-      )}/${questions.length || "?"}`
-    : "Recueil initial";
+  const progression =
+    session?.phase === "domain_review"
+      ? "Synthèse + SWOT — validation"
+      : session?.iteration
+      ? `Itération ${session.iteration}/3 — Question ${Math.min(
+          currentIndex + 1,
+          Math.max(questions.length, 1)
+        )}/${questions.length || "?"}`
+      : session?.phase === "area_intake"
+      ? "Recueil initial"
+      : "Consolidation";
 
   return (
     <div className="space-y-4">
@@ -224,15 +232,15 @@ export default function DialogueDiagnosticPanel({ sessionId }: Props) {
 
       <div
         ref={scrollRef}
-        className="max-h-[460px] space-y-3 overflow-y-auto rounded-xl border border-slate-200 bg-white p-4"
+        className="max-h-[520px] space-y-3 overflow-y-auto rounded-xl border border-slate-200 bg-white p-4"
       >
         {history.map((message) => (
           <div
             key={message.id}
             className={
               message.role === "user"
-                ? "ml-10 rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm leading-6 text-slate-800"
-                : "mr-10 rounded-xl border border-slate-200 bg-white p-3 text-sm leading-6 text-slate-800"
+                ? "ml-10 whitespace-pre-line rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm leading-6 text-slate-800"
+                : "mr-10 whitespace-pre-line rounded-xl border border-slate-200 bg-white p-3 text-sm leading-6 text-slate-800"
             }
           >
             {message.text}
@@ -295,7 +303,7 @@ export default function DialogueDiagnosticPanel({ sessionId }: Props) {
             disabled={loading || !input.trim()}
             className="self-end rounded-xl bg-slate-950 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            Envoyer
+            {needsValidation ? "Valider / corriger" : "Envoyer"}
           </button>
         </form>
       )}
