@@ -56,6 +56,7 @@ type SessionState = {
   area_label?: string;
   dimension?: number | null;
   iteration?: number | null;
+  max_iterations?: number | null;
   question_index?: number;
   created_at?: string | null;
   updated_at?: string | null;
@@ -149,12 +150,8 @@ function historyToMessages(events: HistoryEvent[]): DisplayMessage[] {
       const questionText = String(payload?.question?.question ?? "").trim();
       const answerText = String(payload.answer ?? "").trim();
 
-      if (questionText) {
-        out.push({ id: `${baseId}-q`, role: "assistant", text: questionText });
-      }
-      if (answerText) {
-        out.push({ id: `${baseId}-a`, role: "user", text: answerText });
-      }
+      if (questionText) out.push({ id: `${baseId}-q`, role: "assistant", text: questionText });
+      if (answerText) out.push({ id: `${baseId}-a`, role: "user", text: answerText });
     }
   }
 
@@ -206,7 +203,7 @@ export default function DialogueDiagnosticPanel({ sessionId }: Props) {
     setLoading(true);
     setError("");
     try {
-      const res = await fetch(`/api/session/${sessionId}/dialogue-v4`, {
+      const res = await fetch(`/api/session/${sessionId}/dialogue-v5`, {
         method: "GET",
         cache: "no-store",
         credentials: "include",
@@ -230,7 +227,7 @@ export default function DialogueDiagnosticPanel({ sessionId }: Props) {
     setLoading(true);
 
     try {
-      const res = await fetch(`/api/session/${sessionId}/dialogue-v4`, {
+      const res = await fetch(`/api/session/${sessionId}/dialogue-v5`, {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
@@ -251,7 +248,7 @@ export default function DialogueDiagnosticPanel({ sessionId }: Props) {
     setError("");
     setLoading(true);
     try {
-      const res = await fetch(`/api/session/${sessionId}/dialogue-v4`, {
+      const res = await fetch(`/api/session/${sessionId}/dialogue-v5`, {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
@@ -304,12 +301,13 @@ export default function DialogueDiagnosticPanel({ sessionId }: Props) {
   const inputPlaceholder =
     session?.phase === "area_intake"
       ? session?.area === "context"
-        ? "Que s’est-il passé ? Quelle est votre histoire sur ces trois dernières années ?"
-        : "Expliquez les éléments de contexte qui permettent de comprendre ces chiffres..."
+        ? "Que s’est-il passé ? Quelle est votre histoire et votre impression sur ces trois dernières années ?"
+        : "Expliquez les éléments de contexte et de fonctionnement qui permettent de comprendre la situation..."
       : needsValidation
       ? "Répondez « oui » pour valider, ou indiquez ce que vous souhaitez corriger ou nuancer..."
       : "Votre réponse...";
 
+  const maxIterations = Math.max(1, Number(session?.max_iterations ?? 3));
   const progression =
     session?.phase === "structured_intake"
       ? "Étape 1 — Données chiffrées"
@@ -318,10 +316,12 @@ export default function DialogueDiagnosticPanel({ sessionId }: Props) {
       : session?.phase === "domain_review"
       ? "Synthèse + SWOT — validation"
       : session?.iteration
-      ? `Itération ${session.iteration}/3 — Question ${Math.min(
-          currentIndex + 1,
-          Math.max(questions.length, 1)
-        )}/${questions.length || "?"}`
+      ? maxIterations === 1
+        ? `Échange historique — Question ${Math.min(currentIndex + 1, Math.max(questions.length, 1))}/${questions.length || "?"}`
+        : `Itération ${session.iteration}/${maxIterations} — Question ${Math.min(
+            currentIndex + 1,
+            Math.max(questions.length, 1)
+          )}/${questions.length || "?"}`
       : "Consolidation";
 
   return (
@@ -367,8 +367,7 @@ export default function DialogueDiagnosticPanel({ sessionId }: Props) {
                           key={column.key}
                           className="whitespace-nowrap border-b border-r border-slate-200 px-3 py-2 text-left text-xs font-semibold text-slate-600 last:border-r-0"
                         >
-                          {column.label}
-                          {column.unit ? ` (${column.unit})` : ""}
+                          {column.label}{column.unit ? ` (${column.unit})` : ""}
                         </th>
                       ))}
                     </tr>
@@ -377,17 +376,12 @@ export default function DialogueDiagnosticPanel({ sessionId }: Props) {
                     {(intakeData.tables[table.key] ?? table.rows).map((row, rowIndex) => (
                       <tr key={rowIndex} className="bg-white">
                         {table.columns.map((column) => (
-                          <td
-                            key={column.key}
-                            className="border-b border-r border-slate-200 p-1 last:border-r-0"
-                          >
+                          <td key={column.key} className="border-b border-r border-slate-200 p-1 last:border-r-0">
                             <input
-                              type={column.kind === "number" ? "text" : "text"}
+                              type="text"
                               inputMode={column.kind === "number" ? "decimal" : undefined}
                               value={String(row?.[column.key] ?? "")}
-                              onChange={(e) =>
-                                setTableValue(table.key, rowIndex, column.key, e.target.value)
-                              }
+                              onChange={(e) => setTableValue(table.key, rowIndex, column.key, e.target.value)}
                               placeholder={column.placeholder || ""}
                               disabled={loading}
                               className="w-full min-w-24 rounded-md border border-transparent px-2 py-2 text-sm text-slate-900 outline-none transition focus:border-slate-300 focus:bg-slate-50"
@@ -424,9 +418,7 @@ export default function DialogueDiagnosticPanel({ sessionId }: Props) {
           )}
 
           {error && (
-            <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">
-              {error}
-            </div>
+            <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</div>
           )}
 
           <div className="flex justify-end">
@@ -442,10 +434,7 @@ export default function DialogueDiagnosticPanel({ sessionId }: Props) {
         </div>
       ) : (
         <>
-          <div
-            ref={scrollRef}
-            className="max-h-[520px] space-y-3 overflow-y-auto rounded-xl border border-slate-200 bg-white p-4"
-          >
+          <div ref={scrollRef} className="max-h-[520px] space-y-3 overflow-y-auto rounded-xl border border-slate-200 bg-white p-4">
             {history.map((message) => (
               <div
                 key={message.id}
@@ -471,9 +460,7 @@ export default function DialogueDiagnosticPanel({ sessionId }: Props) {
           {currentQuestion && (
             <div className="space-y-3 rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm leading-6">
               {currentQuestion.theme && (
-                <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                  {currentQuestion.theme}
-                </div>
+                <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">{currentQuestion.theme}</div>
               )}
               {currentQuestion.constat && (
                 <div><span className="font-semibold">Constat :</span> {currentQuestion.constat}</div>
@@ -485,9 +472,7 @@ export default function DialogueDiagnosticPanel({ sessionId }: Props) {
           )}
 
           {error && (
-            <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">
-              {error}
-            </div>
+            <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</div>
           )}
 
           {session?.phase === "report_ready" ? (
