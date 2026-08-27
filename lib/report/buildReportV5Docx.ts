@@ -20,12 +20,23 @@ function runs(text: string, bold = false) {
     .join("");
 }
 
-function p(text = "", opts?: { style?: string; bold?: boolean; keepNext?: boolean; align?: "left" | "center"; spaceAfter?: number }) {
+function p(
+  text = "",
+  opts?: {
+    style?: string;
+    bold?: boolean;
+    keepNext?: boolean;
+    align?: "left" | "center";
+    spaceAfter?: number;
+  }
+) {
   const pPr = [
     opts?.style ? `<w:pStyle w:val="${x(opts.style)}"/>` : "",
     opts?.keepNext ? "<w:keepNext/>" : "",
-    opts?.align === "center" ? "<w:jc w:val="center"/>" : "",
-    typeof opts?.spaceAfter === "number" ? `<w:spacing w:after="${opts.spaceAfter}"/>` : "",
+    opts?.align === "center" ? '<w:jc w:val="center"/>' : "",
+    typeof opts?.spaceAfter === "number"
+      ? `<w:spacing w:after="${opts.spaceAfter}"/>`
+      : "",
   ].join("");
   return `<w:p><w:pPr>${pPr}</w:pPr>${runs(text, Boolean(opts?.bold))}</w:p>`;
 }
@@ -47,9 +58,17 @@ function table(rows: string[][], widths: number[], header = false) {
   const borders = `<w:tblBorders><w:top w:val="single" w:sz="4" w:color="D6DEE8"/><w:left w:val="single" w:sz="4" w:color="D6DEE8"/><w:bottom w:val="single" w:sz="4" w:color="D6DEE8"/><w:right w:val="single" w:sz="4" w:color="D6DEE8"/><w:insideH w:val="single" w:sz="4" w:color="D6DEE8"/><w:insideV w:val="single" w:sz="4" w:color="D6DEE8"/></w:tblBorders>`;
   const body = rows
     .map((row, r) => {
-      const trPr = r === 0 && header ? "<w:trPr><w:tblHeader/></w:trPr>" : "<w:trPr><w:cantSplit/></w:trPr>";
+      const trPr =
+        r === 0 && header
+          ? "<w:trPr><w:tblHeader/></w:trPr>"
+          : "<w:trPr><w:cantSplit/></w:trPr>";
       const cells = row
-        .map((value, c) => cell(value, widths[c] ?? widths[widths.length - 1], { shade: r === 0 && header ? "EAF0F6" : undefined, bold: r === 0 && header }))
+        .map((value, c) =>
+          cell(value, widths[c] ?? widths[widths.length - 1], {
+            shade: r === 0 && header ? "EAF0F6" : undefined,
+            bold: r === 0 && header,
+          })
+        )
         .join("");
       return `<w:tr>${trPr}${cells}</w:tr>`;
     })
@@ -98,7 +117,10 @@ function dimensionSection(d: ReportDimension) {
     ...d.constats.map(bullet),
     p("Cause racine dominante", { style: "Heading3", keepNext: true }),
     p(d.cause_racine),
-    p("Zones non pilotées / non formalisées — risques managériaux associés", { style: "Heading3", keepNext: true }),
+    p("Zones non pilotées / non formalisées — risques managériaux associés", {
+      style: "Heading3",
+      keepNext: true,
+    }),
     zones,
     p("SWOT", { style: "Heading3", keepNext: true }),
     swotTable(d.swot),
@@ -107,7 +129,10 @@ function dimensionSection(d: ReportDimension) {
 
 function objectiveCard(o: ReportObjective) {
   return [
-    p(`Objectif ${o.id.replace(/^O/i, "")} — ${o.titre}`, { style: "Heading3", keepNext: true }),
+    p(`Objectif ${o.id.replace(/^O/i, "")} — ${o.titre}`, {
+      style: "Heading3",
+      keepNext: true,
+    }),
     table(
       [
         ["Objectif de résultat", o.objectif_resultat],
@@ -115,7 +140,11 @@ function objectiveCard(o: ReportObjective) {
         ["Owner", o.owner || "À confirmer"],
         ["Indicateur clé", o.indicateur_cle || "À confirmer"],
         ["Échéance", o.echeance || "À confirmer"],
-        ["Gain potentiel", o.gain_potentiel || "Non quantifiable avec fiabilité à partir des données disponibles"],
+        [
+          "Gain potentiel",
+          o.gain_potentiel ||
+            "Non quantifiable avec fiabilité à partir des données disponibles",
+        ],
         ["Statut de validation dirigeant", o.statut],
         ["Quick win", o.quick_win || "À définir lors de la mise en œuvre"],
       ],
@@ -130,7 +159,10 @@ function documentBody(report: ReportV5) {
 
   out.push(
     p("Bilan de Santé – Rapport Dirigeant", { style: "Title", align: "center" }),
-    p(report.identification.entreprise || "Entreprise", { style: "Subtitle", align: "center" }),
+    p(report.identification.entreprise || "Entreprise", {
+      style: "Subtitle",
+      align: "center",
+    }),
     p("", { spaceAfter: 200 }),
     table(
       [
@@ -152,10 +184,15 @@ function documentBody(report: ReportV5) {
     p("2.2 Principaux constats structurants", { style: "Heading2", keepNext: true }),
     ...report.synthese_executive.constats_structurants.map(bullet),
     p("2.3 Zones critiques non pilotées", { style: "Heading2", keepNext: true }),
-    ...report.synthese_executive.zones_critiques.map((z) => bullet(`${z.zone} → ${z.risque}`)),
+    ...report.synthese_executive.zones_critiques.map((z) =>
+      bullet(`${z.zone} → ${z.risque}`)
+    ),
     p("2.4 Enjeux économiques associés", { style: "Heading2", keepNext: true }),
     ...report.synthese_executive.enjeux_economiques.map(bullet),
-    p("2.5 Trajectoire de transformation proposée", { style: "Heading2", keepNext: true }),
+    p("2.5 Trajectoire de transformation proposée", {
+      style: "Heading2",
+      keepNext: true,
+    }),
     p(report.synthese_executive.trajectoire_transformation),
     p("2.6 Message clé dirigeant", { style: "Heading2", keepNext: true }),
     table([[report.synthese_executive.message_cle]], [9360]),
@@ -178,7 +215,10 @@ function documentBody(report: ReportV5) {
 
   out.push(
     pageBreak(),
-    p("5. Synthèse transverse des zones non pilotées", { style: "Heading1", keepNext: true }),
+    p("5. Synthèse transverse des zones non pilotées", {
+      style: "Heading1",
+      keepNext: true,
+    }),
     table(
       [
         ["Constat", "Risque managérial", "Impact potentiel"],
@@ -188,22 +228,39 @@ function documentBody(report: ReportV5) {
       true
     ),
     pageBreak(),
-    p("6. Plan d’actions — objectifs orientés résultats", { style: "Heading1", keepNext: true })
+    p("6. Plan d’actions — objectifs orientés résultats", {
+      style: "Heading1",
+      keepNext: true,
+    })
   );
 
   report.objectifs.forEach((objective, index) => {
     out.push(objectiveCard(objective));
-    if ((index + 1) % 2 === 0 && index < report.objectifs.length - 1) out.push(pageBreak());
+    if ((index + 1) % 2 === 0 && index < report.objectifs.length - 1) {
+      out.push(pageBreak());
+    }
   });
 
   out.push(
     pageBreak(),
-    p("7. Conclusion dirigeant — enjeux et cohérence globale", { style: "Heading1", keepNext: true }),
-    p("7.1 Enjeux actuels — situation inchangée", { style: "Heading2", keepNext: true }),
+    p("7. Conclusion dirigeant — enjeux et cohérence globale", {
+      style: "Heading1",
+      keepNext: true,
+    }),
+    p("7.1 Enjeux actuels — situation inchangée", {
+      style: "Heading2",
+      keepNext: true,
+    }),
     ...report.conclusion.enjeux_actuels.map(bullet),
-    p("7.2 Impact potentiel des actions — 12 à 24 mois", { style: "Heading2", keepNext: true }),
+    p("7.2 Impact potentiel des actions — 12 à 24 mois", {
+      style: "Heading2",
+      keepNext: true,
+    }),
     p(report.conclusion.impact_potentiel),
-    p("7.3 Cohérence globale entre les 4 dimensions", { style: "Heading2", keepNext: true }),
+    p("7.3 Cohérence globale entre les 4 dimensions", {
+      style: "Heading2",
+      keepNext: true,
+    }),
     p(report.conclusion.coherence_globale),
     pageBreak(),
     p("8. Confidentialité & anonymisation", { style: "Heading1", keepNext: true }),
@@ -231,13 +288,31 @@ export function buildReportV5Docx(report: ReportV5): Buffer {
   const now = new Date().toISOString();
   const body = documentBody(report);
 
-  zip.file("[Content_Types].xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/><Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/></Types>`);
-  zip.file("_rels/.rels", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/></Relationships>`);
-  zip.file("word/_rels/document.xml.rels", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`);
+  zip.file(
+    "[Content_Types].xml",
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/><Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/></Types>`
+  );
+  zip.file(
+    "_rels/.rels",
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/></Relationships>`
+  );
+  zip.file(
+    "word/_rels/document.xml.rels",
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`
+  );
   zip.file("word/styles.xml", styles);
-  zip.file("word/document.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1080" w:right="1080" w:bottom="1080" w:left="1080" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr></w:body></w:document>`);
-  zip.file("docProps/core.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><dc:title>Bilan de Santé – Rapport Dirigeant</dc:title><dc:creator>Greiner Consulting</dc:creator><cp:lastModifiedBy>Greiner Consulting</cp:lastModifiedBy><dcterms:created xsi:type="dcterms:W3CDTF">${now}</dcterms:created><dcterms:modified xsi:type="dcterms:W3CDTF">${now}</dcterms:modified></cp:coreProperties>`);
-  zip.file("docProps/app.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"><Application>Greiner Consulting – Bilan de Santé</Application></Properties>`);
+  zip.file(
+    "word/document.xml",
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1080" w:right="1080" w:bottom="1080" w:left="1080" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr></w:body></w:document>`
+  );
+  zip.file(
+    "docProps/core.xml",
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><dc:title>Bilan de Santé – Rapport Dirigeant</dc:title><dc:creator>Greiner Consulting</dc:creator><cp:lastModifiedBy>Greiner Consulting</cp:lastModifiedBy><dcterms:created xsi:type="dcterms:W3CDTF">${now}</dcterms:created><dcterms:modified xsi:type="dcterms:W3CDTF">${now}</dcterms:modified></cp:coreProperties>`
+  );
+  zip.file(
+    "docProps/app.xml",
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"><Application>Greiner Consulting – Bilan de Santé</Application></Properties>`
+  );
 
   return zip.generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
 }
