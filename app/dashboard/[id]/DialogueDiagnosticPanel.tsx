@@ -113,8 +113,10 @@ function phaseLabel(phase?: string | null) {
       return "Questions de diagnostic";
     case "domain_review":
       return "Bilan du domaine à valider";
+    case "objectives_review":
+      return "Consolidation du diagnostic";
     case "report_ready":
-      return "Entretien terminé";
+      return "Diagnostic consolidé";
     default:
       return phase || "Initialisation";
   }
@@ -303,6 +305,8 @@ export default function DialogueDiagnosticPanel({ sessionId }: Props) {
       ? session?.area === "context"
         ? "Que s’est-il passé ? Quelle est votre histoire et votre impression sur ces trois dernières années ?"
         : "Expliquez les éléments de contexte et de fonctionnement qui permettent de comprendre la situation..."
+      : session?.phase === "objectives_review"
+      ? "Indiquez vos priorités, les objectifs à supprimer, reformuler ou ajouter ; ou répondez « oui » pour valider..."
       : needsValidation
       ? "Répondez « oui » pour valider, ou indiquez ce que vous souhaitez corriger ou nuancer..."
       : "Votre réponse...";
@@ -315,6 +319,10 @@ export default function DialogueDiagnosticPanel({ sessionId }: Props) {
       ? "Étape 2 — Contexte et explications"
       : session?.phase === "domain_review"
       ? "Synthèse + SWOT — validation"
+      : session?.phase === "objectives_review"
+      ? "Définition des objectifs de résultat"
+      : session?.phase === "report_ready"
+      ? "Objectifs validés — rapport à construire"
       : session?.iteration
       ? maxIterations === 1
         ? `Échange historique — Question ${Math.min(currentIndex + 1, Math.max(questions.length, 1))}/${questions.length || "?"}`
@@ -477,7 +485,7 @@ export default function DialogueDiagnosticPanel({ sessionId }: Props) {
 
           {session?.phase === "report_ready" ? (
             <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm leading-6 text-emerald-900">
-              L’entretien de diagnostic est terminé. La consolidation des objectifs et l’édition du rapport seront traitées dans les lots suivants.
+              Les objectifs de résultat sont validés. Le diagnostic est consolidé. L’étape suivante sera la construction du rapport dirigeant.
             </div>
           ) : (
             <form
@@ -500,7 +508,11 @@ export default function DialogueDiagnosticPanel({ sessionId }: Props) {
                 disabled={loading || !input.trim()}
                 className="self-end rounded-xl bg-slate-950 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                {needsValidation ? "Valider / corriger" : "Envoyer"}
+                {session?.phase === "objectives_review"
+                  ? "Valider / ajuster"
+                  : needsValidation
+                  ? "Valider / corriger"
+                  : "Envoyer"}
               </button>
             </form>
           )}
