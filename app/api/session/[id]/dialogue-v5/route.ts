@@ -22,6 +22,12 @@ import {
   type DialogueQuestion,
 } from "@/lib/diagnostic/dialogueV5LLM";
 import {
+  formatObjectiveProposal,
+  generateObjectiveProposal,
+  refineObjectiveProposal,
+  type ObjectiveProposal,
+} from "@/lib/diagnostic/objectivesLLM";
+import {
   AREA_NARRATIVE_PROMPTS,
   STRUCTURED_INTAKE_SCHEMAS,
   emptyStructuredData,
@@ -41,6 +47,7 @@ type V5Stage =
   | "narrative_intake"
   | "questions"
   | "review"
+  | "objectives_review"
   | "complete";
 
 type V5AreaMaterial = {
@@ -56,11 +63,18 @@ type V5AreaMaterial = {
   validated?: boolean;
 };
 
+type ObjectivesState = {
+  proposal: ObjectiveProposal | null;
+  feedback: string[];
+  validated: boolean;
+};
+
 type V5State = {
   version: 5;
   area: DialogueArea;
   stage: V5Stage;
   materials: Record<DialogueArea, V5AreaMaterial>;
+  objectives: ObjectivesState;
 };
 
 function isBypass() {
@@ -117,6 +131,10 @@ function emptyMaterial(area: DialogueArea): V5AreaMaterial {
   };
 }
 
+function emptyObjectives(): ObjectivesState {
+  return { proposal: null, feedback: [], validated: false };
+}
+
 function emptyState(): V5State {
   return {
     version: 5,
@@ -129,6 +147,7 @@ function emptyState(): V5State {
       pricing: emptyMaterial("pricing"),
       execution: emptyMaterial("execution"),
     },
+    objectives: emptyObjectives(),
   };
 }
 
@@ -169,6 +188,14 @@ function normalizeAreaMaterial(area: DialogueArea, raw: any): V5AreaMaterial {
   };
 }
 
+function normalizeObjectives(raw: any): ObjectivesState {
+  return {
+    proposal: raw?.proposal && typeof raw.proposal === "object" ? raw.proposal : null,
+    feedback: Array.isArray(raw?.feedback) ? raw.feedback.map(String).filter(Boolean).slice(-8) : [],
+    validated: Boolean(raw?.validated),
+  };
+}
+
 function normalizeState(coverage: unknown): V5State | null {
   if (!coverage || typeof coverage !== "object" || Array.isArray(coverage)) return null;
   const raw = (coverage as Record<string, any>)[V5_KEY];
@@ -182,6 +209,7 @@ function normalizeState(coverage: unknown): V5State | null {
     "narrative_intake",
     "questions",
     "review",
+    "objectives_review",
     "complete",
   ].includes(String(raw.stage))
     ? (raw.stage as V5Stage)
@@ -198,6 +226,7 @@ function normalizeState(coverage: unknown): V5State | null {
       pricing: normalizeAreaMaterial("pricing", raw.materials?.pricing),
       execution: normalizeAreaMaterial("execution", raw.materials?.execution),
     },
+    objectives: normalizeObjectives(raw.objectives),
   };
 }
 
@@ -232,7 +261,7 @@ async function loadHistory(sessionId: string) {
     .select("id,kind,payload,created_at")
     .eq("session_id", sessionId)
     .order("created_at", { ascending: true })
-    .limit(2500);
+    .limit(3000);
   if (error) return [];
   return data ?? [];
 }
@@ -255,6 +284,19 @@ function crossDomainMemory(state: V5State): CrossDomainMemory[] {
       } as CrossDomainMemory;
     })
     .filter(Boolean) as CrossDomainMemory[];
+}
+
+function allValidatedMemory(state: V5State): CrossDomainMemory[] {
+  return AREA_ORDER.map((area) => {
+    const material = state.materials[area];
+    if (!material?.validated || !material.final_synthesis) return null;
+    return {
+      area,
+      label: AREA_LABELS[area],
+      synthesis: material.final_synthesis,
+      analysis: material.final_analysis ?? null,
+    } as CrossDomainMemory;
+  }).filter(Boolean) as CrossDomainMemory[];
 }
 
 function structuredAsText(area: DialogueArea, data: StructuredIntakeData) {
@@ -331,6 +373,7 @@ function hasMeaningfulStructuredInput(schema: StructuredIntakeSchema, data: Stru
 
 function uiPhase(state: V5State) {
   if (state.stage === "complete") return "report_ready";
+  if (state.stage === "objectives_review") return "objectives_review";
   if (state.stage === "structured_intake") return "structured_intake";
   if (state.stage === "narrative_intake") return "area_intake";
   if (state.stage === "review") return "domain_review";
@@ -339,15 +382,16 @@ function uiPhase(state: V5State) {
 
 function sessionPayload(row: any, state: V5State) {
   const maxIterations = maxIterationsForArea(state.area);
+  const objectivesStage = state.stage === "objectives_review" || state.stage === "complete";
   return {
     id: row.id,
     status: state.stage === "complete" ? "report_ready" : "in_progress",
     phase: uiPhase(state),
-    area: state.area,
-    area_label: AREA_LABELS[state.area],
-    dimension: dimensionForArea(state.area),
+    area: objectivesStage ? "objectives" : state.area,
+    area_label: objectivesStage ? "Vision transversale" : AREA_LABELS[state.area],
+    dimension: objectivesStage ? null : dimensionForArea(state.area),
     iteration: state.stage === "questions" ? Number(row.iteration ?? 1) : null,
-    max_iterations: maxIterations,
+    max_iterations: objectivesStage ? null : maxIterations,
     question_index: state.stage === "questions" ? Number(row.question_index ?? 0) : 0,
     created_at: row.created_at ?? null,
     updated_at: row.updated_at ?? null,
@@ -392,7 +436,7 @@ async function insertAssistantMessage(params: {
   userId: string;
   message: string;
   subtype: string;
-  area: DialogueArea;
+  area?: DialogueArea;
 }) {
   await insertEvent({
     sessionId: params.sessionId,
@@ -401,8 +445,8 @@ async function insertAssistantMessage(params: {
     payload: {
       engine: "dialogue_v5",
       subtype: params.subtype,
-      area: params.area,
-      area_label: AREA_LABELS[params.area],
+      area: params.area ?? "objectives",
+      area_label: params.area ? AREA_LABELS[params.area] : "Vision transversale",
       assistant_message: params.message,
     },
   });
@@ -665,6 +709,44 @@ function isAffirmative(message: string) {
   return /^(oui|ok|d'accord|d’accord|validé|valide|c'est juste|c’est juste|exact|exactement)[.! ]*$/.test(x);
 }
 
+async function startObjectivesReview(params: {
+  row: any;
+  state: V5State;
+  userId: string;
+}) {
+  const memory = allValidatedMemory(params.state);
+  if (memory.length !== AREA_ORDER.length) {
+    throw new Error("OBJECTIVES_REQUIRES_ALL_VALIDATED_DOMAINS");
+  }
+
+  const proposal = await generateObjectiveProposal({ memory });
+  params.state.objectives.proposal = proposal;
+  params.state.objectives.validated = false;
+  params.state.stage = "objectives_review";
+
+  const message = formatObjectiveProposal({ proposal });
+  await insertAssistantMessage({
+    sessionId: params.row.id,
+    userId: params.userId,
+    message,
+    subtype: "objectives_proposal",
+  });
+
+  await saveState({
+    row: params.row,
+    state: params.state,
+    patch: {
+      status: "in_progress",
+      phase: "final_objectives_validation",
+      dimension: 4,
+      iteration: null,
+      question_index: 0,
+      question_batch_json: [],
+      final_objectives_json: proposal,
+    },
+  });
+}
+
 async function handleReview(params: {
   row: any;
   state: V5State;
@@ -742,24 +824,118 @@ async function handleReview(params: {
     return;
   }
 
-  params.state.stage = "complete";
+  await startObjectivesReview({ row: params.row, state: params.state, userId: params.userId });
+}
+
+async function handleObjectivesReview(params: {
+  row: any;
+  state: V5State;
+  userId: string;
+  message: string;
+}) {
+  const current = params.state.objectives.proposal;
+  if (!current) throw new Error("OBJECTIVES_PROPOSAL_NOT_FOUND");
+
+  await insertEvent({
+    sessionId: params.row.id,
+    userId: params.userId,
+    kind: "CHAT_USER",
+    payload: {
+      engine: "dialogue_v5",
+      phase: "objectives_review",
+      area: "objectives",
+      area_label: "Vision transversale",
+      message: params.message,
+    },
+  });
+
+  if (isAffirmative(params.message)) {
+    params.state.objectives.validated = true;
+    params.state.stage = "complete";
+
+    await insertAssistantMessage({
+      sessionId: params.row.id,
+      userId: params.userId,
+      message:
+        "Les objectifs de résultat sont validés. Le diagnostic et sa consolidation transversale sont maintenant terminés. L'étape suivante sera la construction du rapport dirigeant.",
+      subtype: "objectives_validated",
+    });
+
+    await saveState({
+      row: params.row,
+      state: params.state,
+      patch: {
+        status: "report_ready",
+        phase: "report_ready",
+        dimension: 4,
+        iteration: 3,
+        question_index: 0,
+        question_batch_json: [],
+        final_objectives_json: current,
+      },
+    });
+    return;
+  }
+
+  params.state.objectives.feedback = [
+    ...(params.state.objectives.feedback || []),
+    params.message,
+  ].slice(-8);
+
+  const revised = await refineObjectiveProposal({
+    memory: allValidatedMemory(params.state),
+    current,
+    feedback: params.message,
+  });
+  params.state.objectives.proposal = revised;
+
+  const message = formatObjectiveProposal({ proposal: revised, revised: true });
+  await insertAssistantMessage({
+    sessionId: params.row.id,
+    userId: params.userId,
+    message,
+    subtype: "objectives_revised",
+  });
+
   await saveState({
     row: params.row,
     state: params.state,
     patch: {
-      status: "report_ready",
-      phase: "report_ready",
-      dimension: 4,
-      iteration: 3,
-      question_index: 0,
-      question_batch_json: [],
+      status: "in_progress",
+      phase: "final_objectives_validation",
+      final_objectives_json: revised,
     },
   });
 }
 
+async function migrateLegacyCompletedToObjectives(params: {
+  row: any;
+  state: V5State;
+  userId: string;
+}) {
+  if (
+    params.state.stage === "complete" &&
+    !params.state.objectives.validated &&
+    !params.state.objectives.proposal &&
+    allValidatedMemory(params.state).length === AREA_ORDER.length
+  ) {
+    await startObjectivesReview(params);
+    return true;
+  }
+  return false;
+}
+
 function assistantMessage(row: any, state: V5State) {
   if (state.stage === "complete") {
-    return "L’entretien de diagnostic est terminé. Les cinq domaines ont été analysés et validés.";
+    return "Le diagnostic et les objectifs de résultat sont validés. L'étape suivante sera la construction du rapport dirigeant.";
+  }
+  if (state.stage === "objectives_review") {
+    return state.objectives.proposal
+      ? formatObjectiveProposal({
+          proposal: state.objectives.proposal,
+          revised: state.objectives.feedback.length > 0,
+        })
+      : "Consolidation transversale en cours.";
   }
   if (state.stage === "structured_intake") return schemaForArea(state.area).instructions;
   if (state.stage === "narrative_intake") return AREA_NARRATIVE_PROMPTS[state.area];
@@ -793,7 +969,7 @@ function responsePayload(row: any, state: V5State, history: any[]) {
     ok: true,
     assistant_message: assistantMessage(row, state),
     questions: questionsPayload(row, state),
-    needs_validation: state.stage === "review",
+    needs_validation: state.stage === "review" || state.stage === "objectives_review",
     intake_schema: schema,
     intake_data:
       state.stage === "structured_intake"
@@ -822,11 +998,18 @@ export async function GET(_req: Request, context: { params: Promise<{ id: string
       state = currentState(row);
     }
 
+    if (await migrateLegacyCompletedToObjectives({ row, state, userId })) {
+      row = await loadOwnedSession(sessionId, userId);
+      state = currentState(row);
+    }
+
     return json(responsePayload(row, state, await loadHistory(sessionId)));
   } catch (error: any) {
     const message = error?.message ?? "Dialogue context error";
     const status =
-      message === "UNAUTHENTICATED" ? 401 : message === "FORBIDDEN" ? 403 : message === "Session not found" ? 404 : 500;
+      message === "UNAUTHENTICATED" ? 401 :
+      message === "FORBIDDEN" ? 403 :
+      message === "Session not found" ? 404 : 500;
     return json({ ok: false, error: message }, status);
   }
 }
@@ -841,6 +1024,11 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
     let state = currentState(row);
     if (!normalizeState(row.coverage_json)) state = emptyState();
 
+    if (await migrateLegacyCompletedToObjectives({ row, state, userId })) {
+      row = await loadOwnedSession(sessionId, userId);
+      state = currentState(row);
+    }
+
     if (state.stage === "structured_intake") {
       await handleStructuredIntake({ row, state, userId, rawData: body?.structured_data });
     } else {
@@ -853,6 +1041,8 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
         await answerCurrentQuestion({ row, state, userId, answer: message });
       } else if (state.stage === "review") {
         await handleReview({ row, state, userId, message });
+      } else if (state.stage === "objectives_review") {
+        await handleObjectivesReview({ row, state, userId, message });
       } else {
         return json({ ok: false, error: "DIAGNOSTIC_ALREADY_COMPLETE" }, 409);
       }
