@@ -22,9 +22,7 @@ export default async function DiagnosticSessionPage({ params }: Props) {
     .eq("id", sessionId)
     .maybeSingle();
 
-  if (error) {
-    throw new Error(error.message);
-  }
+  if (error) throw new Error(error.message);
 
   if (!session || session.deleted_at) {
     redirect("/dashboard?error=Diagnostic%20introuvable%20ou%20supprim%C3%A9.");
@@ -35,5 +33,9 @@ export default async function DiagnosticSessionPage({ params }: Props) {
     redirect("/dashboard?error=Acc%C3%A8s%20non%20autoris%C3%A9%20%C3%A0%20cette%20session.");
   }
 
-  return <SessionWorkspace sessionId={sessionId} />;
+  return (
+    <main className="min-h-screen bg-[#DCE6EE] p-2 md:p-3">
+      <SessionWorkspace sessionId={sessionId} />
+    </main>
+  );
 }
