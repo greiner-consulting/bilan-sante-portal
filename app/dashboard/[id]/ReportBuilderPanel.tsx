@@ -127,99 +127,81 @@ export default function ReportBuilderPanel({ sessionId }: { sessionId: string })
   if (!ready && !latest) return null;
 
   return (
-    <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-        <div>
-          <div className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">
-            Étape 7
+    <section className="overflow-hidden rounded-2xl border border-[#BFD2E1] bg-white shadow-[0_12px_30px_rgba(23,58,94,0.08)]">
+      <div className="h-1.5 bg-[#173A5E]" />
+      <div className="p-5">
+        <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+          <div>
+            <div className="text-xs font-semibold uppercase tracking-[0.16em] text-[#3676A8]">
+              Étape 7
+            </div>
+            <h2 className="mt-1 text-xl font-semibold text-[#173A5E]">
+              Rapport dirigeant
+            </h2>
+            <p className="mt-2 max-w-3xl text-sm leading-6 text-[#66788A]">
+              Le rapport Word est construit exclusivement à partir du diagnostic gelé et des
+              objectifs validés. Renseignez les éléments d’identification avant de lancer la
+              génération.
+            </p>
           </div>
-          <h2 className="mt-1 text-lg font-semibold text-slate-950">
-            Rapport dirigeant
-          </h2>
-          <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">
-            Le rapport Word est construit exclusivement à partir du diagnostic gelé et des
-            objectifs validés. Renseignez les éléments d’identification avant de lancer la
-            génération.
-          </p>
+          {latest?.status === "ready" && (
+            <span className="inline-flex items-center gap-2 rounded-full border border-[#9FD7C5] bg-[#E8F7F1] px-3 py-1.5 text-xs font-semibold text-[#1E6A57]">
+              <span className="h-2 w-2 rounded-full bg-[#2D8A72]" />
+              Rapport Word prêt
+            </span>
+          )}
         </div>
-        {latest?.status === "ready" && (
-          <span className="rounded-full bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-800">
-            Rapport Word prêt
-          </span>
+
+        <div className="mt-5 rounded-xl border border-[#D7E3EC] bg-[#F7FAFC] p-4">
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+            {([
+              ["entreprise", "Entreprise"],
+              ["dirigeant", "Dirigeant"],
+              ["activite", "Activité principale"],
+              ["localisation", "Localisation"],
+              ["date", "Date du diagnostic"],
+            ] as Array<[keyof Identification, string]>).map(([key, label]) => (
+              <label key={key} className="space-y-1.5 text-sm xl:col-span-1">
+                <span className="font-medium text-[#43566B]">{label}</span>
+                <input
+                  value={identification[key]}
+                  onChange={(e) => setField(key, e.target.value)}
+                  className="w-full rounded-lg border border-[#B8CAD9] bg-white px-3 py-2.5 text-slate-900 outline-none transition focus:border-[#3676A8] focus:ring-2 focus:ring-[#D9EAF6]"
+                />
+              </label>
+            ))}
+          </div>
+        </div>
+
+        {error && (
+          <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+            {error}
+          </div>
         )}
-      </div>
 
-      <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-5">
-        <label className="space-y-1.5 text-sm xl:col-span-1">
-          <span className="font-medium text-slate-700">Entreprise</span>
-          <input
-            value={identification.entreprise}
-            onChange={(e) => setField("entreprise", e.target.value)}
-            className="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-slate-900 outline-none focus:border-slate-500 focus:ring-2 focus:ring-slate-200"
-          />
-        </label>
-        <label className="space-y-1.5 text-sm xl:col-span-1">
-          <span className="font-medium text-slate-700">Dirigeant</span>
-          <input
-            value={identification.dirigeant}
-            onChange={(e) => setField("dirigeant", e.target.value)}
-            className="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-slate-900 outline-none focus:border-slate-500 focus:ring-2 focus:ring-slate-200"
-          />
-        </label>
-        <label className="space-y-1.5 text-sm xl:col-span-1">
-          <span className="font-medium text-slate-700">Activité principale</span>
-          <input
-            value={identification.activite}
-            onChange={(e) => setField("activite", e.target.value)}
-            className="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-slate-900 outline-none focus:border-slate-500 focus:ring-2 focus:ring-slate-200"
-          />
-        </label>
-        <label className="space-y-1.5 text-sm xl:col-span-1">
-          <span className="font-medium text-slate-700">Localisation</span>
-          <input
-            value={identification.localisation}
-            onChange={(e) => setField("localisation", e.target.value)}
-            className="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-slate-900 outline-none focus:border-slate-500 focus:ring-2 focus:ring-slate-200"
-          />
-        </label>
-        <label className="space-y-1.5 text-sm xl:col-span-1">
-          <span className="font-medium text-slate-700">Date du diagnostic</span>
-          <input
-            value={identification.date}
-            onChange={(e) => setField("date", e.target.value)}
-            className="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-slate-900 outline-none focus:border-slate-500 focus:ring-2 focus:ring-slate-200"
-          />
-        </label>
-      </div>
-
-      {error && (
-        <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">
-          {error}
-        </div>
-      )}
-
-      <div className="mt-5 flex flex-wrap justify-end gap-3">
-        {latest?.status === "ready" && (
+        <div className="mt-5 flex flex-wrap justify-end gap-3">
+          {latest?.status === "ready" && (
+            <button
+              type="button"
+              onClick={download}
+              className="rounded-xl border border-[#7FA5C2] bg-white px-5 py-2.5 text-sm font-medium text-[#173A5E] transition hover:bg-[#EFF5F9]"
+            >
+              Télécharger le rapport Word existant
+            </button>
+          )}
           <button
             type="button"
-            onClick={download}
-            className="rounded-xl border border-slate-300 bg-white px-5 py-2.5 text-sm font-medium text-slate-800 transition hover:bg-slate-50"
+            onClick={generate}
+            disabled={!complete || generating}
+            className="rounded-xl bg-[#173A5E] px-5 py-2.5 text-sm font-medium text-white shadow-sm transition hover:bg-[#244F77] disabled:cursor-not-allowed disabled:opacity-50"
           >
-            Télécharger le rapport Word existant
+            {generating
+              ? "Construction du rapport..."
+              : latest?.status === "ready"
+              ? "Reconstruire le rapport Word"
+              : "Construire le rapport Word"}
           </button>
-        )}
-        <button
-          type="button"
-          onClick={generate}
-          disabled={!complete || generating}
-          className="rounded-xl bg-slate-950 px-5 py-2.5 text-sm font-medium text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {generating
-            ? "Construction du rapport..."
-            : latest?.status === "ready"
-            ? "Reconstruire le rapport Word"
-            : "Construire le rapport Word"}
-        </button>
+        </div>
       </div>
     </section>
   );
