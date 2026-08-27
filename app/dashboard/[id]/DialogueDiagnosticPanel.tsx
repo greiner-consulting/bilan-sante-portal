@@ -335,29 +335,25 @@ export default function DialogueDiagnosticPanel({ sessionId }: Props) {
   return (
     <div className="space-y-4">
       <div className="grid gap-3 md:grid-cols-3">
-        <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-          <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Étape</div>
-          <div className="mt-1 text-sm font-medium text-slate-900">{phaseLabel(session?.phase)}</div>
-        </div>
-        <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-          <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Domaine</div>
-          <div className="mt-1 text-sm font-medium text-slate-900">
-            {session?.area_label || "Contexte — Histoire & résultats"}
+        {[
+          ["Étape", phaseLabel(session?.phase)],
+          ["Domaine", session?.area_label || "Contexte — Histoire & résultats"],
+          ["Progression", progression],
+        ].map(([label, value]) => (
+          <div key={label} className="rounded-xl border border-[#C9D8E6] bg-[#F5F9FC] p-3 shadow-sm">
+            <div className="text-xs font-semibold uppercase tracking-wide text-[#6B7F93]">{label}</div>
+            <div className="mt-1 text-sm font-semibold text-[#173A5E]">{value}</div>
           </div>
-        </div>
-        <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-          <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Progression</div>
-          <div className="mt-1 text-sm font-medium text-slate-900">{progression}</div>
-        </div>
+        ))}
       </div>
 
       {session?.phase === "structured_intake" && intakeSchema ? (
-        <div className="space-y-5 rounded-xl border border-slate-200 bg-white p-5">
+        <div className="space-y-5 rounded-xl border border-[#C9D8E6] bg-white p-5 shadow-sm">
           <div>
-            <h3 className="text-base font-semibold text-slate-950">{intakeSchema.title}</h3>
-            <p className="mt-2 text-sm leading-6 text-slate-700">{intakeSchema.instructions}</p>
+            <h3 className="text-base font-semibold text-[#173A5E]">{intakeSchema.title}</h3>
+            <p className="mt-2 text-sm leading-6 text-[#43566B]">{intakeSchema.instructions}</p>
             {intakeSchema.note && (
-              <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
+              <p className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
                 {intakeSchema.note}
               </p>
             )}
@@ -365,15 +361,15 @@ export default function DialogueDiagnosticPanel({ sessionId }: Props) {
 
           {intakeSchema.tables.map((table) => (
             <div key={table.key} className="space-y-2">
-              <div className="text-sm font-semibold text-slate-900">{table.title}</div>
-              <div className="overflow-x-auto rounded-lg border border-slate-200">
+              <div className="text-sm font-semibold text-[#173A5E]">{table.title}</div>
+              <div className="overflow-x-auto rounded-lg border border-[#D6E2EC]">
                 <table className="min-w-full border-collapse text-sm">
-                  <thead className="bg-slate-50">
+                  <thead className="bg-[#EAF2F8]">
                     <tr>
                       {table.columns.map((column) => (
                         <th
                           key={column.key}
-                          className="whitespace-nowrap border-b border-r border-slate-200 px-3 py-2 text-left text-xs font-semibold text-slate-600 last:border-r-0"
+                          className="whitespace-nowrap border-b border-r border-[#D6E2EC] px-3 py-2 text-left text-xs font-semibold text-[#45637C] last:border-r-0"
                         >
                           {column.label}{column.unit ? ` (${column.unit})` : ""}
                         </th>
@@ -384,7 +380,7 @@ export default function DialogueDiagnosticPanel({ sessionId }: Props) {
                     {(intakeData.tables[table.key] ?? table.rows).map((row, rowIndex) => (
                       <tr key={rowIndex} className="bg-white">
                         {table.columns.map((column) => (
-                          <td key={column.key} className="border-b border-r border-slate-200 p-1 last:border-r-0">
+                          <td key={column.key} className="border-b border-r border-[#E1EAF1] p-1 last:border-r-0">
                             <input
                               type="text"
                               inputMode={column.kind === "number" ? "decimal" : undefined}
@@ -392,7 +388,7 @@ export default function DialogueDiagnosticPanel({ sessionId }: Props) {
                               onChange={(e) => setTableValue(table.key, rowIndex, column.key, e.target.value)}
                               placeholder={column.placeholder || ""}
                               disabled={loading}
-                              className="w-full min-w-24 rounded-md border border-transparent px-2 py-2 text-sm text-slate-900 outline-none transition focus:border-slate-300 focus:bg-slate-50"
+                              className="w-full min-w-24 rounded-md border border-transparent px-2 py-2 text-sm text-slate-900 outline-none transition focus:border-[#7DA5C3] focus:bg-[#F5F9FC]"
                             />
                           </td>
                         ))}
@@ -408,7 +404,7 @@ export default function DialogueDiagnosticPanel({ sessionId }: Props) {
             <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
               {(intakeSchema.fields || []).map((field) => (
                 <label key={field.key} className="space-y-1 text-sm">
-                  <span className="font-medium text-slate-700">
+                  <span className="font-medium text-[#43566B]">
                     {field.label}{field.unit ? ` (${field.unit})` : ""}
                   </span>
                   <input
@@ -418,7 +414,7 @@ export default function DialogueDiagnosticPanel({ sessionId }: Props) {
                     onChange={(e) => setFieldValue(field.key, e.target.value)}
                     placeholder={field.placeholder || ""}
                     disabled={loading}
-                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-200"
+                    className="w-full rounded-lg border border-[#B8CAD9] px-3 py-2 text-sm text-slate-900 focus:border-[#3676A8] focus:outline-none focus:ring-2 focus:ring-[#D9EAF6]"
                   />
                 </label>
               ))}
@@ -434,7 +430,7 @@ export default function DialogueDiagnosticPanel({ sessionId }: Props) {
               type="button"
               onClick={submitStructuredIntake}
               disabled={loading}
-              className="rounded-xl bg-slate-950 px-5 py-2.5 text-sm font-medium text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+              className="rounded-xl bg-[#173A5E] px-5 py-2.5 text-sm font-medium text-white shadow-sm transition hover:bg-[#244F77] disabled:cursor-not-allowed disabled:opacity-50"
             >
               {loading ? "Enregistrement..." : "Valider les données et continuer"}
             </button>
@@ -442,14 +438,14 @@ export default function DialogueDiagnosticPanel({ sessionId }: Props) {
         </div>
       ) : (
         <>
-          <div ref={scrollRef} className="max-h-[520px] space-y-3 overflow-y-auto rounded-xl border border-slate-200 bg-white p-4">
+          <div ref={scrollRef} className="max-h-[520px] space-y-3 overflow-y-auto rounded-xl border border-[#D6E2EC] bg-[#F8FBFD] p-4">
             {history.map((message) => (
               <div
                 key={message.id}
                 className={
                   message.role === "user"
-                    ? "ml-10 whitespace-pre-line rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm leading-6 text-slate-800"
-                    : "mr-10 whitespace-pre-line rounded-xl border border-slate-200 bg-white p-3 text-sm leading-6 text-slate-800"
+                    ? "ml-10 whitespace-pre-line rounded-xl border border-[#D9E2EA] bg-white p-3 text-sm leading-6 text-[#30465B] shadow-sm"
+                    : "mr-10 whitespace-pre-line rounded-xl border border-[#C8DDEB] bg-[#EAF2F8] p-3 text-sm leading-6 text-[#294762] shadow-sm"
                 }
               >
                 {message.text}
@@ -457,18 +453,18 @@ export default function DialogueDiagnosticPanel({ sessionId }: Props) {
             ))}
 
             {prompt && (
-              <div className="mr-10 whitespace-pre-line rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm leading-6 text-slate-900">
+              <div className="mr-10 whitespace-pre-line rounded-xl border border-[#AFC9DC] bg-[#E3EFF7] p-4 text-sm leading-6 text-[#173A5E] shadow-sm">
                 {prompt}
               </div>
             )}
 
-            {loading && <div className="text-sm text-slate-500">Analyse en cours...</div>}
+            {loading && <div className="text-sm font-medium text-[#6B7F93]">Analyse en cours...</div>}
           </div>
 
           {currentQuestion && (
-            <div className="space-y-3 rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm leading-6">
+            <div className="space-y-3 rounded-xl border border-[#D8C38D] bg-[#FFF9E8] p-4 text-sm leading-6 text-[#5A4A25]">
               {currentQuestion.theme && (
-                <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">{currentQuestion.theme}</div>
+                <div className="text-xs font-semibold uppercase tracking-wide text-[#9B6B14]">{currentQuestion.theme}</div>
               )}
               {currentQuestion.constat && (
                 <div><span className="font-semibold">Constat :</span> {currentQuestion.constat}</div>
@@ -484,7 +480,7 @@ export default function DialogueDiagnosticPanel({ sessionId }: Props) {
           )}
 
           {session?.phase === "report_ready" ? (
-            <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm leading-6 text-emerald-900">
+            <div className="rounded-xl border border-[#9FD7C5] bg-[#E8F7F1] p-4 text-sm font-medium leading-6 text-[#1E6A57]">
               Les objectifs de résultat sont validés. Le diagnostic est consolidé. L’étape suivante sera la construction du rapport dirigeant.
             </div>
           ) : (
@@ -501,12 +497,12 @@ export default function DialogueDiagnosticPanel({ sessionId }: Props) {
                 placeholder={inputPlaceholder}
                 rows={4}
                 disabled={loading}
-                className="min-h-24 flex-1 resize-y rounded-xl border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-200 disabled:bg-slate-50"
+                className="min-h-24 flex-1 resize-y rounded-xl border border-[#B8CAD9] bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-[#3676A8] focus:outline-none focus:ring-2 focus:ring-[#D9EAF6] disabled:bg-slate-50"
               />
               <button
                 type="submit"
                 disabled={loading || !input.trim()}
-                className="self-end rounded-xl bg-slate-950 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                className="self-end rounded-xl bg-[#173A5E] px-4 py-2.5 text-sm font-medium text-white shadow-sm transition hover:bg-[#244F77] disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {session?.phase === "objectives_review"
                   ? "Valider / ajuster"
