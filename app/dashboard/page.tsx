@@ -121,10 +121,7 @@ export default async function DashboardPage() {
 
     const { data, error } = await db
       .from("diagnostic_sessions")
-      .insert({
-        user_id: user.id,
-        status: "collected",
-      })
+      .insert({ user_id: user.id, status: "collected" })
       .select("id")
       .single();
 
@@ -136,7 +133,7 @@ export default async function DashboardPage() {
   }
 
   return (
-    <main className="min-h-screen bg-slate-50 px-6 py-8">
+    <main className="min-h-screen bg-[#DCE6EE] px-6 py-8">
       <div className="mx-auto max-w-6xl space-y-6">
         <PortalPageHeader
           pageTitle={isAdmin ? "Dashboard administrateur" : "Mes diagnostics"}
@@ -153,33 +150,22 @@ export default async function DashboardPage() {
             <>
               {isAdmin && (
                 <>
-                  <Link
-                    href="/admin/access"
-                    className="inline-flex items-center justify-center rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium text-slate-800 transition hover:bg-slate-50"
-                  >
+                  <Link href="/admin/access" className="inline-flex items-center justify-center rounded-xl border border-[#B8C9D7] bg-white px-4 py-2.5 text-sm font-medium text-[#173A5E] transition hover:bg-[#EAF2F8]">
                     Gestion des accès invités
                   </Link>
-                  <Link
-                    href="/admin/diagnostics"
-                    className="inline-flex items-center justify-center rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium text-slate-800 transition hover:bg-slate-50"
-                  >
+                  <Link href="/admin/diagnostics" className="inline-flex items-center justify-center rounded-xl border border-[#B8C9D7] bg-white px-4 py-2.5 text-sm font-medium text-[#173A5E] transition hover:bg-[#EAF2F8]">
                     Diagnostics réalisés
                   </Link>
                 </>
               )}
-
               {canCreateNew && (
                 <form action={createSession}>
-                  <button className="inline-flex items-center justify-center rounded-xl bg-slate-950 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-slate-800">
+                  <button className="inline-flex items-center justify-center rounded-xl bg-[#173A5E] px-4 py-2.5 text-sm font-medium text-white transition hover:bg-[#214F7B]">
                     Nouveau diagnostic
                   </button>
                 </form>
               )}
-
-              <Link
-                href={logoutHref}
-                className="inline-flex items-center justify-center rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium text-slate-800 transition hover:bg-slate-50"
-              >
+              <Link href={logoutHref} className="inline-flex items-center justify-center rounded-xl border border-[#B8C9D7] bg-white px-4 py-2.5 text-sm font-medium text-[#173A5E] transition hover:bg-[#EAF2F8]">
                 Déconnexion
               </Link>
             </>
@@ -187,102 +173,52 @@ export default async function DashboardPage() {
         />
 
         {!isAdmin && existingSession && (
-          <section className="rounded-2xl border border-emerald-200 bg-emerald-50 p-5 shadow-sm">
+          <section className="rounded-2xl border border-[#9FD6C5] bg-[#E7F6F0] p-5 shadow-[0_8px_24px_rgba(23,58,94,0.06)]">
             <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
               <div>
-                <div className="text-sm font-semibold text-emerald-900">
-                  Diagnostic en mémoire
-                </div>
-                <div className="mt-1 text-sm leading-6 text-emerald-900">
-                  Votre diagnostic a déjà été créé. Utilisez la reprise de session pour
-                  continuer exactement là où vous vous êtes arrêté.
+                <div className="text-sm font-semibold text-[#1E6654]">Diagnostic en mémoire</div>
+                <div className="mt-1 text-sm leading-6 text-[#285E52]">
+                  Votre diagnostic a déjà été créé. Utilisez la reprise de session pour continuer exactement là où vous vous êtes arrêté.
                 </div>
               </div>
-              <Link
-                href={`/dashboard/${existingSession.id}`}
-                className="inline-flex items-center justify-center rounded-xl bg-emerald-700 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-emerald-800"
-              >
+              <Link href={`/dashboard/${existingSession.id}`} className="inline-flex items-center justify-center rounded-xl bg-[#287A65] px-4 py-2.5 text-sm font-medium text-white transition hover:bg-[#226B58]">
                 Reprendre mon diagnostic
               </Link>
             </div>
           </section>
         )}
 
-        <section className="rounded-2xl border bg-white p-6 shadow-sm">
-          <div className="mb-4 flex items-center justify-between">
-            <h2 className="text-lg font-semibold text-slate-900">
-              {isAdmin ? "Vos diagnostics" : "Votre diagnostic"}
-            </h2>
-            <div className="text-sm text-slate-500">
+        <section className="rounded-2xl border border-[#B8C9D7] bg-white p-6 shadow-[0_10px_30px_rgba(23,58,94,0.09)]">
+          <div className="mb-5 flex items-center justify-between border-b border-[#DFE8EF] pb-4">
+            <h2 className="text-lg font-semibold text-[#173A5E]">{isAdmin ? "Vos diagnostics" : "Votre diagnostic"}</h2>
+            <div className="rounded-full bg-[#EAF2F8] px-3 py-1 text-sm font-medium text-[#3676A8]">
               {sessions.length} session{sessions.length > 1 ? "s" : ""}
             </div>
           </div>
 
           {sessions.length === 0 ? (
-            <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-sm text-slate-600">
-              {isAdmin
-                ? "Aucun diagnostic n’a encore été créé sur ce compte administrateur."
-                : "Aucun diagnostic n’a encore été démarré sur votre accès."}
+            <div className="rounded-xl border border-dashed border-[#B8C9D7] bg-[#F5F8FA] px-4 py-6 text-sm text-[#66788A]">
+              {isAdmin ? "Aucun diagnostic n’a encore été créé sur ce compte administrateur." : "Aucun diagnostic n’a encore été démarré sur votre accès."}
             </div>
           ) : (
             <div className="space-y-4">
               {sessions.map((session) => (
-                <div
-                  key={session.id}
-                  className="rounded-xl border border-slate-200 bg-slate-50 p-4"
-                >
+                <div key={session.id} className="rounded-xl border border-[#C9D8E6] bg-[#F5F8FA] p-4 transition hover:border-[#9FB8CC] hover:bg-[#EEF4F8]">
                   <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
                     <div className="space-y-2">
                       <div>
-                        <div className="text-base font-semibold text-slate-900">
-                          Bilan de Santé — Diagnostic dirigeant
-                        </div>
-                        <div className="mt-1 text-xs text-slate-500">
-                          Session : {session.id}
-                        </div>
+                        <div className="text-base font-semibold text-[#173A5E]">Bilan de Santé — Diagnostic dirigeant</div>
+                        <div className="mt-1 text-xs text-[#738599]">Session : {session.id}</div>
                       </div>
-
-                      <div className="grid gap-3 text-sm text-slate-600 md:grid-cols-2 xl:grid-cols-4">
-                        <div>
-                          <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                            Phase
-                          </div>
-                          <div className="mt-1 font-medium text-slate-900">
-                            {phaseLabel(session.phase)}
-                          </div>
-                        </div>
-                        <div>
-                          <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                            Statut
-                          </div>
-                          <div className="mt-1 font-medium text-slate-900">
-                            {session.status ?? "n/a"}
-                          </div>
-                        </div>
-                        <div>
-                          <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                            Créé le
-                          </div>
-                          <div className="mt-1 font-medium text-slate-900">
-                            {formatDateTime(session.created_at)}
-                          </div>
-                        </div>
-                        <div>
-                          <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                            Mis à jour le
-                          </div>
-                          <div className="mt-1 font-medium text-slate-900">
-                            {formatDateTime(session.updated_at)}
-                          </div>
-                        </div>
+                      <div className="grid gap-3 text-sm text-[#586B7E] md:grid-cols-2 xl:grid-cols-4">
+                        <div><div className="text-xs font-semibold uppercase tracking-wide text-[#6F8498]">Phase</div><div className="mt-1 font-medium text-[#223E58]">{phaseLabel(session.phase)}</div></div>
+                        <div><div className="text-xs font-semibold uppercase tracking-wide text-[#6F8498]">Statut</div><div className="mt-1 font-medium text-[#223E58]">{session.status ?? "n/a"}</div></div>
+                        <div><div className="text-xs font-semibold uppercase tracking-wide text-[#6F8498]">Créé le</div><div className="mt-1 font-medium text-[#223E58]">{formatDateTime(session.created_at)}</div></div>
+                        <div><div className="text-xs font-semibold uppercase tracking-wide text-[#6F8498]">Mis à jour le</div><div className="mt-1 font-medium text-[#223E58]">{formatDateTime(session.updated_at)}</div></div>
                       </div>
                     </div>
-
                     <div className="flex flex-wrap gap-3 md:justify-end">
-                      <Link
-                        href={`/dashboard/${session.id}`}
-                        className="inline-flex items-center justify-center rounded-xl bg-slate-950 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-slate-800"
-                      >
+                      <Link href={`/dashboard/${session.id}`} className="inline-flex items-center justify-center rounded-xl bg-[#173A5E] px-4 py-2.5 text-sm font-medium text-white transition hover:bg-[#214F7B]">
                         Reprendre
                       </Link>
                     </div>
