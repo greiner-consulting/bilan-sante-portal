@@ -1,5 +1,6 @@
 import BrandMark from "./BrandMark";
 import DialogueDiagnosticPanel from "./DialogueDiagnosticPanel";
+import ReportBuilderPanel from "./ReportBuilderPanel";
 import { DIAGNOSTIC_JOURNEY_STEPS } from "@/lib/diagnostic/conversationProtocol";
 
 type Props = {
@@ -75,6 +76,8 @@ export default function SessionWorkspace({ sessionId }: Props) {
 
             <DialogueDiagnosticPanel sessionId={sessionId} />
           </section>
+
+          <ReportBuilderPanel sessionId={sessionId} />
         </main>
       </div>
     </div>
